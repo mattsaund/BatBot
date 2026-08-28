@@ -1,4 +1,15 @@
-**/__pycache__/
-*.pyc
+# Build output
+build/
+build-*/
+cmake-build-*/
+compile_commands.json
+.cache/
 
-myconf.txt
+# Models are large and personal; keep them out of the repo.
+*.gguf
+models/
+
+# Editors
+.vscode/
+.idea/
+*.swp
