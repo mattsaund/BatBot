@@ -1,3 +1,13 @@
+// SPDX-License-Identifier: MIT
+//
+// The application shell: layout, key handling, and the animation clock.
+//
+// This file owns the thread boundary. The engine runs elsewhere and pokes the
+// screen through PostEvent, which is the only FTXUI call safe to make from off
+// the UI thread; everything else here runs on the loop.
+//
+// Slash commands live in commands.cpp and the conversation in transcript.cpp,
+// so what remains is the shell itself.
 #include "batbot/ui/app.hpp"
 
 #include <algorithm>
@@ -10,36 +20,16 @@
 #include <ftxui/component/event.hpp>
 #include <ftxui/screen/terminal.hpp>
 
-#include "batbot/core/paths.hpp"
-#include "batbot/ui/roundtable.hpp"
-#include "batbot/ui/settings.hpp"
+#include "batbot/config/paths.hpp"
+#include "batbot/ui/widgets/roundtable.hpp"
+#include "batbot/ui/settings/settings_view.hpp"
 #include "batbot/ui/theme.hpp"
+#include "batbot/util/format.hpp"
 
 using namespace ftxui;  // NOLINT(google-build-using-namespace)
 
 namespace batbot::ui {
 namespace {
-
-std::string trim(std::string text) {
-    const auto not_space = [](unsigned char c) { return std::isspace(c) == 0; };
-    text.erase(text.begin(), std::find_if(text.begin(), text.end(), not_space));
-    text.erase(std::find_if(text.rbegin(), text.rend(), not_space).base(), text.end());
-    return text;
-}
-
-std::string format_double(double value, int precision) {
-    std::ostringstream out;
-    out << std::fixed << std::setprecision(precision) << value;
-    return out.str();
-}
-
-/// Milliseconds as something a human reads at a glance: "840ms", "3.2s".
-std::string format_duration(long ms) {
-    if (ms < 1000) {
-        return std::to_string(ms) + "ms";
-    }
-    return format_double(static_cast<double>(ms) / 1000.0, 1) + "s";
-}
 
 }  // namespace
 
@@ -122,120 +112,6 @@ App::TableView App::table_view() const {
     if (rows >= 34) { return TableView::Full; }
     if (rows >= 24) { return TableView::Compact; }
     return TableView::Strip;
-}
-
-Element App::render_turn(const Turn& turn) const {
-    Elements block;
-
-    block.push_back(hbox({
-        text("you ") | color(theme::kUser) | bold,
-        text("▸ ") | color(theme::kMeta),
-        paragraph(turn.prompt) | flex,
-    }));
-
-    // The route line is the whole point of the roundtable made textual: which
-    // expert took this turn, how sure BatBot was, and what the swap cost.
-    if (turn.route) {
-        const RouteDecision& route = *turn.route;
-        std::string line = "⟶ " + std::string(subject_name(route.subject));
-        line += " · " + format_double(route.confidence, 2);
-        line += " · " + std::string(route_source_name(route.source));
-        if (!route.detail.empty()) {
-            line += " · " + route.detail;
-        }
-        if (turn.load_ms > 0) {
-            line += " · swap " + format_duration(turn.load_ms);
-        }
-        block.push_back(text(line) | color(theme::kRoute));
-    }
-
-    if (!turn.reply.empty()) {
-        Element body = paragraph(turn.reply);
-        block.push_back(turn.failed ? body | color(theme::kError) : body);
-    } else if (turn.streaming) {
-        block.push_back(text("…") | color(theme::kMeta) | dim);
-    }
-
-    if (!turn.streaming && turn.output_tokens > 0) {
-        std::string stats = std::to_string(turn.output_tokens) + " tok";
-        if (turn.tokens_per_second > 0.0) {
-            stats += " · " + format_double(turn.tokens_per_second, 1) + " tok/s";
-        }
-        if (turn.cancelled) {
-            stats += " · cancelled";
-        }
-        block.push_back(text(stats) | color(theme::kMeta) | dim);
-    }
-
-    block.push_back(text(" "));
-    return vbox(std::move(block));
-}
-
-Element App::render_welcome() const {
-    const std::vector<Subject> configured = config_.configured_experts();
-    if (!configured.empty()) {
-        return vbox({
-            text("BatBot is ready. " + std::to_string(configured.size())
-                 + " of 9 expert seats are filled.") | color(theme::kMeta),
-            text("Ask anything; BatBot picks the expert. /help lists the commands.")
-                | color(theme::kMeta) | dim,
-            text(" "),
-        });
-    }
-
-    // First run. This is the screen most people will see first, so it says
-    // exactly what to do rather than merely reporting that nothing works.
-    // BatBot ships no models, so this is also where that expectation is set.
-    return vbox({
-        text("No expert models are assigned yet.") | color(theme::kNotice) | bold,
-        text(" "),
-        text("BatBot does not come with models -- bring your own GGUF files.")
-            | color(theme::kMeta),
-        text(" "),
-        text("  1. Put your .gguf files in the models directory:") | color(theme::kMeta),
-        text("       " + config_.resolved_models_dir().string()) | color(theme::kAccent),
-        text("  2. Press ctrl-e to open settings.") | color(theme::kMeta),
-        text("  3. Assign a model to the delegator and to any expert seats") | color(theme::kMeta),
-        text("     you want, then ctrl-s to save.") | color(theme::kMeta),
-        text(" "),
-        text("A ~1B instruct model makes a good delegator. Any model can stand in")
-            | color(theme::kMeta) | dim,
-        text("as an expert while you try things out.") | color(theme::kMeta) | dim,
-        text(" "),
-    });
-}
-
-Element App::render_transcript(const Snapshot& snapshot) const {
-    Elements rows;
-
-    if (!snapshot.notices.empty()) {
-        Elements notices;
-        for (const std::string& notice : snapshot.notices) {
-            // paragraph, not text: several of these are long enough to be cut
-            // off at the panel edge, and a truncated warning is a useless one.
-            notices.push_back(hbox({
-                text("• ") | color(theme::kNotice),
-                paragraph(notice) | color(theme::kNotice) | dim | flex,
-            }));
-        }
-        rows.push_back(vbox(std::move(notices)));
-        rows.push_back(text(" "));
-    }
-
-    if (snapshot.turns.empty()) {
-        rows.push_back(render_welcome());
-    }
-
-    for (std::size_t i = 0; i < snapshot.turns.size(); ++i) {
-        Element block = render_turn(snapshot.turns[i]);
-        // Focus drives the scroll position: either the newest turn (follow
-        // mode) or whichever turn the user paged to.
-        const bool focused = follow_ ? (i + 1 == snapshot.turns.size())
-                                     : (static_cast<int>(i) == focus_turn_);
-        rows.push_back(focused ? block | ftxui::focus : block);
-    }
-
-    return vbox(std::move(rows)) | yframe;
 }
 
 Element App::render_status(const Snapshot& snapshot) const {
@@ -330,134 +206,8 @@ void App::save_settings() {
     engine_->apply_config(std::move(edited));
 }
 
-void App::say(std::string message) {
-    state_.add_notice(std::move(message));
-    screen_.PostEvent(Event::Custom);
-}
-
-bool App::handle_command(const std::string& text) {
-    if (text.empty() || text.front() != '/') {
-        return false;
-    }
-
-    std::istringstream stream(text.substr(1));
-    std::string command;
-    stream >> command;
-    std::string rest;
-    std::getline(stream, rest);
-    rest = trim(rest);
-
-    std::transform(command.begin(), command.end(), command.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-
-    if (command == "quit" || command == "exit" || command == "q") {
-        should_exit_ = true;
-        screen_.Exit();
-        return true;
-    }
-
-    if (command == "help" || command == "h") {
-        state_.clear_notices();
-        say("/help                 this list");
-        say("/<subject> <prompt>   send straight to one expert, e.g. /physics why is the sky blue");
-        say("/experts              which seats are filled");
-        say("/devices              compute devices llama.cpp found");
-        say("/release              unload the resident expert and free its memory");
-        say("/clear                clear the transcript and the experts' history");
-        say("/config               open the settings screen (also ctrl-e)");
-        say("/models               list the .gguf files in the models directory");
-        say("/paths                where the config, models and log live");
-        say("/quit                 leave");
-        return true;
-    }
-
-    if (command == "clear") {
-        state_.clear_turns();
-        state_.clear_notices();
-        engine_->reset_history();
-        follow_ = true;
-        return true;
-    }
-
-    if (command == "config" || command == "settings") {
-        open_settings();
-        return true;
-    }
-
-    if (command == "paths") {
-        state_.clear_notices();
-        say("config: " + paths::config_file().string());
-        say("models: " + config_.resolved_models_dir().string());
-        say("log:    " + paths::log_file().string());
-        say("trust:  " + paths::trust_file().string());
-        return true;
-    }
-
-    if (command == "models") {
-        state_.clear_notices();
-        const std::filesystem::path dir = config_.resolved_models_dir();
-        const std::vector<ModelFile> found = scan_models(dir);
-        say("models directory: " + dir.string());
-        if (found.empty()) {
-            say("no .gguf files here yet -- drop some in, then use /config to assign them");
-        }
-        for (const ModelFile& file : found) {
-            say("  " + file.name + "  (" + file.size_label() + ")");
-        }
-        return true;
-    }
-
-    if (command == "experts") {
-        state_.clear_notices();
-        say("models directory: " + config_.resolved_models_dir().string());
-        for (const SubjectInfo& info : all_subjects()) {
-            const ModelParams& params = config_.experts[static_cast<std::size_t>(info.subject)];
-            if (params.model.empty()) {
-                say(std::string(info.name) + ": (no model assigned)");
-            } else if (!std::filesystem::exists(params.path)) {
-                say(std::string(info.name) + ": " + params.model + "  -- MISSING at " + params.path);
-            } else {
-                say(std::string(info.name) + ": " + params.model);
-            }
-        }
-        return true;
-    }
-
-    if (command == "devices") {
-        state_.clear_notices();
-        const std::vector<std::string> devices = ModelHost::devices();
-        if (devices.empty()) {
-            say("no compute devices reported yet");
-        }
-        for (const std::string& device : devices) {
-            say("device: " + device);
-        }
-        return true;
-    }
-
-    if (command == "release") {
-        engine_->release_expert();
-        return true;
-    }
-
-    // Anything else that names a subject pins that expert for this prompt.
-    if (const std::optional<Subject> subject = subject_from_string(command)) {
-        if (rest.empty()) {
-            say("usage: /" + command + " <prompt>");
-            return true;
-        }
-        state_.clear_notices();
-        engine_->submit(rest, subject);
-        follow_ = true;
-        return true;
-    }
-
-    say("unknown command: /" + command + "  (try /help)");
-    return true;
-}
-
 void App::on_submit() {
-    const std::string text = trim(input_text_);
+    const std::string text = format::trim(input_text_);
     input_text_.clear();
     if (text.empty()) {
         return;

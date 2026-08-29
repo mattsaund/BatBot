@@ -43,17 +43,35 @@ include(cmake/BatBotDependencies.cmake)
 # future `batbot --repl`, or a daemon) without dragging FTXUI along.
 # ---------------------------------------------------------------------------
 add_library(batbot_core STATIC
-    src/core/subject.cpp
-    src/core/text.cpp
-    src/core/config.cpp
-    src/core/trust.cpp
-    src/core/uninstall.cpp
-    src/core/paths.cpp
-    src/core/model_catalog.cpp
-    src/core/model_host.cpp
-    src/core/router.cpp
-    src/core/state.cpp
-    src/core/engine.cpp
+    # util: small standalone helpers with no BatBot dependencies
+    src/util/text.cpp
+    src/util/format.cpp
+
+    # config: what is on disk -- settings, paths, folder trust
+    src/config/paths.cpp
+    src/config/config.cpp
+    src/config/config_io.cpp
+    src/config/trust.cpp
+
+    # routing: the subject table and the two routers
+    src/routing/subject.cpp
+    src/routing/router.cpp
+
+    # llm: everything that touches llama.cpp
+    src/llm/model_catalog.cpp
+    src/llm/sampling.cpp
+    src/llm/loaded_model.cpp
+    src/llm/model_host.cpp
+
+    # engine: the delegation loop and the state the UI reads
+    src/engine/state.cpp
+    src/engine/route_policy.cpp
+    src/engine/engine.cpp
+
+    # app: process-level actions that are not the TUI
+    src/app/cli.cpp
+    src/app/trust_gate.cpp
+    src/app/uninstall.cpp
 )
 add_library(batbot::core ALIAS batbot_core)
 
@@ -72,10 +90,15 @@ target_compile_definitions(batbot_core PUBLIC
 # ---------------------------------------------------------------------------
 add_executable(batbot
     src/main.cpp
-    src/ui/bat_sprite.cpp
-    src/ui/roundtable.cpp
-    src/ui/settings.cpp
     src/ui/app.cpp
+    src/ui/commands.cpp
+    src/ui/transcript.cpp
+    src/ui/widgets/bat_sprite.cpp
+    src/ui/widgets/roundtable.cpp
+    src/ui/settings/settings_view.cpp
+    src/ui/settings/line_editor.cpp
+    src/ui/settings/model_picker.cpp
+    src/ui/settings/directory_browser.cpp
 )
 
 target_link_libraries(batbot PRIVATE

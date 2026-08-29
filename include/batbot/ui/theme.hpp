@@ -1,9 +1,10 @@
+// SPDX-License-Identifier: MIT
 // One place for every colour BatBot draws with.
 #pragma once
 
 #include <ftxui/screen/color.hpp>
 
-#include "batbot/core/state.hpp"
+#include "batbot/engine/state.hpp"
 
 namespace batbot::ui {
 

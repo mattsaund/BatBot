@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // batbot-routebench -- measure how well a model does the delegator's job.
 //
 // Routing quality is the single thing that decides whether BatBot sends your
@@ -15,10 +16,10 @@
 #include <string>
 #include <vector>
 
-#include "batbot/core/config.hpp"
-#include "batbot/core/model_host.hpp"
-#include "batbot/core/paths.hpp"
-#include "batbot/core/router.hpp"
+#include "batbot/config/config.hpp"
+#include "batbot/llm/model_host.hpp"
+#include "batbot/config/paths.hpp"
+#include "batbot/routing/router.hpp"
 
 using namespace batbot;
 

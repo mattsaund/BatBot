@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // A deliberately tiny test harness.
 //
 // BatBot already fetches three dependencies; a test framework would be a

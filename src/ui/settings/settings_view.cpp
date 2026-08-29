@@ -1,0 +1,440 @@
+// SPDX-License-Identifier: MIT
+#include "batbot/ui/settings/settings_view.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cstdio>
+#include <filesystem>
+#include <system_error>
+
+#include "batbot/config/paths.hpp"
+#include "batbot/ui/theme.hpp"
+
+using namespace ftxui;  // NOLINT(google-build-using-namespace)
+
+namespace batbot::ui {
+namespace {
+
+/// Sentinel seat meaning "the delegator", which is not one of the subjects.
+constexpr std::size_t kRouterSeat = kSubjectCount;
+
+std::string format_float(float value) {
+    std::array<char, 32> buffer{};
+    std::snprintf(buffer.data(), buffer.size(), "%.2f", static_cast<double>(value));
+    return buffer.data();
+}
+
+}  // namespace
+
+SettingsView::SettingsView(Config config) : config_(std::move(config)) {
+    refresh();
+}
+
+void SettingsView::set_config(Config config) {
+    config_ = std::move(config);
+    dirty_  = false;
+    refresh();
+}
+
+void SettingsView::refresh() {
+    models_ = scan_models(config_.resolved_models_dir());
+    build_rows();
+    if (selected_ >= rows_.size()) {
+        selected_ = 0;
+    }
+    // Never leave the cursor parked on a header, which cannot be edited.
+    if (!rows_.empty() && rows_[selected_].kind == Kind::Header) {
+        move_selection(1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rows
+//
+// Built fresh rather than kept, because the pointers below refer into config_
+// and a reassignment of the whole struct would leave them dangling.
+// ---------------------------------------------------------------------------
+
+void SettingsView::build_rows() {
+    rows_.clear();
+
+    const auto header = [&](std::string label) {
+        rows_.push_back({Kind::Header, std::move(label), "", nullptr, nullptr,
+                         nullptr, nullptr, 0, {}});
+    };
+
+    header("MODELS");
+    rows_.push_back({Kind::Directory, "Models directory",
+                     "where BatBot looks for .gguf files", &config_.models_dir,
+                     nullptr, nullptr, nullptr, 0, {}});
+
+    header("DELEGATOR");
+    rows_.push_back({Kind::ModelRef, "Router model",
+                     "small model that picks the expert; blank falls back to keywords",
+                     &config_.router.model, nullptr, nullptr, nullptr, kRouterSeat, {}});
+
+    header("EXPERTS");
+    for (const SubjectInfo& info : all_subjects()) {
+        const auto seat = static_cast<std::size_t>(info.subject);
+        rows_.push_back({Kind::ModelRef, std::string(info.name), std::string(info.blurb),
+                         &config_.experts[seat].model, nullptr, nullptr, nullptr, seat, {}});
+    }
+
+    header("ROUTING");
+    rows_.push_back({Kind::Float, "Min confidence",
+                     "below this the delegator is treated as undecided",
+                     nullptr, nullptr, &config_.routing.min_confidence, nullptr, 0, {}});
+    rows_.push_back({Kind::Bool, "Use fallback expert",
+                     "empty seats send work to Fallback rather than elsewhere",
+                     nullptr, nullptr, nullptr, &config_.routing.use_fallback_expert, 0, {}});
+
+    header("DEFAULTS");
+    ModelParams& d = config_.defaults;
+    rows_.push_back({Kind::Int,   "Context size",   "tokens of context per expert",
+                     nullptr, &d.n_ctx, nullptr, nullptr, 0, {}});
+    rows_.push_back({Kind::Int,   "GPU layers",     "-1 offloads as much as fits",
+                     nullptr, &d.n_gpu_layers, nullptr, nullptr, 0, {}});
+    rows_.push_back({Kind::Int,   "Batch size",     "prompt ingestion batch",
+                     nullptr, &d.n_batch, nullptr, nullptr, 0, {}});
+    rows_.push_back({Kind::Int,   "Threads",        "0 picks automatically",
+                     nullptr, &d.n_threads, nullptr, nullptr, 0, {}});
+    rows_.push_back({Kind::Int,   "Max tokens",     "hard cap on a single reply",
+                     nullptr, &d.max_tokens, nullptr, nullptr, 0, {}});
+    rows_.push_back({Kind::Float, "Temperature",    "0 is greedy and deterministic",
+                     nullptr, nullptr, &d.temperature, nullptr, 0, {}});
+    rows_.push_back({Kind::Float, "Top-p",          "nucleus sampling cutoff",
+                     nullptr, nullptr, &d.top_p, nullptr, 0, {}});
+    rows_.push_back({Kind::Int,   "Top-k",          "candidates kept before sampling",
+                     nullptr, &d.top_k, nullptr, nullptr, 0, {}});
+    rows_.push_back({Kind::Float, "Min-p",          "minimum relative probability",
+                     nullptr, nullptr, &d.min_p, nullptr, 0, {}});
+    rows_.push_back({Kind::Float, "Repeat penalty", "1.0 disables it",
+                     nullptr, nullptr, &d.repeat_penalty, nullptr, 0, {}});
+    rows_.push_back({Kind::Bool,  "Flash attention", "faster attention where supported",
+                     nullptr, nullptr, nullptr, &d.flash_attn, 0, {}});
+    rows_.push_back({Kind::Enum,  "GPU split mode", "how an expert spreads across GPUs",
+                     &d.split_mode, nullptr, nullptr, nullptr, 0,
+                     {"layer", "row", "tensor", "none"}});
+
+    header("BEHAVIOUR");
+    rows_.push_back({Kind::Text, "System prompt", "sent to every expert",
+                     &config_.system_prompt, nullptr, nullptr, nullptr, 0, {}});
+
+    header("INTERFACE");
+    rows_.push_back({Kind::Int,  "Animation ms", "frame interval while busy",
+                     nullptr, &config_.ui.animation_ms, nullptr, nullptr, 0, {}});
+    rows_.push_back({Kind::Bool, "Show roundtable", "draw the ring of experts",
+                     nullptr, nullptr, nullptr, &config_.ui.show_roundtable, 0, {}});
+    rows_.push_back({Kind::Bool, "Unicode glyphs", "off uses a pure-ASCII bat",
+                     nullptr, nullptr, nullptr, &config_.ui.unicode, 0, {}});
+}
+
+std::string SettingsView::value_of(const Row& row) const {
+    switch (row.kind) {
+        case Kind::Header:   return {};
+        case Kind::Directory:
+            // Blank means "the default". Showing the blank would leave an empty
+            // field with nothing to edit, so resolve it first.
+            return config_.resolved_models_dir().string();
+        case Kind::ModelRef:
+        case Kind::Text:
+        case Kind::Enum:     return row.text != nullptr ? *row.text : std::string{};
+        case Kind::Int:      return row.integer != nullptr ? std::to_string(*row.integer)
+                                                           : std::string{};
+        case Kind::Float:    return row.real != nullptr ? format_float(*row.real) : std::string{};
+        case Kind::Bool:     return (row.flag != nullptr && *row.flag) ? "on" : "off";
+    }
+    return {};
+}
+
+void SettingsView::move_selection(int delta) {
+    if (rows_.empty()) {
+        return;
+    }
+    auto index = static_cast<long>(selected_);
+    const auto count = static_cast<long>(rows_.size());
+    // Walk until a non-header lands under the cursor. Bounded by the row count
+    // so a screen of nothing but headers cannot spin forever.
+    for (long step = 0; step < count; ++step) {
+        index += delta;
+        if (index < 0)      { index = count - 1; }
+        if (index >= count) { index = 0; }
+        if (rows_[static_cast<std::size_t>(index)].kind != Kind::Header) {
+            selected_ = static_cast<std::size_t>(index);
+            return;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Editing
+// ---------------------------------------------------------------------------
+
+void SettingsView::activate_selection() {
+    const Row& row = rows_[selected_];
+
+    switch (row.kind) {
+        case Kind::Header:
+            return;
+        case Kind::Bool:
+            // A checkbox needs no edit mode; Enter is the whole interaction.
+            *row.flag = !*row.flag;
+            dirty_    = true;
+            return;
+        case Kind::Enum: {
+            const auto it = std::find(row.options.begin(), row.options.end(), *row.text);
+            const std::size_t next = (it == row.options.end())
+                ? 0
+                : (static_cast<std::size_t>(std::distance(row.options.begin(), it)) + 1)
+                      % row.options.size();
+            *row.text = row.options[next];
+            dirty_    = true;
+            return;
+        }
+        case Kind::ModelRef:
+            dialog_target_ = selected_;
+            picker_.open(models_, *row.text, row.label);
+            return;
+        case Kind::Directory:
+            dialog_target_ = selected_;
+            browser_.open(config_.resolved_models_dir());
+            return;
+        default:
+            begin_typing();
+            return;
+    }
+}
+
+void SettingsView::begin_typing() {
+    const Row& row = rows_[selected_];
+    if (row.kind == Kind::Header || row.kind == Kind::Bool || row.kind == Kind::Enum) {
+        return;
+    }
+    editor_.begin(value_of(row));
+}
+
+void SettingsView::commit_edit() {
+    Row& row = rows_[selected_];
+    const std::string text = editor_.value();
+    editor_.cancel();
+
+    switch (row.kind) {
+        case Kind::Directory:
+        case Kind::Text:
+            *row.text = text;
+            dirty_    = true;
+            // Moving the models directory changes what the picker can offer.
+            if (row.text == &config_.models_dir) {
+                refresh();
+            }
+            break;
+        case Kind::Int:
+            // A typo should cost the edit, not the session: report it and keep
+            // the previous value.
+            try {
+                *row.integer = std::stoi(text);
+                dirty_       = true;
+            } catch (const std::exception&) {
+                status_ = "'" + text + "' is not a whole number";
+            }
+            break;
+        case Kind::Float:
+            try {
+                *row.real = std::stof(text);
+                dirty_    = true;
+            } catch (const std::exception&) {
+                status_ = "'" + text + "' is not a number";
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Input
+//
+// Dispatch order matters: whichever dialog or editor is open owns the keyboard,
+// so a '.' typed into a path is never mistaken for the browser's hidden-files
+// toggle.
+// ---------------------------------------------------------------------------
+
+SettingsAction SettingsView::handle(const Event& event, bool& consumed) {
+    consumed = true;
+
+    if (browser_.active()) {
+        if (const auto chosen = browser_.handle(event)) {
+            *rows_[dialog_target_].text = chosen->string();
+            dirty_ = true;
+            refresh();
+            status_ = "models directory set";
+        } else if (browser_.wants_manual_entry()) {
+            selected_ = dialog_target_;
+            editor_.begin(browser_.path().string());
+        }
+        return SettingsAction::None;
+    }
+
+    if (picker_.active()) {
+        if (const auto chosen = picker_.handle(event)) {
+            *rows_[dialog_target_].text = *chosen;
+            dirty_ = true;
+        }
+        return SettingsAction::None;
+    }
+
+    if (editor_.active()) {
+        if (event == Event::Return) {
+            commit_edit();
+        } else if (event == Event::Escape) {
+            editor_.cancel();
+        } else {
+            editor_.handle(event);
+        }
+        return SettingsAction::None;
+    }
+
+    if (event == Event::ArrowUp   || event == Event::Character('k')) { move_selection(-1); return SettingsAction::None; }
+    if (event == Event::ArrowDown || event == Event::Character('j')) { move_selection(1);  return SettingsAction::None; }
+    if (event == Event::Return || event == Event::Character(' ')) {
+        activate_selection();
+        return SettingsAction::None;
+    }
+    if (event == Event::Character('e')) {
+        // Type a value outright, skipping whatever dialog Enter would open.
+        begin_typing();
+        return SettingsAction::None;
+    }
+    if (event == Event::Character('r')) {
+        refresh();
+        status_ = "rescanned " + config_.resolved_models_dir().string();
+        return SettingsAction::None;
+    }
+    if (event == Event::CtrlS) { return SettingsAction::Apply; }
+    if (event == Event::Escape) { return SettingsAction::Close; }
+
+    consumed = false;
+    return SettingsAction::None;
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+Element SettingsView::render_row(const Row& row, std::size_t index) const {
+    if (row.kind == Kind::Header) {
+        return vbox({
+            text(" "),
+            text("  " + row.label) | color(theme::kAccent) | bold,
+        });
+    }
+
+    const bool selected = index == selected_;
+
+    if (selected && editor_.active()) {
+        return hbox({
+            text(" > ") | color(theme::kAccent) | bold,
+            text(row.label) | bold | size(WIDTH, EQUAL, 20),
+            editor_.render() | flex,
+        }) | bgcolor(Color::GrayDark);
+    }
+
+    std::string value = value_of(row);
+    Color value_color = theme::kUser;
+
+    if (row.kind == Kind::Directory) {
+        std::error_code ec;
+        if (!std::filesystem::is_directory(value, ec)) {
+            value += "  (does not exist)";
+            value_color = theme::kError;
+        }
+    } else if (row.kind == Kind::ModelRef) {
+        if (value.empty()) {
+            value       = "(none)";
+            value_color = theme::kMeta;
+        } else {
+            // A seat pointing at a file that is not there is the single most
+            // useful thing this screen can say, so say it inline.
+            const std::filesystem::path resolved =
+                resolve_model_ref(config_.resolved_models_dir(), value);
+            if (!std::filesystem::exists(resolved)) {
+                value += "  (missing)";
+                value_color = theme::kError;
+            } else {
+                value_color = theme::kSeatActive;
+            }
+        }
+    } else if (row.kind == Kind::Bool) {
+        value_color = (row.flag != nullptr && *row.flag) ? theme::kSeatActive : theme::kMeta;
+    }
+
+    Element label = text(row.label);
+    Element line  = hbox({
+        text(selected ? " > " : "   ") | color(theme::kAccent) | bold,
+        (selected ? label | bold : label) | size(WIDTH, EQUAL, 20),
+        text(value) | color(value_color) | flex,
+    });
+    return selected ? line | bgcolor(Color::GrayDark) : line;
+}
+
+Element SettingsView::footer_hint() const {
+    if (editor_.active()) {
+        return text(" ←→ move   ctrl-a/e ends   ctrl-w del word   ctrl-u clear   "
+                    "enter save   esc cancel ");
+    }
+    if (!rows_.empty() && selected_ < rows_.size()) {
+        switch (rows_[selected_].kind) {
+            case Kind::Directory:
+                return text(" enter browse folders   e type a path   ctrl-s save   esc back ");
+            case Kind::ModelRef:
+                return text(" enter choose a model   r rescan   ctrl-s save   esc back ");
+            default:
+                break;
+        }
+    }
+    return text(" ↑↓ move   enter edit   e type   r rescan   ctrl-s save   esc back ");
+}
+
+Element SettingsView::render() const {
+    Elements lines;
+    for (std::size_t i = 0; i < rows_.size(); ++i) {
+        Element row = render_row(rows_[i], i);
+        lines.push_back(i == selected_ ? row | ftxui::focus : row);
+    }
+
+    const std::string dir   = config_.resolved_models_dir().string();
+    const std::string count = std::to_string(models_.size()) + " model"
+                            + (models_.size() == 1 ? "" : "s") + " found";
+
+    Elements footer{footer_hint() | color(theme::kMeta) | dim};
+    if (dirty_) {
+        footer.push_back(filler());
+        footer.push_back(text("unsaved changes  ") | color(theme::kNotice) | bold);
+    }
+    if (!status_.empty()) {
+        footer.push_back(filler());
+        footer.push_back(text(status_ + "  ") | color(theme::kSeatActive));
+    }
+
+    Element screen = window(
+        text(" Settings ") | bold | color(theme::kBat),
+        vbox({
+            hbox({
+                text("  " + dir) | color(theme::kMeta),
+                filler(),
+                text(count + "  ") | color(theme::kMeta) | dim,
+            }),
+            separator(),
+            vbox(std::move(lines)) | yframe | flex,
+            separator(),
+            hbox(std::move(footer)),
+        }));
+
+    // dbox layers a dialog over the list rather than replacing it, so the row
+    // being changed stays visible behind it.
+    if (picker_.active())  { return dbox({screen, picker_.render(dir)}); }
+    if (browser_.active()) { return dbox({screen, browser_.render()}); }
+    return screen;
+}
+
+}  // namespace batbot::ui

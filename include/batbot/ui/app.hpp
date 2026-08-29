@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // The terminal application: layout, input handling, slash commands, and the
 // animation clock that keeps BatBot moving while an expert loads.
 #pragma once
@@ -11,11 +12,11 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 
-#include "batbot/core/config.hpp"
-#include "batbot/core/engine.hpp"
-#include "batbot/core/state.hpp"
-#include "batbot/ui/bat_sprite.hpp"
-#include "batbot/ui/settings.hpp"
+#include "batbot/config/config.hpp"
+#include "batbot/engine/engine.hpp"
+#include "batbot/engine/state.hpp"
+#include "batbot/ui/widgets/bat_sprite.hpp"
+#include "batbot/ui/settings/settings_view.hpp"
 
 namespace batbot::ui {
 

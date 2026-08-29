@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Tests for the parts of BatBot that need no model loaded: the subject table,
 // the router grammar, keyword routing, config inheritance, the trust store,
 // path expansion, and UTF-8 chunking.
@@ -8,14 +9,15 @@
 
 #include <nlohmann/json.hpp>
 
-#include "batbot/core/config.hpp"
-#include "batbot/core/model_catalog.hpp"
-#include "batbot/core/paths.hpp"
-#include "batbot/core/router.hpp"
-#include "batbot/core/state.hpp"
-#include "batbot/core/subject.hpp"
-#include "batbot/core/text.hpp"
-#include "batbot/core/trust.hpp"
+#include "batbot/config/config.hpp"
+#include "batbot/engine/route_policy.hpp"
+#include "batbot/llm/model_catalog.hpp"
+#include "batbot/config/paths.hpp"
+#include "batbot/routing/router.hpp"
+#include "batbot/engine/state.hpp"
+#include "batbot/routing/subject.hpp"
+#include "batbot/util/text.hpp"
+#include "batbot/config/trust.hpp"
 #include "harness.hpp"
 
 using namespace batbot;
@@ -268,6 +270,111 @@ TEST(keyword_router_confidence_reflects_ambiguity) {
     // as one that only ever points at maths.
     CHECK(clear.confidence > mixed.confidence);
     CHECK(clear.confidence <= 0.95F);
+}
+
+// ---------------------------------------------------------------------------
+// Routing policy
+//
+// What happens to the delegator's answer. Extracted from the engine as a pure
+// function precisely so these rules can be checked without loading a model.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// A config with the named seats filled, so policy tests read as a sentence.
+Config config_with(std::initializer_list<Subject> filled) {
+    Config config;
+    for (const Subject seat : filled) {
+        config.experts[static_cast<std::size_t>(seat)].model = "some-model.gguf";
+    }
+    return config;
+}
+
+RouteDecision proposal(Subject subject, float confidence, RouteSource source) {
+    RouteDecision decision;
+    decision.subject    = subject;
+    decision.confidence = confidence;
+    decision.source     = source;
+    return decision;
+}
+
+}  // namespace
+
+TEST(a_confident_route_to_a_filled_seat_stands) {
+    const Config config = config_with({Subject::Physics, Subject::Fallback});
+    const RouteDecision out =
+        apply_route_policy(proposal(Subject::Physics, 0.95F, RouteSource::Model), config);
+    CHECK(out.subject == Subject::Physics);
+    CHECK(out.source  == RouteSource::Model);
+}
+
+TEST(an_unconfident_route_goes_to_the_fallback_seat) {
+    Config config = config_with({Subject::Physics, Subject::Fallback});
+    config.routing.min_confidence = 0.60F;
+
+    const RouteDecision out =
+        apply_route_policy(proposal(Subject::Physics, 0.40F, RouteSource::Model), config);
+    // Below the floor the delegator is treated as having made no decision.
+    CHECK(out.subject == Subject::Fallback);
+    CHECK(out.source  == RouteSource::Fallback);
+    CHECK(out.detail.find("undecided") != std::string::npos);
+    CHECK(out.detail.find("Physics")   != std::string::npos);
+}
+
+TEST(a_pinned_route_ignores_the_confidence_floor) {
+    Config config = config_with({Subject::Physics, Subject::Fallback});
+    config.routing.min_confidence = 0.99F;
+
+    // The user chose this expert; second-guessing them would be wrong even at
+    // a confidence the model never reports.
+    const RouteDecision out =
+        apply_route_policy(proposal(Subject::Physics, 1.0F, RouteSource::Forced), config);
+    CHECK(out.subject == Subject::Physics);
+    CHECK(out.source  == RouteSource::Forced);
+}
+
+TEST(a_zero_floor_disables_the_confidence_check) {
+    Config config = config_with({Subject::Physics, Subject::Fallback});
+    config.routing.min_confidence = 0.0F;
+    const RouteDecision out =
+        apply_route_policy(proposal(Subject::Physics, 0.01F, RouteSource::Model), config);
+    CHECK(out.subject == Subject::Physics);
+}
+
+TEST(an_empty_seat_sends_work_to_the_fallback) {
+    const Config config = config_with({Subject::Physics, Subject::Fallback});
+    const RouteDecision out =
+        apply_route_policy(proposal(Subject::Chemistry, 0.95F, RouteSource::Model), config);
+    CHECK(out.subject == Subject::Fallback);
+    CHECK(out.source  == RouteSource::Fallback);
+    CHECK(out.detail.find("Chemistry has no model") != std::string::npos);
+}
+
+TEST(with_no_fallback_configured_any_filled_seat_is_used) {
+    // A partly-configured install should still answer rather than fail, and
+    // should say plainly that it substituted.
+    const Config config = config_with({Subject::Physics});
+    const RouteDecision out =
+        apply_route_policy(proposal(Subject::Chemistry, 0.95F, RouteSource::Model), config);
+    CHECK(out.subject == Subject::Physics);
+    CHECK(out.source  == RouteSource::Fallback);
+    CHECK(out.detail.find("used Physics") != std::string::npos);
+}
+
+TEST(with_nothing_configured_the_route_reports_it) {
+    const Config config;
+    const RouteDecision out =
+        apply_route_policy(proposal(Subject::Chemistry, 0.95F, RouteSource::Model), config);
+    CHECK(out.detail.find("no experts configured") != std::string::npos);
+}
+
+TEST(disabling_the_fallback_expert_skips_it_for_empty_seats) {
+    Config config = config_with({Subject::Physics, Subject::Fallback});
+    config.routing.use_fallback_expert = false;
+
+    const RouteDecision out =
+        apply_route_policy(proposal(Subject::Chemistry, 0.95F, RouteSource::Model), config);
+    CHECK(out.subject == Subject::Physics);
 }
 
 // ---------------------------------------------------------------------------

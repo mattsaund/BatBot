@@ -212,7 +212,7 @@ opens a browser showing how many GGUFs sit in each candidate folder:
 │   experts/                                              9 model│
 │   archive/                                             2 models│
 ├────────────────────────────────────────────────────────────────┤
-│ ↑↓ move   enter open/choose   ← up   ~ home   e type   esc     │
+│ ↑↓  enter open  ← up  ~ home  e type  esc    . show 32 hidden  │
 ╰────────────────────────────────────────────────────────────────╯
 ```
 
@@ -554,34 +554,56 @@ tail -f ~/.local/share/batbot/batbot.log
 ## How it fits together
 
 ```
-install.sh        one-command install: deps, GPU backend, build, PATH
-tools/            batbot-routebench, for measuring a candidate delegator
-tests/            unit tests for the model-free logic, plus installer logic
-
-main.cpp          trust gate, then hands off to the TUI
-  │
-  ├── ui::App     FTXUI layout, slash commands, animation clock   [UI thread]
-  │     ├── roundtable + bat sprite
-  │     └── SettingsView   edit every config value; ctrl-s applies it live
-  │
-  └── Engine      route → JIT swap → generate                 [worker thread]
-        ├── Router        KeywordRouter | ModelRouter (GBNF-constrained)
-        ├── ModelHost     owns llama.cpp; router resident, one expert at a time
-        ├── ModelCatalog  what .gguf files the models directory holds
-        └── AppState      the only shared memory; mutex-guarded snapshots
+src/
+├── main.cpp        parse, trust, hand off -- 40 lines
+├── app/            things that happen instead of the TUI
+│   ├── cli.cpp         argument parsing, banner, usage
+│   ├── trust_gate.cpp  the folder-trust prompt
+│   └── uninstall.cpp   batbot --uninstall
+├── config/         what lives on disk
+│   ├── config.cpp      the Config type's own behaviour
+│   ├── config_io.cpp   reading and writing config.json
+│   ├── paths.cpp       XDG locations
+│   └── trust.cpp       the folder-trust store
+├── routing/        deciding who answers
+│   ├── subject.cpp     the subject table; grammar and prompt come from it
+│   └── router.cpp      KeywordRouter and ModelRouter
+├── llm/            everything that touches llama.cpp
+│   ├── model_host.cpp    owns the backend; one expert resident at a time
+│   ├── loaded_model.cpp  the generation loop
+│   ├── sampling.cpp      building a sampler chain
+│   └── model_catalog.cpp reading the models directory
+├── engine/         the delegation loop            [worker thread]
+│   ├── engine.cpp        route -> JIT swap -> generate
+│   ├── route_policy.cpp  what to do with the delegator's answer
+│   └── state.cpp         the only memory the two threads share
+├── ui/                                            [UI thread]
+│   ├── app.cpp         shell, key handling, animation clock
+│   ├── commands.cpp    slash commands
+│   ├── transcript.cpp  drawing the conversation
+│   ├── widgets/        bat sprite, roundtable
+│   └── settings/       view, directory browser, model picker, line editor
+└── util/           text and formatting helpers
 ```
 
-Two threads, one boundary. The engine never touches FTXUI and the UI never
-touches llama.cpp; they meet only at `AppState`. That is what lets the bat keep
-animating while a 30B expert loads.
+`include/batbot/` mirrors this exactly. Two threads, one boundary: the engine
+never touches FTXUI and the UI never touches llama.cpp, and they meet only at
+`AppState`. That is what lets the bat keep animating while a 30B expert loads.
 
-Settings changes cross the same boundary as prompts: saving from the settings
+Settings changes cross the same boundary as prompts. Saving from the settings
 screen enqueues the new config on the engine's own queue, so it is applied
 between requests and can never land in the middle of a generation.
 
-**The router cannot hallucinate a subject.** Its output is constrained by a GBNF
-grammar generated from the subject table, so an invalid route is not unlikely —
-it is unrepresentable:
+**The subject table is the single source of truth.** The routing grammar, the
+delegator's system prompt, its worked examples, and the order seats appear at
+the roundtable are all generated from one array in `routing/subject.cpp`, so
+they cannot drift apart. The one place that must be kept in step by hand -- the
+keyword table -- is checked by a `static_assert`, after a missing entry once
+silently zeroed Mathematics' score.
+
+**The delegator cannot hallucinate a subject.** Its output is constrained by a
+GBNF grammar generated from that table, so an invalid route is not merely
+unlikely, it is unrepresentable:
 
 ```
 root       ::= subject " " confidence
@@ -590,16 +612,20 @@ subject    ::= "MATH" | "PROG" | "PHYS" | "CHEM" | "BIO"
 confidence ::= "0." [0-9] [0-9] | "1.00"
 ```
 
+`Fallback` is absent from it by design: the delegator is never offered a way to
+decline. `routing/route_policy.cpp` decides when to fall back instead, and being
+a pure function it is tested without loading a model.
+
 `llama.cpp`'s own logging is redirected to `~/.local/share/batbot/batbot.log`,
 since anything on stderr would draw straight over the TUI.
 
 **The delegator is prompted with worked examples as real conversation turns**,
-not as a block of text inside its system message. That distinction is worth
-more than it sounds: on LFM2-1.2B, moving the same nine examples out of the
-system prompt and into user/assistant turns took routing from 42% to 63%. An
-earlier prompt that described each subject in prose and closed by naming
-Language as the catch-all scored 16% — small models latched onto that closing
-line and answered `LANG` to almost everything.
+not as a block of text inside its system message. That distinction is worth more
+than it sounds: on LFM2-1.2B, moving the same nine examples out of the system
+prompt and into user/assistant turns took routing from 42% to 63%. An earlier
+prompt that described each subject in prose and closed by naming a catch-all
+scored 16% -- small models latched onto that closing line and answered it for
+almost everything.
 
 ---
 
@@ -615,3 +641,30 @@ line and answered `LANG` to almost everything.
 - [ ] Fine-tuned 1B BatBot router to replace the off-the-shelf one
 - [ ] Curated subject experts, offered as a download you opt into — never bundled
 
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE). Every dependency BatBot links is MIT too, and
+[THIRD_PARTY.md](THIRD_PARTY.md) lists them with their pinned versions. Nothing
+is vendored into this repository; the build fetches each at a fixed tag.
+
+Model weights are covered by none of it. BatBot ships no models and downloads
+none — whatever GGUFs you put in your models directory carry their own licenses,
+which are between you and whoever trained them.
+
+---
+
+## Notes
+
+**Temporary: LFM2-1.2B on the development machine.**
+A copy of `LFM2-1.2B-Q8_0.gguf` sits in `~/.local/share/batbot/models` on the
+dev box purely so routing changes can be measured against a known model with
+`batbot-routebench`. **It is to be deleted.** It is not shipped, not referenced
+by any script, and not required by anything in this repository. Nothing here
+depends on that file existing; the benchmark takes whatever GGUF you hand it.
+
+**Routing scores in this README were measured with that model**, greedily, on
+the 19-prompt benchmark. They describe a stand-in delegator, not a ceiling.
+Re-measure with your own before reading anything into them.

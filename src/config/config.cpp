@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: MIT
+//
+// The Config type's own behaviour: inheritance from defaults, and resolving
+// model references against the models directory.
+//
+// Anything to do with the file on disk lives in config_io.cpp.
+#include "batbot/config/config.hpp"
+
+#include "batbot/config/paths.hpp"
+#include "batbot/llm/model_catalog.hpp"
+
+namespace batbot {
+
+void ModelParams::inherit_from(const ModelParams& base) {
+    const ModelParams pristine;  // a field still equal to this was never set
+
+    if (n_gpu_layers   == pristine.n_gpu_layers)   { n_gpu_layers   = base.n_gpu_layers; }
+    if (main_gpu       == pristine.main_gpu)       { main_gpu       = base.main_gpu; }
+    if (split_mode     == pristine.split_mode)     { split_mode     = base.split_mode; }
+    if (tensor_split.empty())                      { tensor_split   = base.tensor_split; }
+    if (n_ctx          == pristine.n_ctx)          { n_ctx          = base.n_ctx; }
+    if (n_batch        == pristine.n_batch)        { n_batch        = base.n_batch; }
+    if (n_threads      == pristine.n_threads)      { n_threads      = base.n_threads; }
+    if (flash_attn     == pristine.flash_attn)     { flash_attn     = base.flash_attn; }
+    if (temperature    == pristine.temperature)    { temperature    = base.temperature; }
+    if (top_p          == pristine.top_p)          { top_p          = base.top_p; }
+    if (top_k          == pristine.top_k)          { top_k          = base.top_k; }
+    if (min_p          == pristine.min_p)          { min_p          = base.min_p; }
+    if (repeat_penalty == pristine.repeat_penalty) { repeat_penalty = base.repeat_penalty; }
+    if (repeat_last_n  == pristine.repeat_last_n)  { repeat_last_n  = base.repeat_last_n; }
+    if (max_tokens     == pristine.max_tokens)     { max_tokens     = base.max_tokens; }
+    if (seed           == pristine.seed)           { seed           = base.seed; }
+}
+
+bool Config::has_expert(Subject s) const {
+    const auto index = static_cast<std::size_t>(s);
+    return index < kSubjectCount && !experts[index].model.empty();
+}
+
+std::vector<Subject> Config::configured_experts() const {
+    std::vector<Subject> found;
+    for (const SubjectInfo& info : all_subjects()) {
+        if (has_expert(info.subject)) {
+            found.push_back(info.subject);
+        }
+    }
+    return found;
+}
+
+bool Config::is_empty() const {
+    return router.model.empty() && configured_experts().empty();
+}
+
+std::filesystem::path Config::resolved_models_dir() const {
+    if (models_dir.empty()) {
+        return paths::models_dir();
+    }
+    return paths::expand_user(models_dir);
+}
+
+void Config::resolve_models() {
+    const std::filesystem::path dir = resolved_models_dir();
+    router.path = resolve_model_ref(dir, router.model).string();
+    for (ModelParams& expert : experts) {
+        expert.path = resolve_model_ref(dir, expert.model).string();
+    }
+}
+
+
+}  // namespace batbot
