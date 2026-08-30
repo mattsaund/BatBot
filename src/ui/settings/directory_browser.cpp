@@ -151,12 +151,14 @@ Element DirectoryBrowser::render() const {
             text(on ? " > " : "   ") | color(theme::kAccent),
             text(label) | color(tint) | flex,
             text("  "),
-            text(note) | color(theme::kMeta) | dim,
+            // kMeta is the same grey as the highlight below, so the note
+            // has to brighten on the row that is selected or it disappears.
+            text(note) | color(meta_color(on)),
         });
         if (!on) {
             return row;
         }
-        return row | bgcolor(Color::GrayDark) | bold | ftxui::focus;
+        return row | bgcolor(theme::kHighlight) | bold | ftxui::focus;
     };
 
     items.push_back(line(0, "[ use this directory ]",

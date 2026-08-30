@@ -32,6 +32,7 @@ enum class SettingsAction {
     Close,          ///< leave the settings screen
     Apply,          ///< configuration changed: save it and hand it to the engine
     OpenRuntimes,   ///< hand over to the runtimes panel
+    OpenGpuOrder,   ///< hand over to the GPU priority panel
 };
 
 class SettingsView {
@@ -57,6 +58,10 @@ public:
     const std::string& status() const { return status_; }
     void set_status(std::string status) { status_ = std::move(status); }
 
+    /// Called by the GPU priority panel, which owns the arrangement while it
+    /// is open and hands back the finished order.
+    void set_gpu_priority(std::vector<int> order);
+
 private:
     /// What a row edits, which decides what Enter does to it.
     enum class Kind {
@@ -79,6 +84,13 @@ private:
         ResetModelsDir,
     };
 
+    /// Which screen a Panel row hands off to. Same reasoning as ActionId.
+    enum class PanelId {
+        None,
+        Runtimes,
+        GpuOrder,
+    };
+
     /// One line of the screen.
     ///
     /// A row points straight at the field it edits inside `config_`, so
@@ -97,18 +109,15 @@ private:
         std::size_t  seat = 0;
         std::vector<std::string> options;  ///< for Enum rows
         ActionId     action = ActionId::None;  ///< for Action rows
+        PanelId      panel  = PanelId::None;   ///< for Panel rows
     };
 
     void build_rows();
     void move_selection(int delta);
 
-    /// The GPU priority order is a vector of device indices in the config and a
-    /// comma-separated string in the editor, so the two are synced explicitly
-    /// rather than pointing a Row at something that is not a std::string.
-    void  gpu_priority_to_text();
-    void  gpu_priority_from_text(const std::string& text);
-    /// Device names behind the configured order, for the row's help line.
-    std::string gpu_priority_help() const;
+    /// The cards behind Config::gpu.priority, named, for the row's value
+    /// column -- "RTX 4070 > RTX 3060".
+    std::string gpu_priority_summary() const;
 
     /// Enter on the selected row: toggle, cycle, open a dialog, or start typing.
     void activate_selection();
@@ -128,9 +137,6 @@ private:
     std::size_t selected_ = 0;
     bool        dirty_    = false;
     std::string status_;
-
-    /// Mirror of Config::gpu.priority for the line editor. See the sync pair.
-    std::string      gpu_priority_text_;
 
     LineEditor       editor_;
     ModelPicker      picker_;

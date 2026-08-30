@@ -130,6 +130,7 @@ add_executable(batbot
     src/ui/settings/model_picker.cpp
     src/ui/settings/directory_browser.cpp
     src/ui/settings/runtime_view.cpp
+    src/ui/settings/gpu_order_view.cpp
     src/ui/session_picker.cpp
 )
 
@@ -234,16 +235,9 @@ if(BATBOT_BACKEND_DL)
         endif()
     endforeach()
 
-    # The backend modules -- the runtimes. The CPU one needs no SDK and is the
-    # one that must always work, so it is built here rather than on demand: a
-    # BatBot that cannot answer until you have compiled something is a bad
-    # first run. ggml records every backend it enabled in this cache variable,
-    # which under GGML_CPU_ALL_VARIANTS is a dozen targets rather than one.
-    if(GGML_AVAILABLE_BACKENDS)
-        install(TARGETS ${GGML_AVAILABLE_BACKENDS}
-                LIBRARY DESTINATION ${BATBOT_LIBDIR}/runtimes
-                COMPONENT ${BATBOT_INSTALL_COMPONENT})
-    endif()
+    # No backend modules are installed, because none are built: see the
+    # GGML_CPU comment in cmake/BatBotDependencies.cmake. A fresh install has
+    # an empty runtimes directory and the settings screen fills it.
 endif()
 
 # ---------------------------------------------------------------------------
@@ -257,7 +251,7 @@ message(STATUS "  compiler      : ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_
 message(STATUS "  native tuning : ${BATBOT_NATIVE}")
 message(STATUS "  tests         : ${BATBOT_BUILD_TESTS}")
 if(BATBOT_BACKEND_DL)
-    message(STATUS "  runtimes      : loadable (CPU built in-tree; add GPU runtimes in settings)")
+    message(STATUS "  runtimes      : loadable, none built in -- add them from settings")
 else()
     message(STATUS "  runtimes      : compiled in -- CUDA=${BATBOT_CUDA} Vulkan=${BATBOT_VULKAN}")
     if(NOT BATBOT_CUDA AND NOT BATBOT_VULKAN)

@@ -112,16 +112,23 @@ if(BATBOT_BACKEND_DL)
     # only llama.cpp -- is shared here.
     set(BUILD_SHARED_LIBS ON)
     set(GGML_BACKEND_DL ON  CACHE INTERNAL "")
-    set(GGML_CPU        ON  CACHE INTERNAL "")
 
-    # A loadable backend is chosen at run time, so it cannot be compiled for
-    # whatever CPU happened to build it: ggml rejects GGML_NATIVE outright
-    # here. GGML_CPU_ALL_VARIANTS is the answer -- it emits one module per
-    # x86-64 feature level (sandybridge, haswell, skylakex, icelake, ...) and
-    # ggml picks the best one this machine can actually run. That costs build
-    # time but keeps the speed BATBOT_NATIVE was asking for.
+    # No backend at all is compiled here -- not even the CPU one.
+    #
+    # BatBot installs with an empty runtimes directory and the settings screen
+    # builds whichever backends you ask for, which is what makes the choice
+    # reversible. Building the CPU modules here would produce a dozen shared
+    # objects that the install rules would then have to leave behind, and it
+    # roughly quadruples the time the installer spends compiling.
+    #
+    # GGML_NATIVE has to go with it: ggml rejects it outright in DL mode,
+    # because a module chosen at run time cannot be compiled for whatever CPU
+    # happened to build it. The runtime builder passes GGML_CPU_ALL_VARIANTS
+    # instead, which emits one module per x86-64 feature level and lets ggml
+    # score them at load.
     set(GGML_NATIVE           OFF CACHE INTERNAL "")
-    set(GGML_CPU_ALL_VARIANTS ${BATBOT_NATIVE} CACHE INTERNAL "")
+    set(GGML_CPU              OFF CACHE INTERNAL "")
+    set(GGML_CPU_ALL_VARIANTS OFF CACHE INTERNAL "")
 
     # GGML_BACKEND_DIR is deliberately not set. It would bake an absolute
     # search path into the binary at build time -- wrong the moment the install
@@ -129,8 +136,6 @@ if(BATBOT_BACKEND_DL)
     # component. The runtimes directory is passed to ggml at startup instead,
     # by RuntimeRegistry::load_all().
 
-    # CUDA and Vulkan are deliberately *not* enabled in this build. They are
-    # built separately, on demand, by the in-app runtime manager.
     set(GGML_CUDA       OFF CACHE INTERNAL "")
     set(GGML_VULKAN     OFF CACHE INTERNAL "")
 else()

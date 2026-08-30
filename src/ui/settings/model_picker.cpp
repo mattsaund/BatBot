@@ -60,14 +60,16 @@ Element ModelPicker::render(const std::string& models_dir) const {
             // An explicit gap: flex collapses to nothing when the file name is
             // long, which would run the name straight into its size.
             text("  "),
-            text(note) | color(theme::kMeta) | dim,
+            // kMeta is the same grey as the highlight below, so the note
+            // has to brighten on the row that is selected or it disappears.
+            text(note) | color(meta_color(on)),
         });
         if (!on) {
             return line;
         }
         // focus is what makes the enclosing yframe scroll. Without it the
         // selection simply walks off the bottom of a long list.
-        return line | bgcolor(Color::GrayDark) | bold | ftxui::focus;
+        return line | bgcolor(theme::kHighlight) | bold | ftxui::focus;
     };
 
     items.push_back(entry(0, "(none)", "leave this seat empty"));

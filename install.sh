@@ -14,6 +14,8 @@ REPO_URL="https://github.com/mattsaund/batbot.git"
 RAW_URL="https://raw.githubusercontent.com/mattsaund/batbot/main/install.sh"
 
 BRANCH="main"
+# Which GPU SDK to install, so that runtime can be built from the settings
+# screen later. It is not "which runtime to install" -- BatBot installs none.
 RUNTIME="auto"
 
 # Must match BATBOT_LLAMA_TAG in cmake/BatBotDependencies.cmake: a runtime
@@ -57,17 +59,48 @@ case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
     *)                BAR_FILL="#"; BAR_VOID="-" ;;
 esac
 
-BAR_WIDTH=28
-PROGRESS_LAST=-1
+BAR_WIDTH=26
 
-# Set while a step bar should also report where the whole install has got to.
-# BASE and SPAN map that bar's own 0-100 onto a slice of the current part, so
-# two long operations inside one part (building BatBot, then building a GPU
-# runtime) advance the main figure instead of each restarting it.
-OVERALL_TRACK=0
-OVERALL_BASE=0
-OVERALL_SPAN=100
+# --------------------------------------------------------------------------
+# Progress
+#
+# Two bars, drawn one above the other and updated together:
+#
+#     install  ██████████░░░░░░░░░░░░░░░░  38%
+#     [4/5]    ████████████████░░░░░░░░░░  62%  / cloning source (14s)
+#
+# The top one is the whole install; the bottom one is the part running now.
+# Neither is derived from a guess about elapsed time -- the top is a weighted
+# sum over the five parts (see STEP_WEIGHTS) and the bottom is a weighted sum
+# over the phases of the current part, with the measurable phases (a download,
+# a compile) reporting real percentages from the tool doing the work.
+#
+# The pair lives at the bottom of the screen and every message is printed above
+# it, which is why ok/info/warn all go through note().
+# --------------------------------------------------------------------------
+
+# Where the current part has got to, 0-100.
+STEP_PCT=0
+
+# The phase inside that part: which slice of the part it owns, what to call it,
+# and when it started, for the elapsed clock.
+PHASE_BASE=0
+PHASE_SPAN=0
+PHASE_LABEL=""
+# -1, not 0: SECONDS is 0 for the whole first second of the run, so a phase
+# that starts promptly would look like "no phase running" and never show its
+# elapsed clock.
+PHASE_START=-1
+
+# Whether the two-line block is currently on screen. Every write to the
+# terminal has to know, because the block is erased and redrawn rather than
+# scrolled past.
+BLOCK_SHOWN=0
 SPINNER_PID=""
+
+# Last percentage pair reported without a terminal, so a log gets one line per
+# real step forward rather than one per poll.
+LOG_LAST=-1
 
 repeat_char() {
     local char="$1" count="$2" out=""
@@ -75,23 +108,29 @@ repeat_char() {
     printf '%s' "$out"
 }
 
-clear_line() { [ "$IS_TTY" = 1 ] && printf '\r\033[2K'; return 0; }
-
+# Cached: `tput` is a fork and an exec, and a compile redraws the block often
+# enough that asking the terminal its width every time is measurable. The cache
+# is dropped at the start of each part, which is often enough to notice a
+# window that was resized and cheap enough not to matter.
+TERM_COLS=""
 term_cols() {
-    local cols=""
-    if [ "$IS_TTY" = 1 ]; then
-        cols="$(tput cols 2>/dev/null || true)"
+    if [ -z "$TERM_COLS" ]; then
+        local cols=""
+        if [ "$IS_TTY" = 1 ]; then
+            cols="$(tput cols 2>/dev/null || true)"
+        fi
+        case "$cols" in ''|*[!0-9]*) cols="${COLUMNS:-80}" ;; esac
+        case "$cols" in ''|*[!0-9]*) cols=80 ;; esac
+        TERM_COLS="$cols"
     fi
-    case "$cols" in ''|*[!0-9]*) cols="${COLUMNS:-80}" ;; esac
-    case "$cols" in ''|*[!0-9]*) cols=80 ;; esac
-    printf '%s' "$cols"
+    printf '%s' "$TERM_COLS"
 }
 
 # Trim a label so the whole status line fits on one terminal row.
 #
-# A wrapped line is not cosmetic: clear_line only erases the row the cursor is
-# on, so anything that spilled onto a second row is left behind as litter when
-# the spinner is replaced by its result.
+# A wrapped line is not cosmetic: the block is erased by moving the cursor up a
+# fixed number of rows, and a line that wrapped occupies two of them -- so one
+# long label would leave the erase off by a row and litter the screen.
 fit_label() {
     local label="$1" reserved="$2" width
     width=$(( $(term_cols) - reserved ))
@@ -106,106 +145,203 @@ fit_label() {
 hide_cursor() { [ "$IS_TTY" = 1 ] && printf '\033[?25l'; return 0; }
 show_cursor() { [ "$IS_TTY" = 1 ] && printf '\033[?25h'; return 0; }
 
-# Draw a bar at `percent` with a trailing label. Redraws only when the
-# percentage actually moves, so a chatty build does not flicker.
-progress_render() {
-    local percent="$1" label="${2:-}" filled empty
-    [ "$percent" -lt 0 ] && percent=0
-    [ "$percent" -gt 100 ] && percent=100
+bar_width() {
+    local cols width="$BAR_WIDTH"
+    cols="$(term_cols)"
+    [ "$cols" -lt 70 ] && width=14
+    [ "$cols" -lt 50 ] && width=8
+    printf '%s' "$width"
+}
 
-    # A long part would otherwise leave the main bar frozen for minutes, so the
-    # step bar carries the live overall figure while it runs.
-    if [ "$OVERALL_TRACK" = 1 ]; then
-        label="install $(overall_percent $((OVERALL_BASE + percent * OVERALL_SPAN / 100)))%  ·  $label"
+# One bar: `percent` filled, in `color`.
+draw_bar() {
+    local percent="$1" color="$2" width filled empty
+    width="$(bar_width)"
+    [ "$percent" -lt 0 ]   && percent=0
+    [ "$percent" -gt 100 ] && percent=100
+    filled=$((percent * width / 100))
+    empty=$((width - filled))
+    printf '%s%s%s%s%s %3d%%' \
+        "$color" "$(repeat_char "$BAR_FILL" "$filled")" \
+        "$C_DIM" "$(repeat_char "$BAR_VOID" "$empty")" "$C_RESET" "$percent"
+}
+
+# How far through the whole install we are, given where the current part is.
+#
+# The five parts are nothing like equal in length -- building is a minute and
+# checking CMake is milliseconds -- so a bar that moved a fifth per part would
+# sit at 80% for almost the entire install. Each part carries a weight instead,
+# and those are what the top bar counts.
+overall_percent() {
+    local done=0 i
+    for ((i = 1; i < STEP_NUM && i <= STEP_TOTAL; i++)); do
+        done=$((done + STEP_WEIGHTS[i]))
+    done
+    if [ "$STEP_NUM" -ge 1 ] && [ "$STEP_NUM" -le "$STEP_TOTAL" ]; then
+        done=$((done + STEP_WEIGHTS[STEP_NUM] * STEP_PCT / 100))
     fi
+    [ "$done" -gt 100 ] && done=100
+    printf '%s' "$done"
+}
+
+# The escape sequence that erases the block and leaves the cursor where its
+# first row was. Returned rather than printed, so a redraw can go out as one
+# write -- see block_draw.
+block_erase_seq() {
+    [ "$IS_TTY" = 1 ] || return 0
+    [ "$BLOCK_SHOWN" = 1 ] || return 0
+    printf '\033[2A\r\033[J'
+}
+
+# Erase the block for something else to print in its place.
+block_clear() {
+    block_erase_seq
+    BLOCK_SHOWN=0
+    return 0
+}
+
+# Draw both bars. `glyph` is the spinner frame for a phase with no percentage
+# of its own; blank for one that has.
+block_draw() {
+    local glyph="${1:- }" label elapsed=""
+
+    # Nothing to draw before the first part begins, which is what keeps the
+    # bars out of the dry run, the banner and the uninstaller -- all of which
+    # print through note() and none of which are an install.
+    [ "$STEP_NUM" -ge 1 ] || return 0
 
     if [ "$IS_TTY" != 1 ]; then
-        # Not a terminal (CI, or output redirected to a file): emit a line at
-        # each 20% instead of a bar, so logs stay readable.
-        if [ "$((percent / 20))" -ne "$((PROGRESS_LAST / 20))" ] || [ "$PROGRESS_LAST" -lt 0 ]; then
-            printf '    %3d%%  %s\n' "$percent" "$label"
-            PROGRESS_LAST="$percent"
+        # No terminal (CI, or output redirected): a bar is meaningless, so
+        # report the overall figure at every fifth of the way instead.
+        local overall
+        overall="$(overall_percent)"
+        if [ "$((overall / 5))" -ne "$((LOG_LAST / 5))" ]; then
+            LOG_LAST="$overall"
+            printf '    %3d%%  %s\n' "$overall" "$PHASE_LABEL"
         fi
         return 0
     fi
 
-    [ "$percent" = "$PROGRESS_LAST" ] && return 0
-    PROGRESS_LAST="$percent"
+    [ "$PHASE_START" -ge 0 ] && elapsed=" $C_DIM($((SECONDS - PHASE_START))s)$C_RESET"
+    label="$(fit_label "$PHASE_LABEL" $(( $(bar_width) + 26 )))"
 
-    local bar_width="$BAR_WIDTH" cols
-    cols="$(term_cols)"
-    # On a narrow terminal the bar yields space before the label does.
-    [ "$cols" -lt 70 ] && bar_width=14
-    [ "$cols" -lt 50 ] && bar_width=8
-
-    filled=$((percent * bar_width / 100))
-    empty=$((bar_width - filled))
-    # 4 indent + bar + " 100%" + 2 spaces
-    label="$(fit_label "$label" $((bar_width + 13)))"
-
-    printf '\r\033[2K    %s%s%s%s%s %3d%%  %s%s%s' \
-        "$C_CYN" "$(repeat_char "$BAR_FILL" "$filled")" \
-        "$C_DIM" "$(repeat_char "$BAR_VOID" "$empty")" "$C_RESET" \
-        "$percent" "$C_DIM" "$label" "$C_RESET"
+    # Erase and redraw in a single write. Three separate printfs would leave
+    # the terminal briefly showing an erased or half-drawn block, which reads
+    # as a flicker on every frame the spinner draws.
+    printf '%s    %sinstall%s  %s\n    %s[%d/%d]%s    %s  %s%s%s%s\n' \
+        "$(block_erase_seq)" \
+        "$C_DIM" "$C_RESET" "$(draw_bar "$(overall_percent)" "$C_GRN")" \
+        "$C_DIM" "$STEP_NUM" "$STEP_TOTAL" "$C_RESET" \
+        "$(draw_bar "$STEP_PCT" "$C_CYN")" \
+        "$C_CYN" "$glyph" "$C_RESET" " $label$elapsed"
+    BLOCK_SHOWN=1
+    return 0
 }
 
-progress_begin() { PROGRESS_LAST=-1; hide_cursor; }
-
-# Report overall progress from the next step bar, mapping its 0-100 onto
-# [base, base+span] of the current part.
-progress_track() {
-    OVERALL_TRACK=1
-    OVERALL_BASE="$1"
-    OVERALL_SPAN="$2"
+# Print something above the block. Everything the installer says goes through
+# here, so a message never lands in the middle of a bar.
+note() {
+    block_clear
+    printf '%b\n' "$*"
+    block_draw
 }
 
-progress_end() {
+# --------------------------------------------------------------------------
+# Steps and phases
+# --------------------------------------------------------------------------
+
+# Begin one of the five parts.
+step() {
+    # Close the previous part out at 100% first: the phases of a part do not
+    # always add up to it (an optional dependency may be skipped), and leaving
+    # the bar at 85% before jumping to the next part looks like something was
+    # missed rather than not needed.
+    if [ "$STEP_NUM" -ge 1 ]; then
+        STEP_PCT=100
+        block_draw
+    fi
+
+    block_clear
+    TERM_COLS=""
+    STEP_NUM=$((STEP_NUM + 1))
+    STEP_PCT=0
+    PHASE_BASE=0
+    PHASE_SPAN=0
+    PHASE_LABEL="$*"
+    PHASE_START=-1
+    printf '\n%s==>%s %s[%d/%d]%s %s%s%s\n' \
+        "$C_CYN" "$C_RESET" "$C_DIM" "$STEP_NUM" "$STEP_TOTAL" "$C_RESET" \
+        "$C_BOLD" "$*" "$C_RESET"
+    hide_cursor
+    block_draw
+}
+
+# Begin a phase owning `span` percent of the current part.
+phase() {
+    PHASE_BASE="$STEP_PCT"
+    PHASE_SPAN="$1"
+    PHASE_LABEL="$2"
+    PHASE_START="$SECONDS"
+    block_draw
+}
+
+# Report progress inside a measurable phase, as 0-100 of the phase itself.
+phase_at() {
+    local fraction="$1"
+    [ "$fraction" -lt 0 ]   && fraction=0
+    [ "$fraction" -gt 100 ] && fraction=100
+    local target=$((PHASE_BASE + PHASE_SPAN * fraction / 100))
+    [ "$target" -gt 100 ] && target=100
+    # Never go backwards. cmake restarts its percentage for each target it
+    # builds, and a bar that retreats reads as a failure.
+    [ "$target" -le "$STEP_PCT" ] && return 0
+    STEP_PCT="$target"
+    # Redrawing per line rather than per percentage would mean thousands of
+    # redraws for a hundred pixels of bar, and a visible flicker.
+    block_draw
+}
+
+# Finish the current phase, optionally saying what it achieved.
+phase_end() {
     local message="${1:-}"
-    PROGRESS_LAST=-1
-    OVERALL_TRACK=0
-    clear_line
-    show_cursor
+    STEP_PCT=$((PHASE_BASE + PHASE_SPAN))
+    [ "$STEP_PCT" -gt 100 ] && STEP_PCT=100
+    PHASE_START=-1
+    block_draw
     [ -n "$message" ] && ok "$message"
     return 0
 }
 
-# For work with no measurable total (package managers, mostly). Shows elapsed
-# time so a long apt run still looks alive.
+# The animation for a phase with no percentage of its own -- a package
+# manager, a configure run. The block is redrawn from a background process
+# because the foreground is blocked on the command; nothing else writes to the
+# terminal while this runs, so the two cannot fight over the cursor.
 spinner_start() {
-    local label="$1"
-    if [ "$IS_TTY" != 1 ]; then
-        info "$label..."
-        return 0
-    fi
-    hide_cursor
-    label="$(fit_label "$label" 20)"
+    [ "$IS_TTY" = 1 ] || return 0
     (
         frames='|/-\'
         i=0
-        start=$SECONDS
         while :; do
-            printf '\r\033[2K    %s%s%s  %s %s(%ds)%s' \
-                "$C_CYN" "${frames:$((i % 4)):1}" "$C_RESET" \
-                "$label" "$C_DIM" "$((SECONDS - start))" "$C_RESET"
+            block_draw "${frames:$((i % 4)):1}"
             i=$((i + 1))
-            sleep 0.12
+            sleep 0.15
         done
     ) &
     SPINNER_PID=$!
 }
 
 spinner_stop() {
-    local message="${1:-}"
     if [ -n "$SPINNER_PID" ]; then
         kill "$SPINNER_PID" 2>/dev/null || true
         wait "$SPINNER_PID" 2>/dev/null || true
         SPINNER_PID=""
     fi
-    clear_line
-    show_cursor
-    [ -n "$message" ] && ok "$message"
+    # The background process left the block on screen; the foreground's own
+    # idea of that is what the next block_clear reads.
+    BLOCK_SHOWN=1
     return 0
 }
+
 
 human_bytes() {
     local bytes="${1:-0}"
@@ -226,68 +362,30 @@ STEP_NUM=0
 STEP_TOTAL=5
 
 # --------------------------------------------------------------------------
-# Overall progress
+# How long each part takes, relative to the others.
 #
-# The five parts of an install are nothing like equal in length: building is
-# minutes and checking CMake is milliseconds. A bar that moved a fifth per part
-# would sit at 80% for almost the entire install, which is worse than no bar at
-# all -- so each part carries a weight, and they are what the main bar counts.
+# These are rough measurements of a cold install on a mid-range machine, not
+# guesses; they only have to be right about the shape. Part 5 dominates because
+# it compiles BatBot, and part 2 is second because installing a toolchain (and
+# possibly a Vulkan SDK) is the only other thing here that touches the network
+# for minutes at a time.
 #
-# The numbers are rough measurements of a cold install on a mid-range machine,
-# not guesses; they only have to be right about the shape.
-# --------------------------------------------------------------------------
 # Indexed by step number, so [0] is unused and the rest sum to 100.
-STEP_WEIGHTS=(0 4 16 3 12 65)
+# --------------------------------------------------------------------------
+STEP_WEIGHTS=(0 2 26 2 8 62)
 
-# How far through the whole install we are, given `fraction` (0-100) of the
-# part currently running.
-overall_percent() {
-    local fraction="${1:-0}" done=0 i
-    for ((i = 1; i < STEP_NUM && i <= STEP_TOTAL; i++)); do
-        done=$((done + STEP_WEIGHTS[i]))
-    done
-    if [ "$STEP_NUM" -ge 1 ] && [ "$STEP_NUM" -le "$STEP_TOTAL" ]; then
-        done=$((done + STEP_WEIGHTS[STEP_NUM] * fraction / 100))
-    fi
-    [ "$done" -gt 100 ] && done=100
-    printf '%s' "$done"
-}
 
-# The main bar. Drawn once per part rather than redrawn continuously, so it
-# stays in the scrollback as a record of how far each part got -- and so it can
-# never fight with the per-step bar for the same terminal row.
-overall_bar() {
-    local percent="$1" width=30 filled empty cols
-    cols="$(term_cols)"
-    [ "$cols" -lt 70 ] && width=18
-    [ "$cols" -lt 50 ] && width=10
-    [ "$percent" -lt 0 ]   && percent=0
-    [ "$percent" -gt 100 ] && percent=100
-
-    filled=$((percent * width / 100))
-    empty=$((width - filled))
-
-    # Green, where the per-step bar is cyan: at a glance the two are telling
-    # you different things, and the colour is the fastest way to say so.
-    printf '    %sinstall%s  %s%s%s%s%s %3d%%\n' \
-        "$C_DIM" "$C_RESET" \
-        "$C_GRN" "$(repeat_char "$BAR_FILL" "$filled")" \
-        "$C_DIM" "$(repeat_char "$BAR_VOID" "$empty")" "$C_RESET" \
-        "$percent"
-}
-
-step()  {
-    STEP_NUM=$((STEP_NUM + 1))
-    printf '\n%s==>%s %s[%d/%d]%s %s%s%s\n' \
-        "$C_CYN" "$C_RESET" "$C_DIM" "$STEP_NUM" "$STEP_TOTAL" "$C_RESET" \
-        "$C_BOLD" "$*" "$C_RESET"
-    overall_bar "$(overall_percent 0)"
-}
-info()  { printf '    %s\n' "$*"; }
-muted() { printf '    %s%s%s\n' "$C_DIM" "$*" "$C_RESET"; }
-warn()  { printf '%s !! %s %s\n' "$C_YEL" "$C_RESET" "$*" >&2; }
-ok()    { printf '    %s✓%s %s\n' "$C_GRN" "$C_RESET" "$*"; }
-die()   { printf '\n%serror:%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
+# Everything the installer says goes through note(), warnings included.
+#
+# A warning written straight to stderr while the two-bar block is on screen
+# would land under it and leave the cursor arithmetic a row out, so the display
+# and the message would both be wrong from then on. Only die() writes to stderr
+# directly, and it retires the block first because it is the last thing said.
+info()  { note "    $*"; }
+muted() { note "    $C_DIM$*$C_RESET"; }
+warn()  { note "$C_YEL !! $C_RESET $*"; }
+ok()    { note "    $C_GRN✓$C_RESET $*"; }
+die()   { block_clear; show_cursor; printf '\n%serror:%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
 
 banner() {
 cat <<'ART'
@@ -309,7 +407,9 @@ usage() {
     cat <<EOF
 usage: install.sh [options]
 
-  --gpu MODE       cuda | vulkan | cpu | auto     (default: auto)
+  --gpu MODE       which GPU SDK to install so that runtime can be built
+                   later from the settings screen. No runtime is installed
+                   either way.  cuda | vulkan | cpu | auto   (default: auto)
                    auto detects your hardware and picks the best backend
                    it can actually build for.
   --prefix DIR     install location (default: /usr/local with sudo,
@@ -373,6 +473,10 @@ confirm() {
         return
     fi
     local hint="[Y/n]"; [ "$default" = "n" ] && hint="[y/N]"
+    # Asked on /dev/tty, so it never lands in a redirected log -- and after
+    # the block is out of the way, since the answer is typed where it was.
+    block_clear
+    show_cursor
     printf '    %s %s ' "$prompt" "$hint" > /dev/tty
     read -r reply < /dev/tty || reply=""
     reply="${reply:-$default}"
@@ -445,9 +549,10 @@ pkg_install() {
     PKG_LOG="$(mktemp)"
 
     # Package managers report progress in their own incompatible ways and none
-    # of it is reliably parseable, so this is a spinner with an elapsed clock
-    # rather than a bar that would have to lie about the percentage.
-    spinner_start "installing $* "
+    # of it is reliably parseable, so this phase animates with an elapsed clock
+    # rather than showing a bar that would have to invent the percentage.
+    PHASE_LABEL="installing $*"
+    spinner_start
     case "$PKG" in
         apt)    { $SUDO apt-get update -qq \
                   && DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y -qq "$@"; } \
@@ -457,11 +562,11 @@ pkg_install() {
         zypper) $SUDO zypper --non-interactive install -y "$@" > "$PKG_LOG" 2>&1 || status=$? ;;
         *)      spinner_stop; warn "cannot install $* automatically"; return 1 ;;
     esac
+    spinner_stop
 
     if [ "$status" -eq 0 ]; then
-        spinner_stop "installed $*"
+        ok "installed $*"
     else
-        spinner_stop
         warn "package installation failed:"
         tail -8 "$PKG_LOG" >&2 || true
     fi
@@ -516,23 +621,22 @@ download_with_progress() {
     pid=$!
 
     if [ -n "$total" ] && [ "$total" -gt 0 ] 2>/dev/null && [ "$IS_TTY" = 1 ]; then
-        progress_track 0 100
-        progress_begin
         while kill -0 "$pid" 2>/dev/null; do
             now=0
             [ -f "$out" ] && now="$(stat -c %s "$out" 2>/dev/null || echo 0)"
-            progress_render "$((now * 100 / total))" \
-                "$label  $(human_bytes "$now") / $(human_bytes "$total")"
+            PHASE_LABEL="$label  $(human_bytes "$now") / $(human_bytes "$total")"
+            phase_at "$((now * 100 / total))"
             sleep 0.15
         done
         wait "$pid" || status=$?
-        [ "$status" -eq 0 ] && progress_render 100 "$label  $(human_bytes "$total")"
-        progress_end "downloaded $label"
+        [ "$status" -eq 0 ] && PHASE_LABEL="$label  $(human_bytes "$total")" && phase_at 100
     else
-        spinner_start "downloading $label "
+        PHASE_LABEL="downloading $label"
+        spinner_start
         wait "$pid" || status=$?
-        spinner_stop "downloaded $label"
+        spinner_stop
     fi
+    [ "$status" -eq 0 ] && ok "downloaded $label"
 
     return "$status"
 }
@@ -554,11 +658,16 @@ bootstrap_cmake() {
         url="https://github.com/Kitware/CMake/releases/download/v${CMAKE_BOOTSTRAP_VERSION}/cmake-${CMAKE_BOOTSTRAP_VERSION}-linux-${arch}.tar.gz"
         tarball="$cache/cmake.tar.gz"
         info "your CMake is older than ${CMAKE_MIN_MAJOR}.${CMAKE_MIN_MINOR}; fetching ${CMAKE_BOOTSTRAP_VERSION}"
+        phase 80 "downloading CMake ${CMAKE_BOOTSTRAP_VERSION}"
         download_with_progress "$url" "$tarball" "CMake ${CMAKE_BOOTSTRAP_VERSION}" \
             || die "could not download CMake from $url"
-        spinner_start "extracting CMake "
+        phase_end
+
+        phase 20 "extracting CMake"
+        spinner_start
         tar -xzf "$tarball" -C "$cache"
-        spinner_stop "extracted"
+        spinner_stop
+        phase_end "extracted"
         rm -f "$tarball"
     fi
 
@@ -636,7 +745,7 @@ decide_backend() {
     fi
 
     if [ "$RUNTIME" != "auto" ]; then
-        info "backend: $RUNTIME (requested)"
+        info "GPU SDK: $RUNTIME (requested)"
         return
     fi
 
@@ -644,7 +753,7 @@ decide_backend() {
         # No NVIDIA card. Vulkan still covers AMD and Intel GPUs.
         if [ "$PKG" != "unknown" ]; then
             RUNTIME="vulkan"
-            info "no NVIDIA GPU detected; choosing Vulkan (covers AMD and Intel)"
+            info "no NVIDIA GPU detected; installing the Vulkan SDK (covers AMD and Intel)"
         else
             RUNTIME="cpu"
         fi
@@ -659,15 +768,16 @@ decide_backend() {
 
     if [ -n "$available" ] && version_ge "$available" "$required"; then
         RUNTIME="cuda"
-        info "CUDA $available covers compute capability $highest; choosing CUDA"
+        info "CUDA $available covers compute capability $highest; offering the CUDA toolkit"
     else
         RUNTIME="vulkan"
         detected="${available:-none}"
         CUDA_NOTE="Your newest GPU is compute capability ${highest}, which needs CUDA >= ${required}.
     The CUDA toolkit available here is ${detected}, which cannot build for it, so
-    Vulkan was chosen instead -- it works on all of your GPUs via the driver.
-    For CUDA, install a newer toolkit from developer.nvidia.com/cuda-downloads
-    and re-run with --gpu cuda."
+    the Vulkan SDK goes in instead -- Vulkan works on all of your GPUs via the
+    driver, and it is one of the runtimes the settings screen offers.
+    For CUDA, install a newer toolkit from developer.nvidia.com/cuda-downloads;
+    the CUDA runtime then becomes available in settings with no reinstall."
         warn "CUDA ${detected} is too old for compute capability ${highest} (needs ${required}); using Vulkan"
     fi
 }
@@ -713,29 +823,40 @@ packages_available() {
     return 0
 }
 
+# Install what a runtime will need, before there is a runtime.
+#
+# BatBot installs no compute runtime at all -- you pick one from the settings
+# screen, and it is compiled there. That build has to work without root,
+# because asking for a sudo password from inside a TUI is a bad idea and a
+# worse implementation. So this is the one moment where root is already at
+# hand, and it is where the SDKs those builds need go in.
 install_dependencies() {
     resolve_packages
 
+    phase 40 "installing the build toolchain"
     pkg_install "${PKGS_BASE[@]}" || die "could not install the build toolchain"
+    phase_end
 
-    # The Vulkan SDK goes in whatever backend was chosen, and it goes in
-    # without asking. It is a few megabytes, it is what lets the settings
-    # screen build a Vulkan runtime later without root, and needing sudo from
-    # inside a TUI is the problem this avoids.
-    if [ "${#PKGS_VULKAN[@]}" -gt 0 ]; then
+    # The Vulkan SDK goes in without asking: it is a few megabytes, and it is
+    # the difference between the Vulkan runtime being offered in settings and
+    # being greyed out with "glslc is not installed".
+    if [ "${#PKGS_VULKAN[@]}" -gt 0 ] && [ "$RUNTIME" != "cpu" ]; then
+        phase 30 "installing the Vulkan SDK"
         if packages_available "${PKGS_VULKAN[@]}"; then
             pkg_install "${PKGS_VULKAN[@]}" ||
                 warn "the Vulkan SDK did not install; Vulkan runtimes cannot be built"
         else
             warn "no Vulkan SDK packages on this distribution; Vulkan runtimes cannot be built"
         fi
+        phase_end
     fi
 
     # CUDA is different in kind: several gigabytes, and useless without an
-    # NVIDIA card. It is only offered when the hardware asked for it.
+    # NVIDIA card. It is only offered when the hardware asked for it, and it is
+    # the only dependency here that is a question rather than a decision.
     if [ "$RUNTIME" = "cuda" ]; then
         if ! packages_available "${PKGS_CUDA[@]}"; then
-            warn "the CUDA toolkit is not packaged here; using Vulkan instead"
+            warn "the CUDA toolkit is not packaged here; the Vulkan runtime covers this card"
             RUNTIME="vulkan"
             return 0
         fi
@@ -743,13 +864,16 @@ install_dependencies() {
             return 0
         fi
         muted "the CUDA toolkit is a large download (often 2-4 GB)"
+        muted "without it, only the Vulkan and CPU runtimes can be built later"
         if confirm "Install the CUDA toolkit now?" y; then
+            phase 30 "installing the CUDA toolkit"
             pkg_install "${PKGS_CUDA[@]}" || {
-                warn "the CUDA toolkit failed to install; using Vulkan instead"
+                warn "the CUDA toolkit failed to install; the Vulkan runtime covers this card"
                 RUNTIME="vulkan"
             }
+            phase_end
         else
-            info "skipping CUDA -- you can install it later and add the runtime in settings"
+            info "skipping CUDA -- install it later and the runtime becomes available in settings"
             RUNTIME="vulkan"
         fi
     fi
@@ -765,8 +889,6 @@ git_clone_with_progress() {
     local url="$1" dest="$2" branch="$3" status=0 log
     log="$(mktemp)"
 
-    progress_track 0 100
-    progress_begin
     set +e
     git clone --depth 1 --branch "$branch" --progress "$url" "$dest" 2>&1 \
         | while IFS= read -r line; do
@@ -778,14 +900,13 @@ git_clone_with_progress() {
                       percent="${percent// /}"
                       case "$percent" in
                           ''|*[!0-9]*) ;;
-                          *) progress_render "$percent" "${line%%:*}" ;;
+                          *) PHASE_LABEL="${line%%:*}"; phase_at "$percent" ;;
                       esac
                       ;;
               esac
           done
     status="${PIPESTATUS[0]}"
     set -e
-    progress_end
 
     if [ "$status" -ne 0 ]; then
         show_log_tail "$log" 15
@@ -812,10 +933,12 @@ locate_source() {
 
     SRC_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/batbot/src"
     if [ -d "$SRC_DIR/.git" ]; then
-        spinner_start "updating $SRC_DIR "
+        PHASE_LABEL="updating $SRC_DIR"
+        spinner_start
         git -C "$SRC_DIR" fetch --depth 1 origin "$BRANCH" --quiet >/dev/null 2>&1
         git -C "$SRC_DIR" checkout --quiet FETCH_HEAD >/dev/null 2>&1
-        spinner_stop "updated to latest $BRANCH"
+        spinner_stop
+        ok "updated to latest $BRANCH"
     else
         info "cloning into $SRC_DIR"
         mkdir -p "$(dirname "$SRC_DIR")"
@@ -843,6 +966,11 @@ BUILD_LOG=""
 show_log_tail() {
     local log="$1" lines="${2:-25}"
     [ -f "$log" ] || return 0
+    # Straight to stderr, bypassing note(), so retire the block first: anything
+    # printed under it leaves the cursor arithmetic a row out and every later
+    # redraw erases real output.
+    block_clear
+    show_cursor
     printf '\n%s--- last %d lines of %s ---%s\n' "$C_DIM" "$lines" "$log" "$C_RESET" >&2
     tail -n "$lines" "$log" >&2
     printf '%s--- end ---%s\n\n' "$C_DIM" "$C_RESET" >&2
@@ -892,29 +1020,26 @@ build_and_install() {
     # backends, so CUDA and Vulkan are files the settings screen manages rather
     # than a decision frozen here -- which is the whole point of this install
     # producing something you can change your mind about later.
-    spinner_start "configuring (loadable runtimes) "
+    phase 12 "configuring (loadable runtimes)"
+    spinner_start
     "$CMAKE" -S "$SRC_DIR" -B "$build_dir" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="$PREFIX" \
         -DBATBOT_BACKEND_DL=ON \
         > "$BUILD_LOG" 2>&1 || status=$?
+    spinner_stop
     if [ "$status" -ne 0 ]; then
-        spinner_stop
         show_log_tail "$BUILD_LOG"
         die "cmake configure failed. The full log is at $BUILD_LOG"
     fi
-    spinner_stop "configured"
+    phase_end "configured"
 
     # --- compile -----------------------------------------------------------
     # CMake's Makefile generator prints "[ 42%] Building ..." for every unit,
     # which is a real, ordered percentage worth turning into a bar. The full
     # output still goes to the log so a failure can be diagnosed.
-    info "compiling with $JOBS jobs (several minutes on a first build)"
-    # Part 5 also builds a GPU runtime afterwards, so this compile is only the
-    # first stretch of it -- otherwise the overall figure would reach 100%
-    # with minutes of work still to go.
-    progress_track 5 65
-    progress_begin
+    info "compiling with $JOBS jobs"
+    phase 70 "compiling"
     status=0
     set +e
     "$CMAKE" --build "$build_dir" -j "$JOBS" 2>&1 \
@@ -929,7 +1054,8 @@ build_and_install() {
                           ''|*[!0-9]*) ;;
                           *)
                               target="${line#*] }"
-                              progress_render "$percent" "${target:0:30}"
+                              PHASE_LABEL="${target:0:40}"
+                              phase_at "$percent"
                               ;;
                       esac
                       ;;
@@ -939,26 +1065,29 @@ build_and_install() {
     set -e
 
     if [ "$status" -ne 0 ]; then
-        progress_end
         show_log_tail "$BUILD_LOG" 30
         die "build failed. The full log is at $BUILD_LOG"
     fi
-    progress_render 100 "done"
-    progress_end "compiled"
+    phase_end "compiled"
 
     # --- tests -------------------------------------------------------------
-    spinner_start "running tests "
-    if (cd "$build_dir" && ctest --output-on-failure >> "$BUILD_LOG" 2>&1); then
-        spinner_stop "tests passed"
+    phase 6 "running tests"
+    spinner_start
+    status=0
+    (cd "$build_dir" && ctest --output-on-failure >> "$BUILD_LOG" 2>&1) || status=$?
+    spinner_stop
+    if [ "$status" -eq 0 ]; then
+        phase_end "tests passed"
     else
-        spinner_stop
+        phase_end
         warn "tests did not pass; installing anyway (please report this)"
         warn "details are in $BUILD_LOG"
         KEEP_BUILD_LOG=1
     fi
 
     # --- install -----------------------------------------------------------
-    spinner_start "installing to ${PREFIX}/bin "
+    phase 6 "installing to ${PREFIX}/bin"
+    spinner_start
     status=0
     if [ -w "$PREFIX" ] || [ "$(id -u)" -eq 0 ]; then
         "$CMAKE" --install "$build_dir" --component batbot >> "$BUILD_LOG" 2>&1 || status=$?
@@ -970,15 +1099,14 @@ build_and_install() {
             $SUDO "$CMAKE" --install "$build_dir" --component batbot >> "$BUILD_LOG" 2>&1 || status=$?
         fi
     fi
+    spinner_stop
     if [ "$status" -ne 0 ]; then
-        spinner_stop
         show_log_tail "$BUILD_LOG"
         die "install failed"
     fi
-    spinner_stop "installed"
+    phase_end "installed"
 
     seed_runtime_source "$build_dir"
-    prebuild_runtime
 
     if [ -z "${KEEP_BUILD_LOG:-}" ]; then
         rm -f "$BUILD_LOG"
@@ -1006,126 +1134,21 @@ seed_runtime_source() {
         return 0
     fi
 
-    spinner_start "saving the llama.cpp source for future runtimes "
+    phase 6 "saving the llama.cpp source for future runtimes"
+    spinner_start
     mkdir -p "$DATA_DIR"
     rm -rf "$target"
     # Without .git this is a fraction of the size and still builds.
-    if cp -r "$fetched" "$target" 2>/dev/null; then
+    local copied=0
+    cp -r "$fetched" "$target" 2>/dev/null && copied=1
+    spinner_stop
+    if [ "$copied" = 1 ]; then
         rm -rf "$target/.git"
-        spinner_stop "runtime source ready ($(du -sh "$target" 2>/dev/null | cut -f1))"
+        phase_end "runtime source ready ($(du -sh "$target" 2>/dev/null | cut -f1))"
     else
-        spinner_stop
+        phase_end
         warn "could not copy the llama.cpp source; adding a runtime later will re-download it"
     fi
-    return 0
-}
-
-# Build one GPU runtime now, so the first run is already accelerated. Exactly
-# what the settings screen would do, and skippable -- the point of the whole
-# design is that this is never a one-time decision.
-prebuild_runtime() {
-    local kind="$RUNTIME" option tool target_dir src status=0
-
-    # Check for the compiler the backend needs rather than for whether we
-    # installed it: --no-deps users often already have the SDK, and this is
-    # the same test the in-app runtime builder makes.
-    case "$kind" in
-        cuda)   option=GGML_CUDA;   tool=nvcc  ;;
-        vulkan) option=GGML_VULKAN; tool=glslc ;;
-        # cpu ships with the binary, and "none" is an explicit opt-out.
-        *)      return 0 ;;
-    esac
-
-    if ! command -v "$tool" >/dev/null 2>&1; then
-        warn "$tool is not installed, so the $kind runtime was not built"
-        muted "install it, then add the runtime from settings (ctrl-e, Runtimes)"
-        return 0
-    fi
-
-    src="$DATA_DIR/runtime-src"
-    [ -f "$src/CMakeLists.txt" ] || return 0
-
-    local build_dir="$DATA_DIR/runtime-build/$kind"
-    target_dir="$DATA_DIR/runtimes"
-    mkdir -p "$build_dir" "$target_dir"
-
-    RUNTIME_LOG="$(mktemp -t batbot-runtime-XXXXXX.log)"
-
-    spinner_start "configuring the $kind runtime "
-    "$CMAKE" -S "$src" -B "$build_dir" \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DBUILD_SHARED_LIBS=ON \
-        -DGGML_BACKEND_DL=ON \
-        -DGGML_NATIVE=OFF \
-        -DGGML_CPU=OFF \
-        -D${option}=ON \
-        -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
-        -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_SERVER=OFF \
-        -DLLAMA_BUILD_COMMON=OFF -DLLAMA_CURL=OFF \
-        > "$RUNTIME_LOG" 2>&1 || status=$?
-
-    if [ "$status" -ne 0 ]; then
-        spinner_stop
-        show_log_tail "$RUNTIME_LOG" 20
-        warn "the $kind runtime could not be configured; BatBot will run on CPU"
-        warn "you can retry from the settings screen (ctrl-e, Runtimes)"
-        return 0
-    fi
-    spinner_stop "configured the $kind runtime"
-
-    info "compiling the $kind runtime (this is the long part)"
-    progress_track 75 25
-    progress_begin
-    status=0
-    set +e
-    "$CMAKE" --build "$build_dir" --target ggml -j "$JOBS" 2>&1 \
-        | while IFS= read -r line; do
-              printf '%s\n' "$line" >> "$RUNTIME_LOG"
-              case "$line" in
-                  \[*%\]*)
-                      percent="${line#*[}"
-                      percent="${percent%%\%*}"
-                      percent="${percent// /}"
-                      case "$percent" in
-                          ''|*[!0-9]*) ;;
-                          *) target="${line#*] }"; progress_render "$percent" "${target:0:30}" ;;
-                      esac
-                      ;;
-              esac
-          done
-    status="${PIPESTATUS[0]}"
-    set -e
-    progress_end
-
-    if [ "$status" -ne 0 ]; then
-        show_log_tail "$RUNTIME_LOG" 20
-        warn "the $kind runtime failed to build; BatBot will run on CPU"
-        warn "the full log is at $RUNTIME_LOG"
-        warn "you can retry from the settings screen (ctrl-e, Runtimes)"
-        return 0
-    fi
-
-    spinner_start "installing the $kind runtime "
-    local copied=0 f
-    for f in "$build_dir"/bin/libggml-"$kind"*.so; do
-        [ -f "$f" ] || continue
-        cp "$f" "$target_dir/" && copied=$((copied + 1))
-    done
-    if [ "$copied" -eq 0 ]; then
-        spinner_stop
-        warn "the $kind build produced no module; BatBot will run on CPU"
-        return 0
-    fi
-
-    # The manifest is what the settings screen reads to say where a runtime
-    # came from, so write it the same way the in-app builder does.
-    printf '{\n  "%s": {\n    "llama_tag": "%s",\n    "built_at": "%s"\n  }\n}\n' \
-        "$kind" "$LLAMA_TAG" "$(date -u '+%Y-%m-%d %H:%M UTC')" \
-        > "$target_dir/manifest.json"
-
-    RUNTIME_INSTALLED="$kind"
-    spinner_stop "$kind runtime installed"
-    rm -f "$RUNTIME_LOG"
     return 0
 }
 
@@ -1213,7 +1236,7 @@ run_check() {
         if [ "$RUNTIME" = "cuda" ]; then
             info "cuda sdk   : ${PKGS_CUDA[*]:-none available}  (you will be asked first)"
         else
-            muted "cuda sdk   : not needed for the $RUNTIME runtime"
+            muted "cuda sdk   : skipped -- no NVIDIA card that a packaged CUDA can build for"
         fi
     else
         muted "(package installation disabled with --no-deps)"
@@ -1223,14 +1246,10 @@ run_check() {
     info "binary     : $PREFIX/bin/batbot"
     info "libraries  : $PREFIX/lib/batbot"
     info "config     : ${XDG_CONFIG_HOME:-$HOME/.config}/batbot/config.json"
-    info "runtimes   : ${XDG_DATA_HOME:-$HOME/.local/share}/batbot/runtimes"
-    if [ "$RUNTIME" = "cpu" ] || [ "$RUNTIME" = "none" ]; then
-        info "prebuild   : CPU only -- add a GPU runtime later in settings"
-    else
-        info "prebuild   : the $RUNTIME runtime, on top of CPU"
-    fi
-    muted "GPU backends are loadable: they can be added or removed at any time"
-    muted "from the settings screen, without rebuilding BatBot."
+    info "runtime dir: ${XDG_DATA_HOME:-$HOME/.local/share}/batbot/runtimes"
+    info "runtimes   : none -- you choose one from the settings screen"
+    muted "Compute backends are loadable: CPU, CUDA and Vulkan can be added or"
+    muted "removed at any time from the settings screen, without rebuilding."
 
     if [ -n "$CUDA_NOTE" ]; then
         printf '\n'
@@ -1248,8 +1267,12 @@ main() {
     [ "$DO_UNINSTALL" = 1 ] && uninstall
 
     step "Checking your system"
+    phase 50 "detecting the platform"
     detect_platform
+    phase_end
+    phase 50 "looking for a GPU"
     decide_backend
+    phase_end
 
     if [ "$INSTALL_DEPS" = 1 ]; then
         step "Installing dependencies"
@@ -1259,11 +1282,15 @@ main() {
     fi
 
     step "Checking CMake"
+    phase 100 "checking the CMake version"
     ensure_cmake
+    phase_end
 
     step "Getting the source"
+    phase 100 "fetching $REPO_URL"
     command -v git >/dev/null 2>&1 || die "git is required but not installed"
     locate_source
+    phase_end
 
     step "Building BatBot"
     build_and_install
@@ -1273,22 +1300,22 @@ main() {
     local models_dir="${XDG_DATA_HOME:-$HOME/.local/share}/batbot/models"
     mkdir -p "$models_dir" 2>/dev/null || true
 
-    # Close the main bar out at 100%, so the last thing on screen agrees with
-    # the five that came before it rather than leaving it stuck at 96%.
-    STEP_NUM=$((STEP_TOTAL + 1))
-    printf '\n'
-    overall_bar 100
+    # Retire the live block, and leave one last full bar behind in the
+    # scrollback. Everything printed from here on is a plain printf, so the
+    # block has to stop redrawing itself or it would land in the middle of it.
+    STEP_PCT=100
+    block_draw
+    block_clear
+    STEP_NUM=0
+    show_cursor
+    printf '\n    %sinstall%s  %s\n\n' \
+        "$C_DIM" "$C_RESET" "$(draw_bar 100 "$C_GRN")"
 
-    printf '\n%s%s  BatBot is installed.%s\n\n' "$C_GRN" "$C_BOLD" "$C_RESET"
-    info "binary   : $PREFIX/bin/batbot"
-    info "models   : $models_dir"
-    info "config   : ${XDG_CONFIG_HOME:-$HOME/.config}/batbot/config.json"
-    if [ -n "${RUNTIME_INSTALLED:-}" ]; then
-        info "runtimes : CPU + ${RUNTIME_INSTALLED}"
-    else
-        info "runtimes : CPU"
-        muted "add a GPU runtime any time: run batbot, ctrl-e, open Runtimes"
-    fi
+    printf '%s%s  BatBot is installed.%s\n\n' "$C_GRN" "$C_BOLD" "$C_RESET"
+    printf '    binary   : %s\n' "$PREFIX/bin/batbot"
+    printf '    models   : %s\n' "$models_dir"
+    printf '    config   : %s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/batbot/config.json"
+    printf '    runtimes : %snone yet%s\n' "$C_YEL" "$C_RESET"
 
     if [ -n "$CUDA_NOTE" ]; then
         printf '\n'
@@ -1300,12 +1327,16 @@ main() {
 
     cat <<EOF
 
-  ${C_BOLD}Next:${C_RESET} BatBot ships no models. Bring your own GGUFs.
+  ${C_BOLD}Next:${C_RESET} BatBot installs with no compute runtime and no models.
+  Both are yours to choose.
 
-    1. put your .gguf files in ${C_BOLD}$models_dir${C_RESET}
-    2. run ${C_BOLD}batbot${C_RESET} and press ${C_BOLD}ctrl-e${C_RESET} to assign a model to each
-       expert seat and to the delegator, then ${C_BOLD}ctrl-s${C_RESET} to save
-    3. cd into any project and run ${C_BOLD}batbot${C_RESET}
+    1. run ${C_BOLD}batbot${C_RESET}, press ${C_BOLD}ctrl-e${C_RESET} and open ${C_BOLD}Runtimes${C_RESET}. Pick CPU, CUDA or
+       Vulkan and press enter -- it is compiled here, which takes a few
+       minutes, and nothing can load a model until one is installed
+    2. put your .gguf files in ${C_BOLD}$models_dir${C_RESET}
+    3. back in settings, assign a model to the delegator and to each expert
+       seat you want, then ${C_BOLD}ctrl-s${C_RESET} to save
+    4. cd into any project and run ${C_BOLD}batbot${C_RESET}
 
   A good delegator is any small instruct model, around 1B parameters.
   Check how well one routes before committing to it:

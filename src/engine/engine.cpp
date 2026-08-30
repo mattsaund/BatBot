@@ -18,6 +18,7 @@
 #include "batbot/config/gpu_policy.hpp"
 #include "batbot/config/paths.hpp"
 #include "batbot/engine/route_policy.hpp"
+#include "batbot/runtime/registry.hpp"
 
 namespace batbot {
 namespace {
@@ -97,6 +98,14 @@ void Engine::release_expert() {
     queued_.notify_one();
 }
 
+void Engine::reload_models() {
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        pending_.push_back(Request{RequestKind::ReloadModels, {}, std::nullopt, {}});
+    }
+    queued_.notify_one();
+}
+
 void Engine::reset_history() {
     const std::lock_guard<std::mutex> lock(mutex_);
     history_.clear();
@@ -113,8 +122,19 @@ void Engine::run() {
     // here rather than when the config was parsed.
     host_ = std::make_unique<ModelHost>(paths::log_file());
 
-    for (const std::string& device : ModelHost::devices()) {
+    const std::vector<std::string> devices = ModelHost::devices();
+    for (const std::string& device : devices) {
         state_.add_notice("device: " + device);
+    }
+    // Said at startup rather than at the first prompt: with no runtime there
+    // is no hardware to run a model on, and finding that out only when you
+    // have typed a question is the worse way to learn it.
+    if (devices.empty()) {
+        state_.add_notice(RuntimeRegistry::any_installed()
+                              ? "a runtime is installed but found no hardware it can drive "
+                                "-- press ctrl-e and open Runtimes"
+                              : "no runtime installed -- press ctrl-e, open Runtimes, "
+                                "and install one before assigning models");
     }
 
     {
@@ -143,6 +163,32 @@ void Engine::run() {
             }
             request = std::move(pending_.front());
             pending_.pop_front();
+        }
+
+        if (request.kind == RequestKind::ReloadModels) {
+            // Order matters: free everything first, then reload. Loading the
+            // router while the old expert is still resident would need both in
+            // memory at once, which on a machine that was just given a GPU is
+            // the moment least likely to have room for it.
+            host_->release_expert();
+            state_.set_resident(std::nullopt);
+            router_.reset();
+
+            // The device list is exactly what just changed, and the split was
+            // worked out from the old one.
+            {
+                const std::lock_guard<std::mutex> lock(config_mutex_);
+                if (const std::string split = apply_gpu_policy(config_); !split.empty()) {
+                    state_.add_notice("GPU split (" + config_.gpu.mode + "): " + split);
+                }
+            }
+
+            load_router();
+            state_.set_mood(Mood::Idle, "runtime changed");
+            if (wake_) {
+                wake_();
+            }
+            continue;
         }
 
         if (request.kind == RequestKind::ReleaseExpert) {
@@ -200,9 +246,7 @@ void Engine::run() {
 void Engine::load_router() {
     if (config_.router.model.empty()) {
         router_ = std::make_unique<KeywordRouter>();
-        state_.add_notice(
-            "no delegator model assigned -- routing by keyword. Press ctrl-e and "
-            "assign a small instruct model to the delegator for real routing.");
+        state_.add_notice("no delegator model assigned");
         return;
     }
 

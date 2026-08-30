@@ -34,7 +34,19 @@ inline constexpr ftxui::Color::Palette16 kNotice  = ftxui::Color::CyanLight;
 inline constexpr ftxui::Color::Palette16 kError   = ftxui::Color::RedLight;
 inline constexpr ftxui::Color::Palette16 kAccent  = ftxui::Color::Magenta;
 
+// The row under the cursor, in every list BatBot draws.
+//
+// kMeta is GrayDark and so is this, which meant secondary text -- a file size,
+// a build date, a "(none)" -- vanished completely the moment its row was
+// selected. Anything drawn on a highlighted row uses kMetaOnHighlight instead,
+// and meta_color() below picks between the two.
+inline constexpr ftxui::Color::Palette16 kHighlight       = ftxui::Color::GrayDark;
+inline constexpr ftxui::Color::Palette16 kMetaOnHighlight = ftxui::Color::GrayLight;
+
 }  // namespace theme
+
+/// Secondary text, in the shade that stays readable on the row it is on.
+ftxui::Color meta_color(bool highlighted);
 
 /// The colour BatBot's sprite takes for a given mood.
 ftxui::Color mood_color(Mood mood);

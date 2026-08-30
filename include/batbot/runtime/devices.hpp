@@ -58,6 +58,17 @@ enum class GpuSplitMode {
 std::string_view gpu_split_mode_id(GpuSplitMode mode);
 GpuSplitMode     gpu_split_mode_from_id(std::string_view id);
 
+/// Lay a configured priority order over the devices that actually exist.
+///
+/// Returns `gpus` rearranged: the ones `order` names first, in that order, then
+/// everything `order` did not mention, in ggml index order. An index naming a
+/// card that is not in the machine is dropped rather than leaving a hole, and a
+/// card that appeared since the order was written lands at the end instead of
+/// vanishing -- so a config written with two GPUs plugged in still means
+/// something on the day only one is.
+std::vector<ComputeDevice> apply_priority_order(const std::vector<ComputeDevice>& gpus,
+                                                const std::vector<int>& order);
+
 /// Turn a split mode into the `tensor_split` vector llama.cpp wants: one
 /// weight per device, in ggml index order, summing to 1.
 ///

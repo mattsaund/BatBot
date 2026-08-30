@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// Scanning, seeding and loading the runtimes directory.
+// Scanning, loading and removing the runtimes directory.
 #include "batbot/runtime/registry.hpp"
 
 #include <algorithm>
@@ -9,6 +9,8 @@
 #include <optional>
 
 #include <nlohmann/json.hpp>
+
+#include <dlfcn.h>
 
 #include <ggml-backend.h>
 
@@ -94,6 +96,42 @@ std::map<BackendKind, int> registered_devices() {
     return counts;
 }
 
+/// Which of a backend's modules this machine should actually run.
+///
+/// The CPU backend ships as one module per x86-64 feature level and only one
+/// of them may be loaded, so the choice is ggml's own: each module exports
+/// `ggml_backend_score`, which returns 0 when the CPU cannot run it and a
+/// higher number the more of the machine it uses. ggml does this at startup
+/// inside ggml_backend_load_all_from_path; a runtime installed later has to
+/// have it done for it.
+///
+/// dlopen here is a probe, not a load: the winner is closed again and handed
+/// to ggml_backend_load, which is the call that registers it.
+std::filesystem::path best_module(const std::vector<std::filesystem::path>& files) {
+    if (files.size() == 1) {
+        return files.front();
+    }
+
+    std::filesystem::path best;
+    int best_score = 0;
+    for (const std::filesystem::path& file : files) {
+        void* handle = ::dlopen(file.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (handle == nullptr) {
+            continue;
+        }
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        auto score_fn = reinterpret_cast<int (*)()>(::dlsym(handle, "ggml_backend_score"));
+        const int score = score_fn != nullptr ? score_fn() : 1;
+        ::dlclose(handle);
+
+        if (score > best_score) {
+            best_score = score;
+            best        = file;
+        }
+    }
+    return best;
+}
+
 json read_manifest(const std::filesystem::path& file) {
     std::ifstream in(file);
     if (!in) {
@@ -104,6 +142,16 @@ json read_manifest(const std::filesystem::path& file) {
 }
 
 }  // namespace
+
+/// The llama.cpp tag this binary was compiled against. CMake passes it in; the
+/// fallback keeps a hand-rolled build compiling rather than failing here.
+#ifndef BATBOT_LLAMA_TAG
+#define BATBOT_LLAMA_TAG "unknown"
+#endif
+
+std::string_view RuntimeStatus::required_llama_tag() {
+    return BATBOT_LLAMA_TAG;
+}
 
 std::string RuntimeStatus::size_label() const {
     return format::bytes(bytes);
@@ -121,45 +169,44 @@ bool RuntimeRegistry::loadable_backends_supported() {
 #endif
 }
 
-int RuntimeRegistry::seed_from_bundle(std::string& error) {
+bool RuntimeRegistry::any_installed() {
+    return !modules_in(paths::runtimes_dir()).empty();
+}
+
+bool RuntimeRegistry::activate(BackendKind kind, std::string& error) {
     if (!loadable_backends_supported()) {
-        return 0;
+        error = "this build has its backend compiled in; runtimes cannot be loaded";
+        return false;
     }
 
-    const std::filesystem::path bundle = paths::bundled_runtimes_dir();
-    const std::filesystem::path target = paths::runtimes_dir();
-    if (bundle.empty() || bundle == target) {
-        return 0;
+    // ggml's registry is the source of truth for "already loaded". Asking it
+    // rather than remembering ourselves is what makes this safe to call after
+    // every build: load_backend() has no duplicate check of its own, and a
+    // second registration would give every device an identical twin.
+    if (registered_devices().count(kind) != 0) {
+        return true;
     }
 
-    std::error_code ec;
-    std::filesystem::create_directories(target, ec);
-    if (ec) {
-        error = "could not create " + target.string() + ": " + ec.message();
-        return 0;
+    const auto installed = modules_in(paths::runtimes_dir());
+    const auto found = installed.find(kind);
+    if (found == installed.end() || found->second.empty()) {
+        error = std::string(backend_info(kind).name) + " is not installed";
+        return false;
     }
 
-    const auto have = modules_in(target);
-    const auto offered = modules_in(bundle);
-
-    int copied = 0;
-    for (const auto& [kind, files] : offered) {
-        // Seed a backend only when the user has none of it. A runtime the user
-        // built themselves is newer than the bundled one and must win.
-        if (have.count(kind) != 0) {
-            continue;
-        }
-        for (const std::filesystem::path& file : files) {
-            std::filesystem::copy_file(file, target / file.filename(),
-                                       std::filesystem::copy_options::overwrite_existing, ec);
-            if (ec) {
-                error = "could not copy " + file.filename().string() + ": " + ec.message();
-                return copied;
-            }
-            ++copied;
-        }
+    const std::filesystem::path best = best_module(found->second);
+    if (best.empty()) {
+        error = std::string(backend_info(kind).name) +
+                " will not run on this machine (no module scored above zero)";
+        return false;
     }
-    return copied;
+
+    if (ggml_backend_load(best.string().c_str()) == nullptr) {
+        error = "could not load " + best.filename().string() +
+                " -- see the BatBot log";
+        return false;
+    }
+    return true;
 }
 
 void RuntimeRegistry::load_all() {
@@ -200,6 +247,10 @@ std::vector<RuntimeStatus> RuntimeRegistry::scan() {
             status.llama_tag = entry->value("llama_tag", "");
             status.built_at  = entry->value("built_at", "");
         }
+        // An unrecorded tag is "cannot tell", not "wrong": a manifest can be
+        // lost without the modules being any less valid.
+        status.stale = status.installed && !status.llama_tag.empty() &&
+                       status.llama_tag != RuntimeStatus::required_llama_tag();
 
         if (!info.required_tool.empty() && !util::on_path(std::string(info.required_tool))) {
             status.buildable = false;
@@ -213,12 +264,6 @@ std::vector<RuntimeStatus> RuntimeRegistry::scan() {
 
 bool RuntimeRegistry::remove(BackendKind kind, std::string& error) {
     const BackendInfo& info = backend_info(kind);
-    if (!info.removable) {
-        error = std::string(info.name) +
-                " is the fallback runtime and cannot be removed -- without it "
-                "BatBot has no way to run a model at all";
-        return false;
-    }
 
     const auto installed = modules_in(paths::runtimes_dir());
     const auto found = installed.find(kind);

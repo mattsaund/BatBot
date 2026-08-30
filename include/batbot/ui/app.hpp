@@ -19,6 +19,7 @@
 #include "batbot/ui/session_picker.hpp"
 #include "batbot/ui/widgets/bat_sprite.hpp"
 #include "batbot/ui/settings/runtime_view.hpp"
+#include "batbot/ui/settings/gpu_order_view.hpp"
 #include "batbot/ui/settings/settings_view.hpp"
 
 namespace batbot::ui {
@@ -67,6 +68,7 @@ private:
     BatSprite               bat_;
     SettingsView            settings_;
     RuntimeView             runtimes_;
+    GpuOrderView            gpu_order_;
     SessionPicker           sessions_;
     SessionStore            store_;
     bool                    in_settings_ = false;

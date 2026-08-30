@@ -16,6 +16,18 @@ if [ ! -x "$BATBOT" ]; then
     exit 2
 fi
 
+# These tests run the real binary, so a stale one reports failures that look
+# like product bugs and are not. Refuse rather than mislead.
+# The parentheses matter: without them find reads this as
+# "(-name '*.cpp') OR ('*.hpp' AND -newer)", which matches every source file
+# whatever its age.
+NEWER="$(find "$HERE/../src" "$HERE/../include" \
+         \( -name '*.cpp' -o -name '*.hpp' \) -newer "$BATBOT" 2>/dev/null | head -1)"
+if [ -n "$NEWER" ]; then
+    echo "$BATBOT is older than $NEWER -- rebuild, or pass the right binary" >&2
+    exit 2
+fi
+
 PASS=0
 FAIL=0
 check() {
@@ -36,9 +48,15 @@ setup() {
     local root="$SANDBOX/$1"
     rm -rf "$root"
     mkdir -p "$root/bin" "$root/cfg/batbot" "$root/dat/batbot/models"
-    # The installed layout: the binary in bin/, llama.cpp's shared libraries
-    # and the bundled runtimes in lib/batbot/. The binary is not the whole
-    # program any more, and uninstall has to know that.
+    # The bootstrapped CMake and, on a filesystem without symlinks, the whole
+    # build tree live in the cache. Uninstall removes it -- which is exactly
+    # why this has to be sandboxed: without XDG_CACHE_HOME below, running
+    # these tests deletes the developer's own build directory.
+    mkdir -p "$root/cache/batbot/build"
+    head -c 65536 /dev/zero > "$root/cache/batbot/build/CMakeCache.txt"
+    # The installed layout: the binary in bin/ and llama.cpp's shared
+    # libraries in lib/batbot/. The binary is not the whole program any more,
+    # and uninstall has to know that.
     mkdir -p "$root/lib/batbot/runtimes"
     head -c 262144 /dev/zero > "$root/lib/batbot/libllama.so"
     head -c 262144 /dev/zero > "$root/lib/batbot/runtimes/libggml-cpu-haswell.so"
@@ -61,6 +79,7 @@ setup() {
 run_uninstall() {  # root, answers, extra args
     local root="$1" answers="$2"; shift 2
     printf '%b' "$answers" | XDG_CONFIG_HOME="$root/cfg" XDG_DATA_HOME="$root/dat" \
+        XDG_CACHE_HOME="$root/cache" \
         "$root/bin/batbot" --uninstall "$@" >/dev/null 2>&1
 }
 
@@ -91,6 +110,7 @@ check "routebench removed"    "$(exists "$ROOT/bin/batbot-routebench")"  "no"
 check "user runtimes removed" "$(exists "$ROOT/dat/batbot/runtimes")"   "no"
 check "runtime source removed" "$(exists "$ROOT/dat/batbot/runtime-src")" "no"
 check "project history removed" "$(exists "$ROOT/dat/batbot/projects")" "no"
+check "cache removed"         "$(exists "$ROOT/cache/batbot")"          "no"
 
 echo "  -y answers yes to every question"
 ROOT="$(setup assume_yes)"
@@ -105,6 +125,7 @@ check "routebench removed"    "$(exists "$ROOT/bin/batbot-routebench")"  "no"
 check "user runtimes removed" "$(exists "$ROOT/dat/batbot/runtimes")"   "no"
 check "runtime source removed" "$(exists "$ROOT/dat/batbot/runtime-src")" "no"
 check "project history removed" "$(exists "$ROOT/dat/batbot/projects")" "no"
+check "cache removed"         "$(exists "$ROOT/cache/batbot")"          "no"
 
 echo "  each answer is independent: keep the config, drop the rest"
 ROOT="$(setup partial)"

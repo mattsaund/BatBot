@@ -6,8 +6,10 @@
 // touching a terminal. It lists every backend BatBot knows how to build, what
 // state it is in, and -- while a build runs -- how far along it is.
 //
-// It owns no llama.cpp state. Installing writes a file into the runtimes
-// directory; ggml picks it up on the next start.
+// Installing writes modules into the runtimes directory and hands them
+// straight to ggml, so a runtime built here is usable without a restart --
+// which is the difference between this screen working and this screen looking
+// like it did nothing.
 #pragma once
 
 #include <cstddef>
@@ -52,6 +54,12 @@ public:
     /// user quit out from under it without a word.
     bool building() const;
 
+    /// Reports a finished build exactly once, so the application can drop the
+    /// models it has loaded and pick them up again on the new backend. Models
+    /// choose their devices when they load, so one that was already resident
+    /// goes on running on the old ones until it is reloaded.
+    bool take_activation();
+
     /// Stop any build and wait for its thread. Called during teardown, before
     /// the screen it redraws through goes away.
     void shutdown();
@@ -76,6 +84,9 @@ private:
     /// Removing a runtime is a keypress away from installing one, so the first
     /// press arms and the second acts.
     bool confirming_remove_ = false;
+
+    /// Whether the build now showing as finished has already been reported.
+    bool activation_reported_ = false;
 };
 
 }  // namespace batbot::ui

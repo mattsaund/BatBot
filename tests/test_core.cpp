@@ -32,6 +32,33 @@ using namespace batbot;
 namespace {
 
 /// A directory that cleans itself up, so tests never leave files behind.
+/// Point the XDG data directory at a temporary place, so a test that reads or
+/// writes a real BatBot directory cannot touch the one belonging to whoever is
+/// running the suite.
+class ScopedDataHome {
+public:
+    explicit ScopedDataHome(const std::filesystem::path& dir) {
+        if (const char* existing = std::getenv("XDG_DATA_HOME"); existing != nullptr) {
+            previous_ = existing;
+            had_      = true;
+        }
+        ::setenv("XDG_DATA_HOME", dir.c_str(), 1);
+    }
+    ~ScopedDataHome() {
+        if (had_) {
+            ::setenv("XDG_DATA_HOME", previous_.c_str(), 1);
+        } else {
+            ::unsetenv("XDG_DATA_HOME");
+        }
+    }
+    ScopedDataHome(const ScopedDataHome&)            = delete;
+    ScopedDataHome& operator=(const ScopedDataHome&) = delete;
+
+private:
+    std::string previous_;
+    bool        had_ = false;
+};
+
 class TempDir {
 public:
     TempDir() {
@@ -871,21 +898,149 @@ TEST(ggml_registry_names_map_onto_backends_whatever_their_case) {
     CHECK(!backend_from_reg_name("BLAS").has_value());
 }
 
-TEST(the_cpu_backend_is_the_one_that_cannot_be_removed) {
-    // Removing it would leave an install that cannot run a model at all.
-    CHECK(!backend_info(BackendKind::Cpu).removable);
-    CHECK(backend_info(BackendKind::Cuda).removable);
-    CHECK(backend_info(BackendKind::Vulkan).removable);
+TEST(a_runtime_built_against_another_llama_cpp_is_reported_as_stale) {
+    // Runtimes outlive the BatBot that built them: they survive an uninstall
+    // that keeps your data, and a reinstall from newer source lands on top of
+    // them. ggml is not ABI-stable across releases, so one built for a
+    // different tag loads and then crashes on the first tensor.
+    TempDir temp;
+    const ScopedDataHome scoped(temp.path());
 
+    const std::filesystem::path runtimes = paths::runtimes_dir();
+    std::filesystem::create_directories(runtimes);
+    { std::ofstream module(runtimes / "libggml-cuda.so"); module << "not really a module"; }
+
+    const auto status_for = [&](BackendKind kind) {
+        for (const RuntimeStatus& status : RuntimeRegistry::scan()) {
+            if (status.kind == kind) {
+                return status;
+            }
+        }
+        return RuntimeStatus{};
+    };
+
+    // The tag this binary wants: recorded, so not stale.
+    {
+        std::ofstream manifest(runtimes / "manifest.json");
+        manifest << R"({"cuda":{"llama_tag":")"
+                 << RuntimeStatus::required_llama_tag() << R"("}})";
+    }
+    CHECK(status_for(BackendKind::Cuda).installed);
+    CHECK(!status_for(BackendKind::Cuda).stale);
+
+    // Some other tag: stale, and the message needs the tag to name it.
+    {
+        std::ofstream manifest(runtimes / "manifest.json");
+        manifest << R"({"cuda":{"llama_tag":"b0001"}})";
+    }
+    CHECK(status_for(BackendKind::Cuda).stale);
+    CHECK_EQ(status_for(BackendKind::Cuda).llama_tag, std::string("b0001"));
+
+    // No manifest entry at all means "cannot tell", which is not a reason to
+    // tell someone their working runtime is broken.
+    {
+        std::ofstream manifest(runtimes / "manifest.json");
+        manifest << "{}";
+    }
+    CHECK(status_for(BackendKind::Cuda).installed);
+    CHECK(!status_for(BackendKind::Cuda).stale);
+
+    // And a backend with no module is never stale, whatever the manifest says.
+    CHECK(!status_for(BackendKind::Vulkan).installed);
+    CHECK(!status_for(BackendKind::Vulkan).stale);
+}
+
+TEST(the_cpu_backend_is_the_one_every_other_runtime_needs) {
+    // llama.cpp throws "no CPU backend found" whatever GPU is installed, which
+    // is why the builder brings this one along with a CUDA or Vulkan install.
+    CHECK(backend_info(BackendKind::Cpu).required);
+    CHECK(!backend_info(BackendKind::Cuda).required);
+    CHECK(!backend_info(BackendKind::Vulkan).required);
+}
+
+TEST(removing_a_runtime_that_is_not_installed_says_so) {
+    // Scoped, and it has to be: RuntimeRegistry::remove deletes files under
+    // the XDG data directory. Without this the test reaches into the runtimes
+    // of whoever is running the suite and removes the one it is asking about.
+    TempDir temp;
+    const ScopedDataHome scoped(temp.path());
+
+    // Every runtime can be removed now, including the CPU one -- an install
+    // with no runtimes at all is the state a fresh install starts in.
     std::string error;
-    CHECK(!RuntimeRegistry::remove(BackendKind::Cpu, error));
-    CHECK(!error.empty());
+    CHECK(!RuntimeRegistry::remove(BackendKind::Cuda, error));
+    CHECK(error.find("not installed") != std::string::npos);
 }
 
 TEST(only_multi_device_backends_advertise_gpu_splitting) {
     CHECK(!backend_info(BackendKind::Cpu).multi_device);
     CHECK(backend_info(BackendKind::Cuda).multi_device);
     CHECK(backend_info(BackendKind::Vulkan).multi_device);
+}
+
+// ---------------------------------------------------------------------------
+// GPU priority order
+//
+// The order is edited in a panel and stored as device indices, so the config
+// and the machine can disagree: a card unplugged since, or added since. What
+// the panel shows has to be the machine's cards in the config's order, and
+// nothing else.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+ComputeDevice gpu_at(int index, std::string name) {
+    ComputeDevice device;
+    device.index       = index;
+    device.name        = std::move(name);
+    device.description = device.name;
+    device.is_gpu      = true;
+    return device;
+}
+
+/// The device indices, as "2,0,1" -- a string so a mismatch prints both orders
+/// rather than the address of a vector.
+std::string indices_of(const std::vector<ComputeDevice>& devices) {
+    std::string out;
+    for (const ComputeDevice& device : devices) {
+        if (!out.empty()) {
+            out += ",";
+        }
+        out += std::to_string(device.index);
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST(a_configured_gpu_order_is_laid_over_the_cards_present) {
+    const std::vector<ComputeDevice> gpus{gpu_at(0, "A"), gpu_at(1, "B"), gpu_at(2, "C")};
+    CHECK_EQ(indices_of(apply_priority_order(gpus, {2, 0, 1})), std::string{"2,0,1"});
+}
+
+TEST(an_unmentioned_gpu_goes_to_the_end_rather_than_vanishing) {
+    // A card added since the order was written. Dropping it would quietly stop
+    // BatBot using hardware the machine has.
+    const std::vector<ComputeDevice> gpus{gpu_at(0, "A"), gpu_at(1, "B"), gpu_at(2, "C")};
+    CHECK_EQ(indices_of(apply_priority_order(gpus, {2})), std::string{"2,0,1"});
+}
+
+TEST(an_order_naming_a_gpu_that_is_gone_leaves_no_hole) {
+    // The config was written with three cards; two are plugged in today.
+    const std::vector<ComputeDevice> gpus{gpu_at(0, "A"), gpu_at(2, "C")};
+    CHECK_EQ(indices_of(apply_priority_order(gpus, {2, 1, 0})), std::string{"2,0"});
+}
+
+TEST(a_gpu_listed_twice_takes_only_its_first_place) {
+    const std::vector<ComputeDevice> gpus{gpu_at(0, "A"), gpu_at(1, "B")};
+    const std::vector<ComputeDevice> ordered = apply_priority_order(gpus, {1, 1, 0});
+    CHECK_EQ(ordered.size(), std::size_t{2});
+    CHECK_EQ(indices_of(ordered), std::string{"1,0"});
+}
+
+TEST(no_configured_order_leaves_the_cards_in_ggml_order) {
+    const std::vector<ComputeDevice> gpus{gpu_at(0, "A"), gpu_at(1, "B"), gpu_at(2, "C")};
+    CHECK_EQ(indices_of(apply_priority_order(gpus, {})), std::string{"0,1,2"});
 }
 
 TEST(the_vulkan_backend_asks_for_the_spirv_headers) {
@@ -1119,32 +1274,6 @@ TEST(the_readout_prefers_the_live_rate_while_a_reply_is_arriving) {
 // ---------------------------------------------------------------------------
 
 namespace {
-
-/// Point the XDG data directory at a temporary place, so session tests write
-/// nowhere near the real history.
-class ScopedDataHome {
-public:
-    explicit ScopedDataHome(const std::filesystem::path& dir) {
-        if (const char* existing = std::getenv("XDG_DATA_HOME"); existing != nullptr) {
-            previous_ = existing;
-            had_      = true;
-        }
-        ::setenv("XDG_DATA_HOME", dir.c_str(), 1);
-    }
-    ~ScopedDataHome() {
-        if (had_) {
-            ::setenv("XDG_DATA_HOME", previous_.c_str(), 1);
-        } else {
-            ::unsetenv("XDG_DATA_HOME");
-        }
-    }
-    ScopedDataHome(const ScopedDataHome&)            = delete;
-    ScopedDataHome& operator=(const ScopedDataHome&) = delete;
-
-private:
-    std::string previous_;
-    bool        had_ = false;
-};
 
 Turn finished_turn(std::string prompt, std::string reply, int output_tokens) {
     Turn turn;

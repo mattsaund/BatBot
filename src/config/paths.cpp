@@ -54,21 +54,6 @@ std::filesystem::path executable_dir() {
     return self.parent_path();
 }
 
-std::filesystem::path bundled_runtimes_dir() {
-    const std::filesystem::path bin = executable_dir();
-    if (bin.empty()) {
-        return {};
-    }
-    // The installed layout is <prefix>/bin/batbot with the libraries in
-    // <prefix>/lib/batbot, which is also what the binary's RPATH points at.
-    const std::filesystem::path installed = bin.parent_path() / "lib" / "batbot" / "runtimes";
-    if (std::filesystem::exists(installed)) {
-        return installed;
-    }
-    // In a build tree, ggml drops its backend modules next to the binary.
-    return bin;
-}
-
 std::filesystem::path expand_user(std::string_view raw) {
     if (raw.empty()) {
         return {};

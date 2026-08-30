@@ -80,24 +80,13 @@ Element App::render_welcome() const {
         });
     }
 
-    // First run. This is the screen most people will see first, so it says
-    // exactly what to do rather than merely reporting that nothing works.
-    // BatBot ships no models, so this is also where that expectation is set.
+    // First run. Two lines: what is missing, and the one key that fixes it.
+    // Everything else this used to say -- where models go, what size delegator
+    // to pick -- is said again in settings, at the moment it is actually
+    // needed, and saying it twice only made the first screen a wall of text.
     return vbox({
         text("No expert models are assigned yet.") | color(theme::kNotice) | bold,
-        text(" "),
-        text("BatBot does not come with models -- bring your own GGUF files.")
-            | color(theme::kMeta),
-        text(" "),
-        text("  1. Put your .gguf files in the models directory:") | color(theme::kMeta),
-        text("       " + config_.resolved_models_dir().string()) | color(theme::kAccent),
-        text("  2. Press ctrl-e to open settings.") | color(theme::kMeta),
-        text("  3. Assign a model to the delegator and to any expert seats") | color(theme::kMeta),
-        text("     you want, then ctrl-s to save.") | color(theme::kMeta),
-        text(" "),
-        text("A ~1B instruct model makes a good delegator. Any model can stand in")
-            | color(theme::kMeta) | dim,
-        text("as an expert while you try things out.") | color(theme::kMeta) | dim,
+        text("Press ctrl-e to open settings and assign one.") | color(theme::kMeta) | dim,
         text(" "),
     });
 }

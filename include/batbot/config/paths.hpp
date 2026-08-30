@@ -46,11 +46,6 @@ std::filesystem::path projects_dir();
 /// determined. Used to find files installed alongside BatBot.
 std::filesystem::path executable_dir();
 
-/// <prefix>/lib/batbot/runtimes -- the runtimes shipped by `make install`,
-/// derived from executable_dir(). These are copied into runtimes_dir() on
-/// first run so there is exactly one directory to manage afterwards.
-std::filesystem::path bundled_runtimes_dir();
-
 /// Expand a leading `~` and resolve to an absolute path. Does not require the
 /// path to exist, so it is safe to call on a model path the user has not
 /// downloaded yet.

@@ -8,7 +8,6 @@
 #include <filesystem>
 #include <system_error>
 
-#include "batbot/config/paths.hpp"
 #include "batbot/runtime/devices.hpp"
 #include "batbot/ui/theme.hpp"
 
@@ -16,6 +15,11 @@ using namespace ftxui;  // NOLINT(google-build-using-namespace)
 
 namespace batbot::ui {
 namespace {
+
+/// Width of the label column, in cells. Wide enough for the longest row label
+/// on the screen ("Reset model path to default"), because a label that is cut
+/// off mid-word turns a button into a riddle.
+constexpr int kLabelWidth = 28;
 
 /// Sentinel seat meaning "the delegator", which is not one of the subjects.
 constexpr std::size_t kRouterSeat = kSubjectCount;
@@ -70,9 +74,8 @@ void SettingsView::build_rows() {
                      "where BatBot looks for .gguf files", &config_.models_dir,
                      nullptr, nullptr, nullptr, 0, {}, ActionId::None});
     // The way back from a models directory that was moved somewhere awkward,
-    // or onto a drive that is no longer plugged in. The value column shows the
-    // path it would return to, so the row explains itself.
-    rows_.push_back({Kind::Action, "Reset to default",
+    // or onto a drive that is no longer plugged in.
+    rows_.push_back({Kind::Action, "Reset model path to default",
                      "put the models directory back where BatBot expects it",
                      nullptr, nullptr, nullptr, nullptr, 0, {},
                      ActionId::ResetModelsDir});
@@ -129,7 +132,8 @@ void SettingsView::build_rows() {
     header("HARDWARE");
     rows_.push_back({Kind::Panel, "Runtimes",
                      "install or remove CUDA / Vulkan / CPU backends",
-                     nullptr, nullptr, nullptr, nullptr, 0, {}});
+                     nullptr, nullptr, nullptr, nullptr, 0, {},
+                     ActionId::None, PanelId::Runtimes});
     rows_.push_back({Kind::Enum, "Multi-GPU split",
                      "how one expert is divided between the graphics cards",
                      &config_.gpu.mode, nullptr, nullptr, nullptr, 0,
@@ -137,9 +141,10 @@ void SettingsView::build_rows() {
     rows_.push_back({Kind::Int, "Main GPU",
                      "device index for small tensors, and the whole model in single mode",
                      nullptr, &config_.gpu.main_gpu, nullptr, nullptr, 0, {}});
-    gpu_priority_to_text();
-    rows_.push_back({Kind::Text, "GPU priority order", gpu_priority_help(),
-                     &gpu_priority_text_, nullptr, nullptr, nullptr, 0, {}});
+    rows_.push_back({Kind::Panel, "GPU priority order",
+                     "which card is filled first, when the split is by priority",
+                     nullptr, nullptr, nullptr, nullptr, 0, {},
+                     ActionId::None, PanelId::GpuOrder});
 
     header("BEHAVIOUR");
     rows_.push_back({Kind::Text, "System prompt", "sent to every expert",
@@ -157,84 +162,44 @@ void SettingsView::build_rows() {
 // ---------------------------------------------------------------------------
 // GPU priority order
 //
-// Stored as device indices, edited as "0, 2, 1". Anything unparseable is
-// dropped rather than rejected, so a half-typed list never costs the whole
-// edit -- and the help line always shows what the numbers currently mean.
+// Stored as device indices and rearranged in a panel of its own, so all this
+// screen has to do is name the cards behind those indices.
 // ---------------------------------------------------------------------------
 
-void SettingsView::gpu_priority_to_text() {
-    gpu_priority_text_.clear();
-    for (const int index : config_.gpu.priority) {
-        if (!gpu_priority_text_.empty()) {
-            gpu_priority_text_ += ", ";
-        }
-        gpu_priority_text_ += std::to_string(index);
+void SettingsView::set_gpu_priority(std::vector<int> order) {
+    if (config_.gpu.priority == order) {
+        return;
     }
-}
-
-void SettingsView::gpu_priority_from_text(const std::string& text) {
-    std::vector<int> order;
-    std::string digits;
-
-    const auto flush = [&] {
-        if (digits.empty()) {
-            return;
-        }
-        try {
-            const int index = std::stoi(digits);
-            // A device listed twice would take two shares of the split, so the
-            // first mention wins and the rest are ignored.
-            if (index >= 0 && std::find(order.begin(), order.end(), index) == order.end()) {
-                order.push_back(index);
-            }
-        } catch (const std::exception&) {
-            // Not a number: the user is mid-edit, and dropping it is kinder
-            // than refusing the whole line.
-        }
-        digits.clear();
-    };
-
-    for (const char c : text) {
-        if (std::isdigit(static_cast<unsigned char>(c)) != 0) {
-            digits += c;
-        } else {
-            flush();
-        }
-    }
-    flush();
-
     config_.gpu.priority = std::move(order);
-    gpu_priority_to_text();
+    dirty_ = true;
+    // The row's value column reads the new order straight out of the config,
+    // so nothing else has to be kept in step.
 }
 
-std::string SettingsView::gpu_priority_help() const {
-    const std::vector<ComputeDevice> gpus = gpu_devices();
-    if (gpus.empty()) {
-        return "device indices, best first -- no GPUs are visible yet";
-    }
+std::string SettingsView::gpu_priority_summary() const {
     if (config_.gpu.priority.empty()) {
-        std::string help = "device indices, best first -- available:";
-        for (const ComputeDevice& gpu : gpus) {
-            help += " " + std::to_string(gpu.index) + "=" +
-                    (gpu.description.empty() ? gpu.name : gpu.description) + ";";
-        }
-        return help;
+        return "auto";
     }
 
-    std::string help = "order:";
+    const std::vector<ComputeDevice> gpus = gpu_devices();
+
+    std::string summary;
     for (const int index : config_.gpu.priority) {
-        const auto found = std::find_if(gpus.begin(), gpus.end(), [index](const ComputeDevice& gpu) {
-            return gpu.index == index;
-        });
-        help += " " + (found == gpus.end()
-                           ? "[" + std::to_string(index) + " not present]"
-                           : (found->description.empty() ? found->name : found->description));
-        help += " >";
+        const auto found = std::find_if(gpus.begin(), gpus.end(),
+                                        [index](const ComputeDevice& gpu) {
+                                            return gpu.index == index;
+                                        });
+        if (!summary.empty()) {
+            summary += " > ";
+        }
+        // A card in the config that is not in the machine is worth saying out
+        // loud: it is the difference between a split that was configured and
+        // one that will actually happen.
+        summary += found == gpus.end()
+                       ? "[device " + std::to_string(index) + " missing]"
+                       : (found->description.empty() ? found->name : found->description);
     }
-    if (help.size() > 2) {
-        help.erase(help.size() - 2);
-    }
-    return help;
+    return summary;
 }
 
 std::string SettingsView::value_of(const Row& row) const {
@@ -251,12 +216,12 @@ std::string SettingsView::value_of(const Row& row) const {
                                                            : std::string{};
         case Kind::Float:    return row.real != nullptr ? format_float(*row.real) : std::string{};
         case Kind::Bool:     return (row.flag != nullptr && *row.flag) ? "on" : "off";
-        case Kind::Panel:    return "›";
-        case Kind::Action:
-            if (row.action == ActionId::ResetModelsDir) {
-                return paths::models_dir().string();
-            }
-            return "›";
+        case Kind::Panel:
+            // The GPU order row is worth reading without opening it; the
+            // Runtimes row is not, since its panel is the whole story.
+            return row.panel == PanelId::GpuOrder ? gpu_priority_summary()
+                                                  : std::string("›");
+        case Kind::Action:  return "›";
     }
     return {};
 }
@@ -382,9 +347,6 @@ void SettingsView::commit_edit() {
             if (row.text == &config_.models_dir) {
                 refresh();
             }
-            if (row.text == &gpu_priority_text_) {
-                gpu_priority_from_text(text);
-            }
             break;
         case Kind::Int:
             // A typo should cost the edit, not the session: report it and keep
@@ -459,7 +421,12 @@ SettingsAction SettingsView::handle(const Event& event, bool& consumed) {
         // the panel outlives this screen (a build keeps running after you
         // leave settings).
         if (!rows_.empty() && rows_[selected_].kind == Kind::Panel) {
-            return SettingsAction::OpenRuntimes;
+            switch (rows_[selected_].panel) {
+                case PanelId::Runtimes: return SettingsAction::OpenRuntimes;
+                case PanelId::GpuOrder: return SettingsAction::OpenGpuOrder;
+                case PanelId::None:     break;
+            }
+            return SettingsAction::None;
         }
         activate_selection();
         return SettingsAction::None;
@@ -498,9 +465,9 @@ Element SettingsView::render_row(const Row& row, std::size_t index) const {
     if (selected && editor_.active()) {
         return hbox({
             text(" > ") | color(theme::kAccent) | bold,
-            text(row.label) | bold | size(WIDTH, EQUAL, 20),
+            text(row.label) | bold | size(WIDTH, EQUAL, kLabelWidth),
             editor_.render() | flex,
-        }) | bgcolor(Color::GrayDark);
+        }) | bgcolor(theme::kHighlight);
     }
 
     std::string value = value_of(row);
@@ -532,13 +499,19 @@ Element SettingsView::render_row(const Row& row, std::size_t index) const {
         value_color = (row.flag != nullptr && *row.flag) ? theme::kSeatActive : theme::kMeta;
     }
 
+    // kMeta is the same grey as the highlight, so a "(none)" or an "off" on the
+    // selected row would be invisible exactly when it is being looked at.
+    Element value_element = (Color(value_color) == Color(theme::kMeta))
+                                ? text(value) | color(meta_color(selected))
+                                : text(value) | color(value_color);
+
     Element label = text(row.label);
     Element line  = hbox({
         text(selected ? " > " : "   ") | color(theme::kAccent) | bold,
-        (selected ? label | bold : label) | size(WIDTH, EQUAL, 20),
-        text(value) | color(value_color) | flex,
+        (selected ? label | bold : label) | size(WIDTH, EQUAL, kLabelWidth),
+        std::move(value_element) | flex,
     });
-    return selected ? line | bgcolor(Color::GrayDark) : line;
+    return selected ? line | bgcolor(theme::kHighlight) : line;
 }
 
 Element SettingsView::footer_hint() const {

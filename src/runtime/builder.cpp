@@ -83,6 +83,27 @@ std::string job_count() {
     return std::to_string(std::max(1U, cores > 2 ? cores - 1 : cores));
 }
 
+/// Is the CPU runtime already installed? Read from the directory rather than
+/// from ggml's registry, because a build started before any runtime was
+/// loaded still has to see one that was installed a minute ago.
+bool cpu_installed() {
+    for (const RuntimeStatus& runtime : RuntimeRegistry::scan()) {
+        if (runtime.kind == BackendKind::Cpu) {
+            return runtime.installed;
+        }
+    }
+    return false;
+}
+
+/// Does `filename` belong to one of the backends this build set out to make?
+/// Matched on the module prefix, since the CPU backend arrives as a dozen
+/// files (libggml-cpu-haswell.so and friends) rather than one.
+bool produces_module(const std::vector<BackendKind>& produces, const std::string& filename) {
+    return std::any_of(produces.begin(), produces.end(), [&filename](BackendKind kind) {
+        return filename.rfind("libggml-" + std::string(backend_info(kind).id), 0) == 0;
+    });
+}
+
 }  // namespace
 
 std::string BuildProgress::label() const {
@@ -326,10 +347,21 @@ void RuntimeBuilder::run(BackendKind kind) {
     std::error_code ec;
     std::filesystem::create_directories(build, ec);
 
+    // What this build will produce. Usually just the backend that was asked
+    // for -- but llama.cpp cannot load a model without the CPU backend even
+    // when every layer is going to a GPU, so a first CUDA install on a machine
+    // with an empty runtimes directory has to bring it along or it would
+    // install a runtime that still cannot answer anything. See
+    // BackendInfo::required.
+    std::vector<BackendKind> produces{kind};
+    const bool with_cpu = kind != BackendKind::Cpu && !cpu_installed();
+    if (with_cpu) {
+        produces.push_back(BackendKind::Cpu);
+    }
+
     if (!cancel_.load()) {
-        // Only the backend module is wanted, so every other part of llama.cpp
-        // is switched off. GGML_CPU is off too: this build exists to produce
-        // one .so, and the CPU variants already exist.
+        // Only the backend modules are wanted, so every other part of
+        // llama.cpp is switched off.
         std::vector<std::string> configure = {
             "cmake", "-S", src.string(), "-B", build.string(),
             "-DCMAKE_BUILD_TYPE=Release",
@@ -344,21 +376,52 @@ void RuntimeBuilder::run(BackendKind kind) {
             "-DLLAMA_BUILD_COMMON=OFF",
             "-DLLAMA_CURL=OFF",
         };
-        if (kind == BackendKind::Cpu) {
-            // Rebuilding the CPU runtime should produce what shipped: one
-            // module per feature level, chosen by score at load time.
+        if (kind == BackendKind::Cpu || with_cpu) {
+            // One module per x86-64 feature level, scored at load time. This
+            // is the only way to build the CPU backend in DL mode: GGML_NATIVE
+            // is rejected here, so without it every module would be compiled
+            // for the lowest common denominator.
+            configure.emplace_back("-DGGML_CPU=ON");
             configure.emplace_back("-DGGML_CPU_ALL_VARIANTS=ON");
         } else {
-            // A GPU build has no use for the CPU backend, and compiling it
-            // would add minutes for a module that already exists.
+            // The CPU runtime is already installed, and compiling it again
+            // would add minutes for a module that would just overwrite itself.
             configure.emplace_back("-DGGML_CPU=OFF");
         }
         if (!run_command(configure, {}, BuildProgress::Phase::Configuring, false)) {
             if (cancel_.load()) {
                 set_phase(BuildProgress::Phase::Cancelled);
+                running_.store(false);
+                return;
             }
-            running_.store(false);
-            return;
+
+            // Configure failed with a build directory already there. By far
+            // the most likely reason is a CMakeCache.txt that remembers a path
+            // this tree no longer lives at -- a home directory that moved, a
+            // restored backup, a prefix that changed -- and cmake refuses to
+            // reuse it. The cache is pure derived data, so throwing it away
+            // and trying once more is both safe and the fix the user would
+            // otherwise have to find out about from a log.
+            std::error_code retry_ec;
+            if (std::filesystem::exists(build / "CMakeCache.txt", retry_ec)) {
+                set_phase(BuildProgress::Phase::Configuring, "clearing a stale build directory");
+                std::filesystem::remove_all(build, retry_ec);
+                std::filesystem::create_directories(build, retry_ec);
+                {
+                    const std::lock_guard<std::mutex> lock(mutex_);
+                    log_.clear();
+                }
+                if (!run_command(configure, {}, BuildProgress::Phase::Configuring, false)) {
+                    if (cancel_.load()) {
+                        set_phase(BuildProgress::Phase::Cancelled);
+                    }
+                    running_.store(false);
+                    return;
+                }
+            } else {
+                running_.store(false);
+                return;
+            }
         }
     }
 
@@ -398,7 +461,7 @@ void RuntimeBuilder::run(BackendKind kind) {
     for (const std::filesystem::directory_entry& entry :
          std::filesystem::directory_iterator(build / "bin", ec)) {
         const std::string name = entry.path().filename().string();
-        if (name.rfind("libggml-" + std::string(info.id), 0) != 0) {
+        if (!produces_module(produces, name)) {
             continue;
         }
         // copy_file follows the versioned symlinks, so each alias becomes a
@@ -407,9 +470,29 @@ void RuntimeBuilder::run(BackendKind kind) {
         if (entry.path().extension() != ".so") {
             continue;
         }
-        std::filesystem::copy_file(entry.path(), target / name,
+
+        // Copy to a temporary name and rename over the target, rather than
+        // writing the destination in place.
+        //
+        // Reinstalling a runtime that is already loaded is an ordinary thing
+        // to do -- it is how you rebuild one after a driver update -- and by
+        // then the module is dlopen'd and mmap'd into this process.
+        // Overwriting those bytes underneath the mapping crashes BatBot on the
+        // next call into the backend. rename() swaps the directory entry
+        // instead: the running process keeps the old inode, and the next start
+        // picks up the new one.
+        const std::filesystem::path final_path = target / name;
+        const std::filesystem::path staged     = target / (name + ".new");
+        std::filesystem::remove(staged, ec);
+        ec.clear();
+        std::filesystem::copy_file(entry.path(), staged,
                                    std::filesystem::copy_options::overwrite_existing, ec);
+        if (!ec) {
+            std::filesystem::rename(staged, final_path, ec);
+        }
         if (ec) {
+            std::error_code cleanup_ec;
+            std::filesystem::remove(staged, cleanup_ec);
             fail("could not install " + name + ": " + ec.message());
             running_.store(false);
             return;
@@ -432,12 +515,33 @@ void RuntimeBuilder::run(BackendKind kind) {
             manifest = std::move(parsed);
         }
     }
-    manifest[std::string(info.id)] = {
-        {"llama_tag", BATBOT_LLAMA_TAG},
-        {"built_at", iso_date_now()},
-    };
+    const std::string built_at = iso_date_now();
+    for (const BackendKind produced : produces) {
+        manifest[std::string(backend_info(produced).id)] = {
+            {"llama_tag", BATBOT_LLAMA_TAG},
+            {"built_at", built_at},
+        };
+    }
     if (std::ofstream out(manifest_path); out) {
         out << manifest.dump(2) << '\n';
+    }
+
+    // Register the new modules with ggml straight away.
+    //
+    // Without this the build finishes and nothing changes until BatBot is
+    // restarted, which is confusing enough that it reads as the install having
+    // silently failed. The CPU backend goes first: llama.cpp looks for it by
+    // type and a GPU registered ahead of it does not stand in.
+    std::sort(produces.begin(), produces.end(), [](BackendKind a, BackendKind b) {
+        return backend_info(a).required && !backend_info(b).required;
+    });
+    std::string activate_error;
+    for (const BackendKind produced : produces) {
+        if (!RuntimeRegistry::activate(produced, activate_error)) {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            progress_.error = activate_error;
+            break;
+        }
     }
 
     set_phase(BuildProgress::Phase::Done);

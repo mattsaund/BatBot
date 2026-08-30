@@ -11,14 +11,15 @@ namespace batbot {
 namespace {
 
 // Order matters: this is the order the settings screen lists runtimes in, and
-// CPU comes first because it is the one that is always there.
+// CPU comes first because every other one needs it.
 constexpr std::array<BackendInfo, kBackendCount> kBackends{{
     {BackendKind::Cpu, "cpu", "CPU",
-     "Runs on the processor. Always works, and the slowest option by a wide margin.",
+     "Runs on the processor. Needs no drivers, works everywhere, and is the "
+     "slowest option by a wide margin. Every other runtime needs it as well.",
      "GGML_CPU", "ggml-cpu",
      /*required_tool=*/"",
      /*apt=*/"build-essential", /*dnf=*/"gcc-c++ make", /*pacman=*/"base-devel",
-     /*multi_device=*/false, /*removable=*/false},
+     /*multi_device=*/false, /*required=*/true},
 
     {BackendKind::Cuda, "cuda", "CUDA",
      "NVIDIA cards, using the CUDA toolkit. The fastest option on NVIDIA hardware.",
@@ -27,7 +28,7 @@ constexpr std::array<BackendInfo, kBackendCount> kBackends{{
      /*apt=*/"nvidia-cuda-toolkit",
      /*dnf=*/"cuda-toolkit",
      /*pacman=*/"cuda",
-     /*multi_device=*/true, /*removable=*/true},
+     /*multi_device=*/true, /*required=*/false},
 
     {BackendKind::Vulkan, "vulkan", "Vulkan",
      "Any GPU with a Vulkan driver -- NVIDIA, AMD or Intel. Slower than CUDA, "
@@ -40,7 +41,7 @@ constexpr std::array<BackendInfo, kBackendCount> kBackends{{
      /*apt=*/"glslc libvulkan-dev spirv-headers",
      /*dnf=*/"glslc vulkan-loader-devel spirv-headers-devel",
      /*pacman=*/"shaderc vulkan-headers vulkan-icd-loader spirv-headers",
-     /*multi_device=*/true, /*removable=*/true},
+     /*multi_device=*/true, /*required=*/false},
 }};
 
 }  // namespace

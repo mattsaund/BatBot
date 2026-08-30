@@ -172,6 +172,9 @@ Element App::render() {
     if (runtimes_.active()) {
         return dbox({settings_.render(), runtimes_.render() | center});
     }
+    if (gpu_order_.active()) {
+        return dbox({settings_.render(), gpu_order_.render() | center});
+    }
     if (in_settings_) {
         return settings_.render();
     }
@@ -350,6 +353,14 @@ int App::run() {
             persist_session();
         }
 
+        // A runtime that just finished building is already registered with
+        // ggml, but the models loaded before it are still on the devices they
+        // chose at load time. Reloading them is what makes a GPU backend
+        // installed from settings take effect without a restart.
+        if (runtimes_.take_activation() && engine_) {
+            engine_->reload_models();
+        }
+
         // Modals are checked outermost-first, so the topmost one gets the key.
 
         // The runtime panel sits above settings.
@@ -360,6 +371,32 @@ int App::run() {
             }
             if (runtimes_.handle(event) == RuntimeAction::Close) {
                 runtimes_.close();
+            }
+            return true;
+        }
+
+        // As does the GPU priority panel.
+        if (gpu_order_.active()) {
+            if (event == Event::CtrlC) {
+                gpu_order_.close();
+                return true;
+            }
+            switch (gpu_order_.handle(event)) {
+                case GpuOrderAction::Apply:
+                    // The panel owns the arrangement; the config only learns
+                    // about it when something actually moved.
+                    settings_.set_gpu_priority(gpu_order_.order());
+                    break;
+                case GpuOrderAction::Close:
+                    gpu_order_.close();
+                    // Only when it has something to say: opening the panel and
+                    // pressing escape should not wipe the settings status line.
+                    if (!gpu_order_.status().empty()) {
+                        settings_.set_status(gpu_order_.status());
+                    }
+                    break;
+                case GpuOrderAction::None:
+                    break;
             }
             return true;
         }
@@ -404,6 +441,9 @@ int App::run() {
                     return true;
                 case SettingsAction::OpenRuntimes:
                     runtimes_.open();
+                    return true;
+                case SettingsAction::OpenGpuOrder:
+                    gpu_order_.open(settings_.config().gpu.priority);
                     return true;
                 case SettingsAction::None:
                     break;

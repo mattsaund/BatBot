@@ -98,6 +98,36 @@ GpuSplitMode gpu_split_mode_from_id(std::string_view id) {
     return GpuSplitMode::Auto;
 }
 
+std::vector<ComputeDevice> apply_priority_order(const std::vector<ComputeDevice>& gpus,
+                                                const std::vector<int>& order) {
+    std::vector<ComputeDevice> arranged;
+    arranged.reserve(gpus.size());
+
+    const auto already_taken = [&arranged](int index) {
+        return std::any_of(arranged.begin(), arranged.end(),
+                           [index](const ComputeDevice& gpu) { return gpu.index == index; });
+    };
+
+    for (const int index : order) {
+        const auto found = std::find_if(gpus.begin(), gpus.end(),
+                                        [index](const ComputeDevice& gpu) {
+                                            return gpu.index == index;
+                                        });
+        // An index listed twice would take two places in the order, and the
+        // second one would silently push a real card down the list.
+        if (found != gpus.end() && !already_taken(index)) {
+            arranged.push_back(*found);
+        }
+    }
+
+    for (const ComputeDevice& gpu : gpus) {
+        if (!already_taken(gpu.index)) {
+            arranged.push_back(gpu);
+        }
+    }
+    return arranged;
+}
+
 std::vector<float> compute_tensor_split(GpuSplitMode mode,
                                         const std::vector<ComputeDevice>& gpus,
                                         const std::vector<int>& order,

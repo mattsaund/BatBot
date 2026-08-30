@@ -162,9 +162,9 @@ int run_uninstall(bool assume_yes) {
             if (removed_binary) {
                 std::cout << "  removed " << binary.string() << "\n";
             }
-            // Everything else the install put down goes with it: the tool,
-            // the shared libraries and the bundled runtimes are all useless
-            // without the binary.
+            // Everything else the install put down goes with it: the
+            // routebench tool and the shared libraries beside it are both
+            // useless without the binary.
             if (!tool.empty() && remove_path(tool)) {
                 std::cout << "  removed " << tool.string() << "\n";
             }

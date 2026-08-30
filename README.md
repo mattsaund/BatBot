@@ -63,34 +63,40 @@ At the table, a seat reads:
 
 ## Install
 
-One command. It installs the build toolchain, picks a GPU runtime your hardware
-can actually use, builds, tests, and puts `batbot` on your PATH:
+One command. It installs the build toolchain and whichever GPU SDK your
+hardware can actually use, builds BatBot, tests it, and puts it on your PATH:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mattsaund/batbot/main/install.sh | bash
 ```
 
-It runs in five parts, with a main bar tracking the whole install underneath
-each one, and a second bar for whatever that part is doing:
+It runs in five parts, and shows two live bars: the whole install on top, the
+part running now underneath, with what it is doing and how long it has been
+doing it.
 
 ```
-==> [4/5] Getting the source
-    install  ███████░░░░░░░░░░░░░░░░░░░░░░░  23%
-    ██████████████░░░░░░░░░░░░░░  51%  install 29%  ·  Receiving objects
-
 ==> [5/5] Building BatBot
-    install  ██████████░░░░░░░░░░░░░░░░░░░░  35%
-    ███████████░░░░░░░░░░░░░░░░░  42%  install 55%  ·  llama-model.cpp
+    ✓ configured
+    compiling with 12 jobs
+    install  █████████████░░░░░░░░░░░░░  51%
+    [5/5]    █████░░░░░░░░░░░░░░░░░░░░░  21%    llama-model.cpp (37s)
 ```
 
-The two bars are weighted differently on purpose. The parts are nothing like
-equal in length — checking CMake is milliseconds, building is minutes — so the
-main bar weights them by how long they actually take. One that moved a fifth
-per part would read 80% with the entire build still ahead of it. The long parts
-also carry the live overall figure on their own bar, so it keeps moving rather
-than freezing at 35% for ten minutes.
+The two are weighted differently on purpose. The parts are nothing like equal
+in length — checking CMake is milliseconds, building is minutes — so the top
+bar weights them by how long they actually take. One that moved a fifth per
+part would read 80% with the entire build still ahead of it.
 
-Re-running it upgrades in place.
+Within a part the same trick is applied again: each phase owns a slice of the
+part, so the lower bar moves through the whole 0–100% whether that part is
+downloading something with a real percentage or waiting on a package manager
+that reports nothing at all.
+
+**BatBot installs with no compute runtime.** Not even the CPU one. The first
+thing to do after installing is to open the settings screen and pick one — see
+[Runtimes](#runtimes).
+
+Re-running the installer upgrades in place.
 
 ### Uninstalling
 
@@ -114,7 +120,7 @@ curl -fsSL .../install.sh | bash -s -- --gpu vulkan --prefix ~/.local
 
 | option | |
 |---|---|
-| `--gpu cuda\|vulkan\|cpu\|auto` | which GPU runtime to pre-build (default `auto`) |
+| `--gpu cuda\|vulkan\|cpu\|auto` | which GPU SDK to install (default `auto`) |
 | `--prefix DIR` | install location (default `/usr/local`, or `~/.local` without sudo) |
 | `--jobs N` | parallel build jobs |
 | `--check` | report what would happen, change nothing, never ask for sudo |
@@ -122,20 +128,24 @@ curl -fsSL .../install.sh | bash -s -- --gpu vulkan --prefix ~/.local
 | `-y`, `--yes` | never prompt |
 | `--uninstall` | remove BatBot (leaves your config and models) |
 
-`--gpu` is not a permanent choice. It only decides which runtime gets built
-during the install so the first run is already accelerated; every backend can
-be added or removed later from the settings screen. See
-[Runtimes](#runtimes) below.
+`--gpu` does not install a runtime — nothing does. It decides which *SDK* goes
+in while the installer still has root, so that the runtime you pick later can
+be built from the settings screen without needing a password inside a TUI.
+Getting it wrong costs nothing: install the SDK yourself at any point and the
+runtime appears in settings. See [Runtimes](#runtimes) below.
 
 ### What `--gpu auto` decides
 
-The installer reads your GPUs' compute capability and picks a runtime it can
-genuinely build, rather than the one that sounds best:
+The installer reads your GPUs' compute capability and installs the SDK for a
+runtime it could genuinely build, rather than the one that sounds best:
 
-- **CUDA**, if an available toolkit is new enough for your *newest* card.
+- **CUDA**, if an available toolkit is new enough for your *newest* card. It is
+  gigabytes, so this one is a question rather than a decision.
 - **Vulkan** otherwise, which works across NVIDIA, AMD and Intel through the
-  driver and needs only a small shader compiler.
-- **CPU**, if neither can be installed. CPU is always installed regardless.
+  driver and needs only a small shader compiler. A few megabytes, so it goes in
+  without asking.
+- **Neither**, with `--gpu cpu`. The CPU runtime needs nothing but the compiler
+  that is already being installed.
 
 That check matters more than it sounds. A Blackwell card (RTX 50-series,
 compute capability 12.0) needs **CUDA ≥ 12.8**, but most distributions still
@@ -163,34 +173,66 @@ how to talk to a piece of hardware. BatBot compiles none of them into the
 binary. They are files in `~/.local/share/batbot/runtimes`, and the settings
 screen adds and removes them.
 
-That means the backend is not a decision you make once, at install time, and
-live with. Install on a laptop with no GPU, add CUDA when you get a card, drop
-it again when a driver update breaks it — none of that needs a reinstall.
+**A fresh install has none of them.** That is deliberate: the backend is not a
+decision you make once, at install time, and live with. Install on a laptop
+with no GPU, add CUDA when you get a card, drop it again when a driver update
+breaks it — none of that needs a reinstall, and none of it is decided for you
+by a script that guessed at your hardware.
+
+It does mean **no model will load until you install one**. BatBot says so
+rather than failing obscurely:
+
+```
+no runtime installed -- press ctrl-e, open Runtimes, and install one
+```
 
 Open the panel with `/runtimes`, or `ctrl-e` → **HARDWARE** → **Runtimes**:
 
 ```
- runtimes · /home/you/.local/share/batbot/runtimes
- ▸ CPU     active · 1 device  ·  16.4 MB
-     Runs on the processor. Always works, and the slowest option by a wide margin.
+ runtimes · ~/.local/share/batbot/runtimes
+
+ No runtime installed, so no model can load.
+ Pick one and press enter; it is compiled here, which takes a few minutes.
+
+ ▸ CPU     not installed
    CUDA    not installed · nvcc is not installed
-     NVIDIA cards, using the CUDA toolkit. The fastest option on NVIDIA hardware.
    Vulkan  not installed · glslc is not installed
-     Any GPU with a Vulkan driver -- NVIDIA, AMD or Intel.
 
  devices llama.cpp can see
-   [0] 12th Gen Intel(R) Core(TM) i5-12400 (46.8 GB)  CPU
+   no compute devices -- no runtime is loaded
 
  ↑↓ choose   enter install   d remove   r rescan   esc back
 ```
 
 `enter` builds the selected runtime from the llama.cpp source the installer
 saved, showing progress; it runs on its own thread, so BatBot stays usable and
-`esc` leaves it running in the background. `d` twice removes one. A new runtime
-is picked up on the next start.
+`esc` leaves it running in the background. `d` twice removes one.
 
-The CPU runtime cannot be removed — without it there is no way to run a model
-at all.
+**A runtime is usable the moment it finishes building.** BatBot registers it
+with ggml and reloads its models, and the panel says `ready to use`. A restart
+is only mentioned when one is genuinely needed — when the module built but
+would not load.
+
+**Runtimes outlive the BatBot that built them.** They live in your data
+directory, so `batbot --uninstall` keeps them unless you say otherwise, and a
+reinstall picks them straight back up with no rebuild. The one case that needs
+attention is a reinstall from source built against a *different* llama.cpp:
+ggml is not ABI-stable across releases, so such a module would load and then
+crash on the first tensor. Each runtime records the tag it was built from, and
+the panel checks it:
+
+```
+ ▸ CPU     built for llama.cpp b9999 · press enter to rebuild
+```
+
+**Every runtime needs the CPU one.** llama.cpp keeps the output layer and
+several buffer types on the host whatever GPU is doing the work, and refuses to
+load a model without a CPU backend. So installing CUDA on a machine that has no
+runtimes builds both, and says so:
+
+```
+building the CUDA runtime, and the CPU one with it -- every runtime needs it.
+```
 
 **Runtimes need an SDK to build.** `install.sh` installs the Vulkan one
 automatically because it is small; CUDA is offered separately because it is
@@ -219,14 +261,23 @@ is divided across them:
 an 8 GB one. Splitting evenly by count would fill the small card first and fail
 a model that would otherwise have fitted.
 
-`priority` reads **GPU priority order**, written as device indices best-first
-(`0, 2, 1`). `/devices` prints the indices:
+`priority` reads **GPU priority order**, which is a screen of its own rather
+than a list of numbers to type. `ctrl-e` → **HARDWARE** → **GPU priority
+order** lists the cards in the order they will be filled:
 
 ```
-[0] NVIDIA GeForce RTX 4070 (12.0 GB)   CUDA
-[1] NVIDIA GeForce RTX 3060 (12.0 GB)   CUDA
-[2] 13th Gen Intel(R) Core(TM) i7-13700K   CPU  (cpu)
+ gpu priority order · first card is filled first
+
+ ▸ 1.  NVIDIA GeForce RTX 4070 (12.0 GB)   ·  device 0  ·  CUDA
+   2.  NVIDIA GeForce RTX 3060 (12.0 GB)   ·  device 1  ·  CUDA
+   3.  NVIDIA GeForce RTX 5060 Ti (16.0 GB)  ·  device 2  ·  CUDA
+
+ ↑↓ choose   enter pick up   esc back
 ```
+
+`enter` picks a card up, `enter` on another swaps the two. Top is filled first,
+bottom last. A card the config names that is no longer in the machine is
+dropped; one that has appeared since is added at the bottom.
 
 Only backends that can address several devices are affected — CUDA and Vulkan
 can, CPU cannot. The delegator is never split: it is small, and spreading a 1B
@@ -248,8 +299,9 @@ cmake --build build -j$(nproc)
 ./build/bin/batbot
 ```
 
-This builds the binary plus the CPU runtime. GPU runtimes are added afterwards
-from the settings screen — see [Runtimes](#runtimes).
+This builds the binary and no compute backend at all. Every runtime, CPU
+included, is added afterwards from the settings screen — see
+[Runtimes](#runtimes).
 
 ```sh
 sudo cmake --install build --component batbot
@@ -257,9 +309,9 @@ sudo cmake --install build --component batbot
 cmake --install build --component batbot --prefix ~/.local
 ```
 
-The install is `bin/batbot` plus `lib/batbot/` holding llama.cpp's shared
-libraries and the bundled CPU runtime. The binary's RPATH is relative, so it
-still works from anywhere on `PATH`.
+The install is `bin/batbot` plus `lib/batbot/` holding llama.cpp's three shared
+libraries. The binary's RPATH is relative, so it still works from anywhere on
+`PATH`.
 
 **Pass `--component batbot`.** llama.cpp and ggml carry their own install
 rules, written for people installing llama.cpp as a library: a plain
@@ -275,7 +327,7 @@ remove everything it put down.
 | option | default | what it does |
 |---|---|---|
 | `BATBOT_BACKEND_DL` | `ON` | loadable GPU runtimes (see the note below) |
-| `BATBOT_NATIVE` | `ON` | tune for this machine; with runtimes on, builds one CPU module per feature level and picks the best at load |
+| `BATBOT_NATIVE` | `ON` | tune for this machine; only consulted by monolithic builds, since a loadable backend cannot be built for one CPU |
 | `BATBOT_BUILD_TESTS` | `ON` | build the unit tests |
 | `BATBOT_BUILD_TOOLS` | `ON` | build `batbot-routebench` |
 | `BATBOT_WARNINGS` | `ON` | strict warnings on BatBot's own sources |
@@ -351,12 +403,11 @@ The line editor takes `←→` to move, `ctrl-a`/`ctrl-e` for either end, `ctrl-
 to drop the last path component, and `ctrl-u` to clear. A directory that is not
 there is flagged inline rather than failing later.
 
-**And the way back.** A **Reset to default** row sits directly under Models
-directory, showing the path it would return to. It is what you want when the
-folder was on a drive that is no longer plugged in, or when you simply want the
-standard layout again. It stores *no* path at all — an empty `models_dir` means
-"the default", so a config copied between machines still points somewhere
-sensible on each.
+**And the way back.** A **Reset model path to default** row sits directly under
+Models directory. It is what you want when the folder was on a drive that is no
+longer plugged in, or when you simply want the standard layout again. It stores
+*no* path at all — an empty `models_dir` means "the default", so a config
+copied between machines still points somewhere sensible on each.
 
 Or set `models_dir` in the config file directly. An expert can also point
 outside the folder with an absolute or `~` path when you do not want to move a
@@ -636,12 +687,14 @@ bash tests/test_uninstall.sh
 ```
 
 ```
-23 checks, 0 failed
+27 checks, 0 failed
 ```
 
-It covers the shared libraries and runtimes too: the binary is no longer the
-whole install, and leaving several hundred megabytes of `lib/batbot` behind
-would make "yes to everything" a lie.
+It covers the shared libraries, the runtimes you built and the build cache too:
+the binary is no longer the whole install, and leaving several hundred megabytes
+of `lib/batbot` behind would make "yes to everything" a lie. The sandbox
+includes `XDG_CACHE_HOME` for a reason — without it, running these tests deletes
+the build directory of whoever is running them.
 
 It asserts that declining keeps everything, that `-y` removes the binary and
 config but **never** the models, and that only an explicit yes to every question
@@ -707,7 +760,7 @@ bash tests/test_install.sh
 ```
 
 ```
-37 checks, 0 failed
+77 checks, 0 failed
 ```
 
 One of those checks exists because of a real bug: the Vulkan package list was
@@ -783,8 +836,8 @@ src/
 │   ├── transcript.cpp  drawing the conversation
 │   ├── session_picker.cpp  the /resume list
 │   ├── widgets/        bat sprite, roundtable
-│   └── settings/       view, runtimes panel, directory browser,
-│                       model picker, line editor
+│   └── settings/       view, runtimes panel, GPU priority panel,
+│                       directory browser, model picker, line editor
 └── util/           text and formatting helpers, subprocess
 ```
 
@@ -821,17 +874,31 @@ a pure function it is tested without loading a model.
 `llama.cpp`'s own logging is redirected to `~/.local/share/batbot/batbot.log`,
 since anything on stderr would draw straight over the TUI.
 
-**No GPU backend is compiled in.** ggml is built with its dlopen-based backend
-loader, so CUDA and Vulkan are shared libraries in a directory rather than a
-decision frozen at compile time. `ModelHost`'s constructor seeds that directory
-from whatever shipped with the install and hands it to ggml before
-`llama_backend_init`, which is why a runtime added in settings is picked up by
-simply restarting.
+**No backend is compiled in at all**, CPU included. ggml is built with its
+dlopen-based backend loader, so every runtime is a shared library in a
+directory rather than a decision frozen at compile time. `ModelHost`'s
+constructor hands that directory to ggml before `llama_backend_init`; on a
+fresh install it is empty, and `ModelHost::load` says so in those words rather
+than letting llama.cpp throw "no CPU backend found" from three frames down.
 
-The same choice is what makes the CPU runtime fast without being fragile:
-ggml refuses `-march=native` for a loadable backend, so the build emits one
-module per x86-64 feature level (`sandybridge`, `haswell`, `zen4`, …) and ggml
-scores them at load and picks the best this machine can actually run.
+A runtime built while BatBot is running is registered immediately —
+`RuntimeRegistry::activate` scores the modules the way ggml's own loader does
+and calls `ggml_backend_load` on the winner — and the engine then reloads its
+models, because a model picks its devices when it loads and would otherwise go
+on running on the old ones. ggml's loader has no duplicate check, so `activate`
+asks ggml's device registry whether that backend is already present rather than
+remembering for itself; registering twice would give every device a twin.
+
+The same dlopen design is what makes the CPU runtime fast without being
+fragile: ggml refuses `-march=native` for a loadable backend, so the build
+emits one module per x86-64 feature level (`sandybridge`, `haswell`, `zen4`, …)
+and ggml scores them at load and picks the best this machine can actually run.
+
+Installing a module is a copy to a temporary name and a `rename` over the
+target, never a write in place. Rebuilding a runtime that is already loaded is
+an ordinary thing to do, and by then the module is mapped into the process —
+overwriting those bytes crashes BatBot on the next call into the backend, while
+`rename` swaps the directory entry and leaves the running mapping alone.
 
 Building a runtime is a real cmake invocation against the llama.cpp checkout the
 installer saved, at the exact tag the binary was built from — `BATBOT_LLAMA_TAG`

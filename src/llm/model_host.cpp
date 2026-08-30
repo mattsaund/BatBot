@@ -23,6 +23,7 @@
 #include <random>
 #include <thread>
 
+#include <ggml-backend.h>
 #include <llama.h>
 
 #include "batbot/llm/sampling.hpp"
@@ -69,7 +70,11 @@ struct ProgressBridge {
 
 bool progress_trampoline(float progress, void* user_data) {
     auto* bridge = static_cast<ProgressBridge*>(user_data);
-    if (bridge == nullptr || bridge->progress == nullptr) {
+    // An empty std::function is a legal argument -- "load this, I do not care
+    // how far along it is" -- and calling one throws std::bad_function_call
+    // out through llama.cpp's C boundary, where it surfaces as an unexplained
+    // "failed to load model".
+    if (bridge == nullptr || bridge->progress == nullptr || !*bridge->progress) {
         return true;
     }
     // llama.cpp calls this per tensor, which is far more often than a terminal
@@ -119,13 +124,8 @@ ModelHost::ModelHost(std::filesystem::path log_path) {
 
     // Bring the loadable runtimes in before llama.cpp initialises, so the
     // devices they provide are there from the first model load. A fresh
-    // install has none of its own yet, so the CPU runtime that shipped with
-    // the binary is copied across first; after that this is a no-op.
-    std::string seed_error;
-    RuntimeRegistry::seed_from_bundle(seed_error);
-    if (!seed_error.empty()) {
-        log_to_file(GGML_LOG_LEVEL_WARN, ("runtime seed: " + seed_error + "\n").c_str(), nullptr);
-    }
+    // install has none: BatBot ships no backends, and this does nothing until
+    // one has been built from the settings screen.
     RuntimeRegistry::load_all();
 
     llama_backend_init();
@@ -164,6 +164,13 @@ std::unique_ptr<LoadedModel> ModelHost::load(const ModelParams& params,
     }
     if (!std::filesystem::exists(params.path)) {
         error = "model file not found: " + params.path;
+        return nullptr;
+    }
+    // Ask before llama.cpp does. With no backend registered it throws "no CPU
+    // backend found" from somewhere deep in the loader, which is a true
+    // statement about ggml and a useless one about what to do next.
+    if (ggml_backend_dev_count() == 0) {
+        error = "no runtime installed -- press ctrl-e, open Runtimes, and install one";
         return nullptr;
     }
 

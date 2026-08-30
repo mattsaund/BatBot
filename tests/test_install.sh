@@ -167,33 +167,88 @@ check_eq  "weights cover exactly the whole install" \
 check_eq  "one weight per part, plus the unused zeroth" \
           "${#STEP_WEIGHTS[@]}" "$((STEP_TOTAL + 1))"
 
-STEP_NUM=0; check_eq "nothing done before the first part" "$(overall_percent 0)" "0"
-STEP_NUM=1; check_eq "entering part 1"                    "$(overall_percent 0)" "0"
-STEP_NUM=2; check_eq "entering part 2"                    "$(overall_percent 0)" "4"
-STEP_NUM=5; check_eq "entering part 5"                    "$(overall_percent 0)" "35"
-STEP_NUM=5; check_eq "part 5 half done"                   "$(overall_percent 50)" "67"
-STEP_NUM=5; check_eq "part 5 complete"                    "$(overall_percent 100)" "100"
+# The overall figure is the weighted sum of the finished parts plus however
+# far STEP_PCT says the current one has got.
+BEFORE_5=$(( ${STEP_WEIGHTS[1]} + ${STEP_WEIGHTS[2]} + ${STEP_WEIGHTS[3]} + ${STEP_WEIGHTS[4]} ))
+
+STEP_PCT=0
+STEP_NUM=0; check_eq "nothing done before the first part" "$(overall_percent)" "0"
+STEP_NUM=1; check_eq "entering part 1"                    "$(overall_percent)" "0"
+STEP_NUM=2; check_eq "entering part 2"                    "$(overall_percent)" "${STEP_WEIGHTS[1]}"
+STEP_NUM=5; check_eq "entering part 5"                    "$(overall_percent)" "$BEFORE_5"
+STEP_PCT=50
+check_eq  "part 5 half done" "$(overall_percent)" "$((BEFORE_5 + STEP_WEIGHTS[5] / 2))"
+STEP_PCT=100
+check_eq  "part 5 complete"  "$(overall_percent)" "100"
 
 # The build is the part worth weighting for: it must not read as nearly done.
-STEP_NUM=5
+STEP_NUM=5; STEP_PCT=0
 check     "the main bar is under half way when the build starts" \
-          test "$(overall_percent 0)" -lt 50
+          test "$(overall_percent)" -lt 50
 
 # Past the last part -- what the closing 100% bar sets.
-STEP_NUM=$((STEP_TOTAL + 1))
-check_eq  "past the end stays at 100"                     "$(overall_percent 0)" "100"
+STEP_NUM=$((STEP_TOTAL + 1)); STEP_PCT=0
+check_eq  "past the end stays at 100"                     "$(overall_percent)" "100"
 
 # Monotonic: the figure must never go backwards as a part progresses.
 STEP_NUM=4
 PREV=-1
 MONOTONIC=1
 for f in 0 10 25 50 75 90 100; do
-    CUR="$(overall_percent "$f")"
+    STEP_PCT="$f"
+    CUR="$(overall_percent)"
     [ "$CUR" -lt "$PREV" ] && MONOTONIC=0
     PREV="$CUR"
 done
 check_eq  "progress within a part never goes backwards" "$MONOTONIC" "1"
-STEP_NUM=0
+STEP_NUM=0; STEP_PCT=0
+
+# --------------------------------------------------------------------------
+# Phases
+#
+# Each part is divided into phases that own a slice of it, so the per-part bar
+# moves through the whole 0-100 whatever the part is doing. The two bars are
+# the point of the display: one for the part, one for the install.
+# --------------------------------------------------------------------------
+echo
+echo "  phases"
+
+IS_TTY=0
+STEP_NUM=2; STEP_PCT=0
+
+# block_draw reports to stdout when there is no terminal, which is the right
+# thing during a real install and only noise here.
+phase 40 "first" >/dev/null
+check_eq  "a phase starts where the part had got to"  "$STEP_PCT" "0"
+phase_at 50 >/dev/null
+check_eq  "half of a 40%-wide phase is 20% of the part" "$STEP_PCT" "20"
+phase_at 100 >/dev/null
+check_eq  "a full phase reaches its own end"           "$STEP_PCT" "40"
+phase_end >/dev/null
+check_eq  "ending a phase lands on its end exactly"    "$STEP_PCT" "40"
+
+phase 60 "second" >/dev/null
+check_eq  "the next phase starts where the last ended" "$PHASE_BASE" "40"
+phase_at 50 >/dev/null
+check_eq  "and is measured from there"                 "$STEP_PCT" "70"
+phase_end >/dev/null
+check_eq  "the phases of a part add up to all of it"   "$STEP_PCT" "100"
+
+# cmake restarts its percentage for every target it builds, so a naive
+# mapping would send the bar backwards several times during one compile.
+STEP_PCT=0
+phase 100 "third" >/dev/null
+phase_at 90 >/dev/null
+phase_at 10 >/dev/null
+check_eq  "the bar never retreats"                     "$STEP_PCT" "90"
+
+# A part whose phases add up to more than itself must still stop at 100.
+STEP_PCT=0
+phase 200 "overrun" >/dev/null
+phase_at 100 >/dev/null
+check_eq  "a part never reports more than complete"    "$STEP_PCT" "100"
+
+STEP_NUM=0; STEP_PCT=0; PHASE_BASE=0; PHASE_SPAN=0
 
 # --------------------------------------------------------------------------
 # Install component
@@ -222,14 +277,63 @@ check_not "GGML_BACKEND_DIR is not set" \
           grep -q "^ *set(GGML_BACKEND_DIR" "$HERE/../cmake/BatBotDependencies.cmake"
 
 echo
-echo "  overall_bar"
+echo "  bars"
 IS_TTY=0
-check     "the bar renders a percentage" \
-          grep -q "100%" <<< "$(overall_bar 100)"
-check     "the bar is labelled so it is not mistaken for the step bar" \
-          grep -q "install" <<< "$(overall_bar 50)"
+check     "a bar renders its percentage" \
+          grep -q "100%" <<< "$(draw_bar 100 "")"
 check     "an out-of-range percentage is clamped, not drawn off the end" \
-          grep -q "100%" <<< "$(overall_bar 140)"
+          grep -q "100%" <<< "$(draw_bar 140 "")"
+check     "a negative percentage clamps to zero" \
+          grep -q "0%" <<< "$(draw_bar -20 "")"
+
+# Both bars are drawn together, and the top one is labelled so the two are
+# never mistaken for each other.
+IS_TTY=1
+STEP_NUM=3; STEP_PCT=50; PHASE_LABEL="probe"; PHASE_START=0
+BLOCK="$(block_draw)"
+check     "the block names the whole install"  grep -q "install" <<< "$BLOCK"
+check     "the block names the part"           grep -q "\[3/5\]" <<< "$BLOCK"
+check     "the block shows the phase label"    grep -q "probe"   <<< "$BLOCK"
+check_eq  "the block is exactly two rows"      "$(printf '%s' "$BLOCK" | grep -c '')" "2"
+
+# The elapsed clock. SECONDS is 0 for the whole first second of a run, so a
+# phase that starts promptly must still be recognised as running.
+STEP_NUM=3; STEP_PCT=0; PHASE_LABEL="prompt"
+PHASE_START=0
+check     "a phase that started in the first second still shows its clock" \
+          grep -q "(0s)" <<< "$(block_draw)"
+PHASE_START=-1
+check_not "a part with no phase running shows no clock" \
+          grep -q "s)" <<< "$(block_draw)"
+
+# Before the first part there is no install to report on, which is what keeps
+# the bars out of --check and out of the uninstaller.
+STEP_NUM=0
+check_eq  "nothing is drawn before the first part" "$(block_draw)" ""
+IS_TTY=0
+STEP_NUM=0; STEP_PCT=0
+
+# --------------------------------------------------------------------------
+# Runtimes
+#
+# BatBot installs with no compute backend at all -- not even CPU. The runtimes
+# directory is created empty and the settings screen fills it, which is what
+# makes the choice of backend reversible.
+# --------------------------------------------------------------------------
+echo
+echo "  no runtimes are installed"
+
+check_not "the installer builds no runtime" \
+          grep -q "prebuild_runtime" "$HERE/../install.sh"
+check_not "no backend modules are installed by CMake" \
+          grep -q "GGML_AVAILABLE_BACKENDS" "$HERE/../CMakeLists.txt"
+check     "the CPU backend is not compiled into the build" \
+          grep -q "set(GGML_CPU              OFF CACHE INTERNAL" \
+          "$HERE/../cmake/BatBotDependencies.cmake"
+check     "the llama.cpp source is still kept, so a later build needs no network" \
+          grep -q "seed_runtime_source" "$HERE/../install.sh"
+check     "the summary says no runtime is installed" \
+          grep -q "runtimes : .*none yet" "$HERE/../install.sh"
 
 echo
 echo "$((PASS + FAIL)) checks, $FAIL failed"

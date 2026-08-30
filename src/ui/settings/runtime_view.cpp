@@ -4,6 +4,9 @@
 #include "batbot/ui/settings/runtime_view.hpp"
 
 #include <algorithm>
+#include <cstdlib>
+#include <filesystem>
+#include <string>
 
 #include "batbot/config/paths.hpp"
 #include "batbot/ui/theme.hpp"
@@ -15,21 +18,59 @@ namespace batbot::ui {
 namespace {
 
 /// A short phrase for the state a runtime is in, and the colour to say it in.
-std::pair<std::string, Color> state_of(const RuntimeStatus& runtime) {
+/// `highlighted` picks the readable shade for a row under the cursor.
+std::pair<std::string, Color> state_of(const RuntimeStatus& runtime, bool highlighted) {
+    // Before anything else: a module built against another llama.cpp will load
+    // and then crash, so it does not matter what else is true of it.
+    if (runtime.stale) {
+        return {"built for llama.cpp " + runtime.llama_tag + " · press enter to rebuild",
+                Color(theme::kError)};
+    }
     if (runtime.active) {
         const std::string devices = std::to_string(runtime.device_count) +
                                     (runtime.device_count == 1 ? " device" : " devices");
         return {"active · " + devices, Color(theme::kSeatActive)};
     }
     if (runtime.installed) {
-        // Installed but contributing nothing: the module is there and either
-        // has not been picked up yet or found no hardware to drive.
-        return {"installed · restart to load", Color(theme::kSeatDormant)};
+        // Installed but contributing nothing. Runtimes are registered the
+        // moment they finish building, so this is not "not loaded yet" -- it
+        // means the module loaded and found no hardware it can drive, which is
+        // what a Vulkan install looks like on a machine with no Vulkan driver.
+        return {"installed · no device", Color(theme::kSeatDormant)};
     }
     if (!runtime.buildable) {
-        return {"not installed · " + runtime.blocker, Color(theme::kMeta)};
+        return {"not installed · " + runtime.blocker, meta_color(highlighted)};
     }
-    return {"not installed", Color(theme::kMeta)};
+    return {"not installed", meta_color(highlighted)};
+}
+
+/// A path with the home directory written as `~`.
+///
+/// The runtimes directory is four levels below $HOME, and spelling it out in
+/// full pushed the panel title off its own header on any normal terminal.
+std::string short_path(const std::filesystem::path& path) {
+    const char* home = std::getenv("HOME");
+    if (home == nullptr || *home == '\0') {
+        return path.string();
+    }
+    const std::string text(path.string());
+    const std::string prefix(home);
+    if (text.rfind(prefix, 0) == 0 && text.size() > prefix.size()) {
+        return "~" + text.substr(prefix.size());
+    }
+    return text;
+}
+
+/// Is the CPU runtime installed? Duplicated from the builder rather than
+/// shared, because here it is a question about what to tell the user and there
+/// it is a question about what to compile.
+bool cpu_installed() {
+    for (const RuntimeStatus& runtime : RuntimeRegistry::scan()) {
+        if (runtime.kind == BackendKind::Cpu) {
+            return runtime.installed;
+        }
+    }
+    return false;
 }
 
 }  // namespace
@@ -52,6 +93,25 @@ void RuntimeView::shutdown() {
     builder_.stop();
 }
 
+bool RuntimeView::take_activation() {
+    const BuildProgress build = builder_.progress();
+    const bool activated =
+        build.phase == BuildProgress::Phase::Done && build.error.empty();
+
+    if (!activated) {
+        // Reset on anything else, so the next build reports itself too.
+        activation_reported_ = false;
+        return false;
+    }
+    if (activation_reported_) {
+        return false;
+    }
+    activation_reported_ = true;
+    // The device list is what changed; the panel is very likely on screen.
+    refresh();
+    return true;
+}
+
 void RuntimeView::start_install() {
     if (selected_ >= runtimes_.size()) {
         return;
@@ -64,8 +124,7 @@ void RuntimeView::start_install() {
         return;
     }
     if (!runtime.buildable) {
-        status_ = std::string(info.name) + ": " + runtime.blocker +
-                  ".  sudo apt install " + std::string(info.apt_packages);
+        status_ = runtime.blocker + ".  sudo apt install " + std::string(info.apt_packages);
         return;
     }
 
@@ -73,8 +132,14 @@ void RuntimeView::start_install() {
         status_ = "a runtime is already being built";
         return;
     }
-    status_ = "building the " + std::string(info.name) +
-              " runtime -- this takes a few minutes and you can keep using BatBot";
+
+    // Say it up front rather than letting a second runtime appear in the list
+    // unannounced. llama.cpp cannot load a model without the CPU backend even
+    // when every layer is on a GPU, so this is not an optional extra.
+    const bool also_cpu = runtime.kind != BackendKind::Cpu && !cpu_installed();
+    status_ = "building " + std::string(info.name) +
+              (also_cpu ? ", and CPU with it -- every runtime needs CPU" : "") +
+              ".  You can keep using BatBot";
 }
 
 void RuntimeView::start_remove() {
@@ -84,12 +149,25 @@ void RuntimeView::start_remove() {
     const RuntimeStatus& runtime = runtimes_[selected_];
 
     std::string error;
-    if (RuntimeRegistry::remove(runtime.kind, error)) {
-        status_ = std::string(backend_info(runtime.kind).name) +
-                  " removed -- it stops being used when BatBot restarts";
-        refresh();
-    } else {
+    if (!RuntimeRegistry::remove(runtime.kind, error)) {
         status_ = error;
+        return;
+    }
+
+    status_ = std::string(backend_info(runtime.kind).name) +
+              " removed.  Takes effect on restart";
+    refresh();
+
+    // ggml cannot unload a backend that a loaded model may still be using, so
+    // removal only takes effect on the next start -- which makes it the one
+    // place where the list on screen and what BatBot can actually do come
+    // apart, and the one place worth saying so.
+    const bool nothing_left =
+        std::none_of(runtimes_.begin(), runtimes_.end(),
+                     [](const RuntimeStatus& left) { return left.installed; });
+    if (nothing_left) {
+        status_ = std::string(backend_info(runtime.kind).name) +
+                  " removed.  No runtimes left, so models stop loading on restart";
     }
 }
 
@@ -123,7 +201,7 @@ RuntimeAction RuntimeView::handle(const Event& event) {
 
     if (event == Event::Character('r')) {
         refresh();
-        status_ = "rescanned " + paths::runtimes_dir().string();
+        status_ = "rescanned " + short_path(paths::runtimes_dir());
         return RuntimeAction::Notify;
     }
 
@@ -172,36 +250,28 @@ RuntimeAction RuntimeView::handle(const Event& event) {
 
 Element RuntimeView::render_runtime(const RuntimeStatus& runtime, bool selected) const {
     const BackendInfo& info = backend_info(runtime.kind);
-    const auto [state_text, state_color] = state_of(runtime);
+    const auto [state_text, state_color] = state_of(runtime, selected);
 
     std::string name(info.name);
     name.resize(std::max<std::size_t>(name.size(), 8), ' ');
 
-    Elements meta;
-    meta.push_back(text(state_text) | color(state_color));
+    // One line each. The blurb that used to sit under every row explained what
+    // CPU, CUDA and Vulkan are to an audience that already knows -- three
+    // paragraphs of grey to say what three words say.
+    Elements row{
+        text(selected ? " ▸ " : "   "),
+        text(name) | bold,
+        text(state_text) | color(state_color),
+    };
     if (runtime.installed && runtime.bytes > 0) {
-        meta.push_back(text("  ·  " + runtime.size_label()) | color(theme::kMeta) | dim);
+        row.push_back(text("  ·  " + runtime.size_label()) | color(meta_color(selected)));
     }
     if (!runtime.built_at.empty()) {
-        meta.push_back(text("  ·  built " + runtime.built_at) | color(theme::kMeta) | dim);
+        row.push_back(text("  ·  built " + runtime.built_at) | color(meta_color(selected)));
     }
 
-    Element row = vbox({
-        hbox({
-            text(selected ? " ▸ " : "   "),
-            text(name) | bold,
-            hbox(std::move(meta)),
-        }),
-        hbox({
-            text("     "),
-            paragraph(std::string(info.blurb)) | color(theme::kMeta) | dim,
-        }),
-    });
-
-    if (selected) {
-        row = row | bgcolor(Color::GrayDark);
-    }
-    return row;
+    Element line = hbox(std::move(row));
+    return selected ? line | bgcolor(theme::kHighlight) : line;
 }
 
 Element RuntimeView::render_build() const {
@@ -242,9 +312,16 @@ Element RuntimeView::render_build() const {
     }
 
     if (build.phase == BuildProgress::Phase::Done) {
-        lines.push_back(text(" restart BatBot to start using it") |
-                        color(theme::kSeatActive));
-        lines.push_back(text(" enter dismisses this") | color(theme::kMeta) | dim);
+        // The builder registers what it made with ggml before reporting Done,
+        // so unless that failed the runtime is live already. A restart is only
+        // worth mentioning when it is actually needed.
+        if (build.error.empty()) {
+            lines.push_back(text(" ready to use") | color(theme::kSeatActive) | bold);
+        } else {
+            lines.push_back(text(" built, but " + build.error) | color(theme::kNotice));
+            lines.push_back(text(" restart BatBot to load it") | color(theme::kNotice));
+        }
+        lines.push_back(text(" enter dismisses this") | color(theme::kMeta));
     }
 
     return vbox(std::move(lines)) | border;
@@ -285,16 +362,39 @@ Element RuntimeView::render() const {
 
     Elements body{
         hbox({
-            text(" runtimes ") | bold | color(theme::kBat),
-            text("· " + paths::runtimes_dir().string()) | color(theme::kMeta) | dim,
+            // Pinned: without a fixed width FTXUI shrinks both children when
+            // the path is long, and the first thing to go is the title.
+            text(" runtimes ") | bold | color(theme::kBat) | size(WIDTH, EQUAL, 10),
+            text("· " + short_path(paths::runtimes_dir())) | color(theme::kMeta),
         }),
         separator(),
-        vbox(std::move(rows)),
-        render_build(),
-        separator(),
-        text(" devices llama.cpp can see") | color(theme::kMeta),
-        render_devices(),
     };
+
+    // The state every fresh install starts in. Without this the screen is a
+    // list of three things that all say "not installed" and no indication that
+    // one of them has to be.
+    //
+    // Read from the scan this screen already did, not from the directory: this
+    // runs on every frame.
+    const bool nothing_installed =
+        std::none_of(runtimes_.begin(), runtimes_.end(),
+                     [](const RuntimeStatus& runtime) { return runtime.installed; });
+    if (nothing_installed) {
+        body.push_back(text(" No runtime installed, so no model can load.") |
+                       color(theme::kNotice));
+        body.push_back(text(" Pick one and press enter; it is compiled here, "
+                            "which takes a few minutes.") |
+                       color(theme::kMeta));
+        body.push_back(separator());
+    }
+
+    body.push_back(vbox(std::move(rows)));
+    if (builder_.progress().phase != BuildProgress::Phase::Idle) {
+        body.push_back(render_build());
+    }
+    body.push_back(separator());
+    body.push_back(text(" devices llama.cpp can see") | color(theme::kMeta));
+    body.push_back(render_devices());
 
     if (!status_.empty()) {
         body.push_back(separator());

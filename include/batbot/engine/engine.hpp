@@ -48,6 +48,14 @@ public:
     /// Drop the resident expert, freeing its memory without exiting.
     void release_expert();
 
+    /// Drop every loaded model and load the router again.
+    ///
+    /// For when the hardware under BatBot changed: a model picks its devices
+    /// once, when it loads, so a runtime installed from the settings screen
+    /// does nothing for the model that is already resident. This is what makes
+    /// a new GPU backend take effect without restarting.
+    void reload_models();
+
     /// Forget the conversation history sent to experts.
     void reset_history();
 
@@ -72,7 +80,7 @@ private:
     /// One unit of work for the engine thread. `kind` keeps config changes and
     /// expert releases on the same queue as prompts, so they are applied in
     /// order and never race with a generation in flight.
-    enum class RequestKind { Prompt, ReleaseExpert, ApplyConfig };
+    enum class RequestKind { Prompt, ReleaseExpert, ReloadModels, ApplyConfig };
 
     struct Request {
         RequestKind            kind = RequestKind::Prompt;

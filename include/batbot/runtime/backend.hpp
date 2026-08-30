@@ -59,9 +59,13 @@ struct BackendInfo {
     /// is what makes the GPU-split settings meaningful. The CPU backend cannot.
     bool multi_device;
 
-    /// False for the CPU backend: it is the fallback, it needs no SDK, and an
-    /// install with no runtime at all cannot answer anything.
-    bool removable;
+    /// True when llama.cpp cannot load a model without this backend, whatever
+    /// else is installed. Only the CPU one is: llama.cpp keeps the output
+    /// layer and a few buffer types on the host no matter which GPU is doing
+    /// the work, and throws "no CPU backend found" when there is none. So
+    /// installing CUDA on its own is not enough, and the runtime builder
+    /// quietly builds this one alongside whatever you asked for.
+    bool required;
 };
 
 /// The backend table, in the order settings lists them.

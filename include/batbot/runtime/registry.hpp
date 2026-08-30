@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "batbot/runtime/backend.hpp"
@@ -32,10 +33,22 @@ struct RuntimeStatus {
 
     std::uintmax_t bytes = 0;   ///< total size of its module files
 
-    /// Provenance, from the manifest. Empty for a runtime that arrived with
-    /// the install rather than being built here.
+    /// Provenance, from the manifest. Empty for a runtime whose manifest entry
+    /// was lost, which is treated as "cannot tell" rather than as a problem.
     std::string llama_tag;
     std::string built_at;
+
+    /// Built against a different llama.cpp than this binary.
+    ///
+    /// Runtimes outlive the BatBot that made them -- they survive an uninstall
+    /// that keeps your data, and a reinstall from newer source can land on top
+    /// of them. ggml's internal structures are not stable across releases, so
+    /// such a module loads and then crashes on the first tensor. Saying so is
+    /// the difference between "rebuild this one" and an unexplained crash.
+    bool stale = false;
+
+    /// The tag this binary needs, for the message that explains `stale`.
+    static std::string_view required_llama_tag();
 
     /// Whether a build could be attempted right now, and what is missing if
     /// not -- "needs nvcc" is a far better answer than a failed build.
@@ -55,15 +68,26 @@ struct RuntimeStatus {
 /// refresh rather than holding state that can go stale.
 class RuntimeRegistry {
 public:
-    /// Copy any backend present in the installed bundle but missing from the
-    /// user's runtimes directory. This is what gives a fresh install a working
-    /// CPU runtime without a build step, and it is a no-op afterwards.
-    /// Returns the number of files copied.
-    static int seed_from_bundle(std::string& error);
-
     /// Hand the runtimes directory to ggml. Call once, before any model is
     /// loaded; ggml scores the candidates and registers the best of each kind.
+    ///
+    /// A fresh install has nothing here: BatBot ships no backends, and the
+    /// settings screen is what fills this directory.
     static void load_all();
+
+    /// Register a runtime that was installed while BatBot was already running,
+    /// so a backend built from the settings screen can be used without a
+    /// restart.
+    ///
+    /// Idempotent: a backend that already has devices registered is left
+    /// alone, because ggml would otherwise register a second copy of every one
+    /// of them. Returns false with `error` set when the module is there but
+    /// will not load -- an unsupported GPU, or a driver that is not installed.
+    static bool activate(BackendKind kind, std::string& error);
+
+    /// True when at least one backend module is installed. False on a fresh
+    /// install, which is the state where no model can be loaded at all.
+    static bool any_installed();
 
     /// True when this binary can load runtimes at all. A monolithic build
     /// (-DBATBOT_BACKEND_DL=OFF) cannot, and the settings screen says so
@@ -73,10 +97,8 @@ public:
     /// Look at the runtimes directory and at what ggml actually registered.
     static std::vector<RuntimeStatus> scan();
 
-    /// Delete a runtime's module files. The CPU runtime refuses to be removed:
-    /// it is the fallback, and an install with nothing left cannot answer.
-    /// Takes effect on the next start, since ggml cannot unload a backend that
-    /// models may still be using.
+    /// Delete a runtime's module files. Takes effect on the next start, since
+    /// ggml cannot unload a backend that loaded models may still be using.
     static bool remove(BackendKind kind, std::string& error);
 
 private:

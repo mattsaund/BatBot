@@ -78,33 +78,45 @@ BatSprite::Face BatSprite::face_for(Mood mood, std::size_t tick) const {
             break;
         }
         case Mood::Routing: {
-            // Eyes sweep left and right: BatBot is reading the prompt.
+            // Concentrating, so: eyes shut and nothing moving. An earlier
+            // version swept the eyes left and right, which read less as
+            // thought than as a tic -- the thought bubble already says what
+            // he is doing, and it says it without twitching.
             face.forehead = "*";
-            const bool look_left = (tick / 3) % 2 == 0;
-            face.eye_left  = look_left ? open_eye : shut_eye;
-            face.eye_right = look_left ? shut_eye : open_eye;
-            face.mouth     = flat;
+            face.eye_left = face.eye_right = shut_eye;
+            face.mouth    = flat;
             break;
         }
         case Mood::Loading: {
-            // The forehead star doubles as the load spinner.
-            static constexpr std::array<const char*, 4> kSpinner{{"|", "/", "-", "\\"}};
-            face.forehead = kSpinner[(tick / 2) % kSpinner.size()];
+            // The same still frame as Thinking. The forehead used to carry a
+            // spinning |/-\ here, which is a lot of movement on a face for
+            // something the thought bubble already says in words.
+            face.forehead = "*";
             face.eye_left = face.eye_right = shut_eye;
             face.mouth    = flat;
             break;
         }
         case Mood::Thinking: {
-            face.forehead = (tick / 4) % 2 == 0 ? "*" : "+";
+            // Deliberately a still frame. Thinking is the longest thing
+            // BatBot does, and a face that flickers for a minute is tiring to
+            // sit next to; the star on the forehead is enough to say he is
+            // working.
+            face.forehead = "*";
             face.eye_left = face.eye_right = shut_eye;
-            face.mouth    = " o ";
+            face.mouth    = flat;
             break;
         }
         case Mood::Talking: {
-            // Four-frame mouth cycle, the direct descendant of the original
-            // Python bat's two-frame o/- flap.
-            static const std::array<std::string, 4> kMouths{{" o ", " O ", flat, " - "}};
-            face.mouth = kMouths[(tick / 2) % kMouths.size()];
+            // Eyes open and the same unhurried blink he has when idle, so the
+            // change from thinking to talking is something you notice.
+            const bool blinking = (tick % 24) >= 22;
+            face.eye_left = face.eye_right = blinking ? shut_eye : open_eye;
+
+            // A two-frame flap at a third of the old speed. The mouth is the
+            // only thing that moves while he talks, which is what makes it
+            // read as talking rather than as a face full of activity.
+            static const std::array<std::string, 2> kMouths{{" o ", flat}};
+            face.mouth = kMouths[(tick / 6) % kMouths.size()];
             break;
         }
         case Mood::Error: {
@@ -148,10 +160,22 @@ std::string thought_bubble(Mood mood, const std::string& status, std::size_t tic
 
     // Trailing dots that march, so a long model load still looks alive even
     // when the percentage has not moved.
+    //
+    // Padded back out to a constant width. The bubble and the bat are centred
+    // inside the same column, so a bubble that grows by a character shifts the
+    // whole sprite half a column -- which reads as BatBot rocking side to side
+    // once a second, and is far more distracting than the dots are useful.
     if (mood != Mood::Idle && mood != Mood::Error) {
-        text += std::string((tick / 4) % 4, '.');
+        constexpr std::size_t kMaxDots = 3;
+        const std::size_t dots = (tick / 4) % (kMaxDots + 1);
+        text += std::string(dots, '.');
+        text += std::string(kMaxDots - dots, ' ');
     }
     return "( " + text + " )";
+}
+
+ftxui::Color meta_color(bool highlighted) {
+    return highlighted ? ftxui::Color(theme::kMetaOnHighlight) : ftxui::Color(theme::kMeta);
 }
 
 ftxui::Color mood_color(Mood mood) {

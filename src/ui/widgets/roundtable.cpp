@@ -35,6 +35,21 @@ constexpr std::array<Subject, 3> kBottomRow{{
 /// enough air between them to look deliberate.
 constexpr int kRingWidth = 63;
 
+// The bat's column is pinned to this, rather than sized to whatever is in it.
+//
+// The thought bubble is wider than the 19-column sprite, so without a fixed
+// width it is the bubble that decides how wide the column is -- and the two
+// fillers either side of it then split an odd number of leftover columns
+// differently, sliding BatBot a column sideways every time the status text
+// changes length. "Fallback is answering" and "swapping in Fallback" differ by
+// one character, which was enough.
+//
+// 37 fits the longest status there is ("BatBot is reading the prompt", 35
+// columns once bubbled) and still leaves the seat columns their 11 each inside
+// kRingWidth. A longer one -- an exception message -- is truncated, which is
+// the right trade: the transcript shows the whole thing anyway.
+constexpr int kBatColumnWidth = 37;
+
 Color seat_color(SeatPhase phase) {
     switch (phase) {
         case SeatPhase::Active:       return theme::kSeatActive;
@@ -122,7 +137,11 @@ Element bat_column(const Snapshot& snapshot, const BatSprite& bat, std::size_t t
         lines.push_back(text(line) | color(mood_color(snapshot.mood)) | hcenter);
     }
 
-    return vbox(std::move(lines));
+    Element column = vbox(std::move(lines));
+    if (!compact) {
+        column = column | size(WIDTH, EQUAL, kBatColumnWidth);
+    }
+    return column;
 }
 
 }  // namespace
