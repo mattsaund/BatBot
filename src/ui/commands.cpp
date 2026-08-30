@@ -12,6 +12,8 @@
 
 #include "batbot/config/paths.hpp"
 #include "batbot/llm/model_catalog.hpp"
+#include "batbot/runtime/devices.hpp"
+#include "batbot/session/usage.hpp"
 #include "batbot/ui/theme.hpp"
 #include "batbot/util/format.hpp"
 
@@ -49,7 +51,11 @@ bool App::handle_command(const std::string& text) {
         state_.clear_notices();
         say("/help                 this list");
         say("/<subject> <prompt>   send straight to one expert, e.g. /physics why is the sky blue");
+        say("/resume               reopen an earlier conversation about this project");
+        say("/new                  start a fresh conversation, keeping this one on disk");
+        say("/usage                tokens spent this session and on this project");
         say("/experts              which seats are filled");
+        say("/runtimes             install or remove CUDA / Vulkan / CPU backends");
         say("/devices              compute devices llama.cpp found");
         say("/release              unload the resident expert and free its memory");
         say("/clear                clear the transcript and the experts' history");
@@ -75,10 +81,64 @@ bool App::handle_command(const std::string& text) {
 
     if (command == "paths") {
         state_.clear_notices();
-        say("config: " + paths::config_file().string());
-        say("models: " + config_.resolved_models_dir().string());
-        say("log:    " + paths::log_file().string());
-        say("trust:  " + paths::trust_file().string());
+        say("config:   " + paths::config_file().string());
+        say("models:   " + config_.resolved_models_dir().string());
+        say("runtimes: " + paths::runtimes_dir().string());
+        say("project:  " + store_.project().dir.string());
+        say("log:      " + paths::log_file().string());
+        say("trust:    " + paths::trust_file().string());
+        return true;
+    }
+
+    if (command == "resume" || command == "sessions") {
+        state_.clear_notices();
+        sessions_.open(store_);
+        return true;
+    }
+
+    if (command == "new") {
+        // The conversation so far is already on disk; this simply stops
+        // appending to it, so /resume can still find it.
+        persist_session();
+        store_.begin_new_session();
+        persisted_turns_ = 0;
+        state_.clear_turns();
+        state_.clear_notices();
+        engine_->reset_history();
+        follow_ = true;
+        say("started a new conversation -- /resume reopens the previous one");
+        return true;
+    }
+
+    if (command == "usage") {
+        state_.clear_notices();
+        const Snapshot snapshot = state_.snapshot();
+        const TokenUsage& session = snapshot.session_usage;
+        const TokenUsage& project = snapshot.project_usage;
+
+        say("this session:  " + format_tokens(session.input_tokens) + " in, " +
+            format_tokens(session.output_tokens) + " out, over " +
+            std::to_string(session.turns) +
+            (session.turns == 1 ? " turn" : " turns"));
+        if (session.tokens_per_second() > 0.0) {
+            say("               " + format::number(session.tokens_per_second(), 1) +
+                " tok/s generating");
+        }
+        say("this project:  " + format_tokens(project.input_tokens) + " in, " +
+            format_tokens(project.output_tokens) + " out, over " +
+            std::to_string(project.turns) +
+            (project.turns == 1 ? " turn" : " turns"));
+        say("               " + store_.project().root.string());
+        return true;
+    }
+
+    if (command == "runtimes" || command == "runtime") {
+        // Straight to the panel rather than printing a list: every question
+        // this command answers is on that screen, and the answer is usually
+        // followed by wanting to change something.
+        state_.clear_notices();
+        open_settings();
+        runtimes_.open();
         return true;
     }
 
@@ -114,12 +174,15 @@ bool App::handle_command(const std::string& text) {
 
     if (command == "devices") {
         state_.clear_notices();
-        const std::vector<std::string> devices = ModelHost::devices();
+        const std::vector<ComputeDevice> devices = compute_devices();
         if (devices.empty()) {
-            say("no compute devices reported yet");
+            say("no compute devices -- no runtime is loaded (see /runtimes)");
         }
-        for (const std::string& device : devices) {
-            say("device: " + device);
+        // The index is the point of this listing: it is what the GPU priority
+        // order and Main GPU settings are written in terms of.
+        for (const ComputeDevice& device : devices) {
+            say("[" + std::to_string(device.index) + "] " + device.label() +
+                "   " + device.backend + (device.is_gpu ? "" : "  (cpu)"));
         }
         return true;
     }

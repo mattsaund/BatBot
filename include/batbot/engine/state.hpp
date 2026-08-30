@@ -16,6 +16,7 @@
 #include "batbot/llm/model_host.hpp"
 #include "batbot/routing/router.hpp"
 #include "batbot/routing/subject.hpp"
+#include "batbot/session/usage.hpp"
 
 namespace batbot {
 
@@ -55,6 +56,7 @@ struct Turn {
     bool                   cancelled = false;
     bool                   failed    = false;
     double                 tokens_per_second = 0.0;
+    int                    prompt_tokens     = 0;
     int                    output_tokens     = 0;
     long                   load_ms           = 0;  ///< JIT swap cost for this turn
 };
@@ -68,6 +70,18 @@ struct Snapshot {
     std::vector<Turn>                   turns;
     std::vector<std::string>            notices;
     bool                                busy = false;
+
+    /// Tokens spent since BatBot started.
+    TokenUsage session_usage;
+
+    /// Tokens this project has ever spent, loaded from disk at startup and
+    /// kept in step as the session goes on.
+    TokenUsage project_usage;
+
+    /// The rate of the reply currently streaming, or 0 when nothing is. Shown
+    /// in preference to the session average, because while an answer is
+    /// arriving that is the number being asked about.
+    double live_tokens_per_second = 0.0;
 };
 
 class AppState {
@@ -87,10 +101,24 @@ public:
 
     /// Open a new turn and return its index.
     std::size_t begin_turn(std::string prompt);
+
+    /// Append an already-finished turn, as `/resume` does. Its tokens are not
+    /// added to the session total: they were spent in an earlier session and
+    /// are already in the project total.
+    void restore_turn(Turn turn);
     void set_route(std::size_t turn, RouteDecision route);
     void append_reply(std::size_t turn, std::string_view chunk);
     void finish_turn(std::size_t turn, const GenerationStats& stats, long load_ms);
     void fail_turn(std::size_t turn, std::string_view reason);
+
+    /// Report the rate of the reply in flight. Called every few tokens by the
+    /// engine, and reset to 0 when the turn ends.
+    void set_live_rate(double tokens_per_second);
+
+    TokenUsage session_usage() const;
+    TokenUsage project_usage() const;
+    /// Seed the project total from disk. Called once, at startup.
+    void set_project_usage(TokenUsage usage);
 
     void add_notice(std::string notice);
     void clear_notices();
@@ -108,6 +136,9 @@ private:
     std::vector<Turn>                    turns_;
     std::vector<std::string>             notices_;
     bool                                 busy_ = false;
+    TokenUsage                           session_usage_;
+    TokenUsage                           project_usage_;
+    double                               live_rate_ = 0.0;
 };
 
 }  // namespace batbot

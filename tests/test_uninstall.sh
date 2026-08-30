@@ -36,7 +36,21 @@ setup() {
     local root="$SANDBOX/$1"
     rm -rf "$root"
     mkdir -p "$root/bin" "$root/cfg/batbot" "$root/dat/batbot/models"
+    # The installed layout: the binary in bin/, llama.cpp's shared libraries
+    # and the bundled runtimes in lib/batbot/. The binary is not the whole
+    # program any more, and uninstall has to know that.
+    mkdir -p "$root/lib/batbot/runtimes"
+    head -c 262144 /dev/zero > "$root/lib/batbot/libllama.so"
+    head -c 262144 /dev/zero > "$root/lib/batbot/runtimes/libggml-cpu-haswell.so"
+    # A GPU runtime the user built, plus the source and build tree behind it.
+    mkdir -p "$root/dat/batbot/runtimes" "$root/dat/batbot/runtime-src" \
+             "$root/dat/batbot/runtime-build/vulkan" "$root/dat/batbot/projects/demo-abc12345"
+    head -c 524288 /dev/zero > "$root/dat/batbot/runtimes/libggml-vulkan.so"
+    echo '{"vulkan":{"llama_tag":"b10678"}}' > "$root/dat/batbot/runtimes/manifest.json"
+    echo '{"turns":[]}' > "$root/dat/batbot/projects/demo-abc12345/usage.json"
     cp "$BATBOT" "$root/bin/batbot"
+    # The installer puts this beside the binary, so uninstall has to take it.
+    printf '#!/bin/sh\n' > "$root/bin/batbot-routebench"; chmod +x "$root/bin/batbot-routebench"
     echo '{"models_dir":""}' > "$root/cfg/batbot/config.json"
     echo '{"trusted":[]}'    > "$root/cfg/batbot/trust.json"
     head -c 1048576 /dev/zero > "$root/dat/batbot/models/expensive-expert.gguf"
@@ -70,6 +84,13 @@ run_uninstall "$ROOT" 'y\ny\ny\n'
 check "binary removed"        "$(exists "$ROOT/bin/batbot")"            "no"
 check "config removed"        "$(exists "$ROOT/cfg/batbot")"            "no"
 check "data removed"          "$(exists "$ROOT/dat/batbot")"            "no"
+# The shared libraries are most of the install by size; leaving them behind
+# would make "yes to everything" a lie.
+check "libraries removed"     "$(exists "$ROOT/lib/batbot")"            "no"
+check "routebench removed"    "$(exists "$ROOT/bin/batbot-routebench")"  "no"
+check "user runtimes removed" "$(exists "$ROOT/dat/batbot/runtimes")"   "no"
+check "runtime source removed" "$(exists "$ROOT/dat/batbot/runtime-src")" "no"
+check "project history removed" "$(exists "$ROOT/dat/batbot/projects")" "no"
 
 echo "  -y answers yes to every question"
 ROOT="$(setup assume_yes)"
@@ -77,6 +98,13 @@ run_uninstall "$ROOT" '' -y
 check "binary removed"        "$(exists "$ROOT/bin/batbot")"            "no"
 check "config removed"        "$(exists "$ROOT/cfg/batbot")"            "no"
 check "data removed"          "$(exists "$ROOT/dat/batbot")"            "no"
+# The shared libraries are most of the install by size; leaving them behind
+# would make "yes to everything" a lie.
+check "libraries removed"     "$(exists "$ROOT/lib/batbot")"            "no"
+check "routebench removed"    "$(exists "$ROOT/bin/batbot-routebench")"  "no"
+check "user runtimes removed" "$(exists "$ROOT/dat/batbot/runtimes")"   "no"
+check "runtime source removed" "$(exists "$ROOT/dat/batbot/runtime-src")" "no"
+check "project history removed" "$(exists "$ROOT/dat/batbot/projects")" "no"
 
 echo "  each answer is independent: keep the config, drop the rest"
 ROOT="$(setup partial)"

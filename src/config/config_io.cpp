@@ -137,6 +137,11 @@ bool save_config(const Config& config, const std::filesystem::path& file) {
         {"router",        model_params_to_json(config.router)},
         {"defaults",      model_params_to_json(config.defaults, /*include_model=*/false)},
         {"experts",       experts},
+        {"gpu", json{
+            {"mode",     config.gpu.mode},
+            {"priority", config.gpu.priority},
+            {"main_gpu", config.gpu.main_gpu},
+        }},
         {"routing", json{
             {"min_confidence",       tidy(config.routing.min_confidence)},
             {"use_fallback_expert", config.routing.use_fallback_expert},
@@ -209,6 +214,11 @@ void write_default_config(const std::filesystem::path& file) {
         {"router", model_params_to_json(router_defaults)},
         {"defaults", model_params_to_json(defaults.defaults, /*include_model=*/false)},
         {"experts", experts},
+        {"gpu", json{
+            {"mode",     defaults.gpu.mode},
+            {"priority", defaults.gpu.priority},
+            {"main_gpu", defaults.gpu.main_gpu},
+        }},
         {"routing", json{
             {"min_confidence",       defaults.routing.min_confidence},
             {"use_fallback_expert", defaults.routing.use_fallback_expert},
@@ -283,6 +293,20 @@ Config load_config(const std::filesystem::path& file, std::vector<std::string>& 
             ModelParams& params = config.experts[static_cast<std::size_t>(info.subject)];
             read_model_params(*entry, params, info.id, warnings);
             params.inherit_from(config.defaults);
+        }
+    }
+
+    if (const auto gpu = doc.find("gpu"); gpu != doc.end() && gpu->is_object()) {
+        read_field(*gpu, "mode",     config.gpu.mode,     "gpu", warnings);
+        read_field(*gpu, "main_gpu", config.gpu.main_gpu, "gpu", warnings);
+        if (const auto priority = gpu->find("priority");
+            priority != gpu->end() && priority->is_array()) {
+            config.gpu.priority.clear();
+            for (const json& index : *priority) {
+                if (index.is_number_integer()) {
+                    config.gpu.priority.push_back(index.get<int>());
+                }
+            }
         }
     }
 

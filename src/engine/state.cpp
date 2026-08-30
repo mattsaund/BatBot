@@ -35,6 +35,9 @@ Snapshot AppState::snapshot() const {
     copy.turns    = turns_;
     copy.notices  = notices_;
     copy.busy     = busy_;
+    copy.session_usage = session_usage_;
+    copy.project_usage = project_usage_;
+    copy.live_tokens_per_second = live_rate_;
     return copy;
 }
 
@@ -119,6 +122,12 @@ std::size_t AppState::begin_turn(std::string prompt) {
     return turns_.size() - 1;
 }
 
+void AppState::restore_turn(Turn turn) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    turn.streaming = false;
+    turns_.push_back(std::move(turn));
+}
+
 void AppState::set_route(std::size_t turn, RouteDecision route) {
     const std::lock_guard<std::mutex> lock(mutex_);
     if (turn < turns_.size()) {
@@ -142,8 +151,36 @@ void AppState::finish_turn(std::size_t turn, const GenerationStats& stats, long 
     entry.streaming         = false;
     entry.cancelled         = stats.cancelled;
     entry.tokens_per_second = stats.tokens_per_second();
+    entry.prompt_tokens     = stats.prompt_tokens;
     entry.output_tokens     = stats.output_tokens;
     entry.load_ms           = load_ms;
+
+    // The session total counts every generation, cancelled ones included --
+    // the tokens were produced either way, and hiding them would make the
+    // readout disagree with what the machine actually did.
+    session_usage_.add(stats);
+    project_usage_.add(stats);
+    live_rate_ = 0.0;
+}
+
+void AppState::set_live_rate(double tokens_per_second) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    live_rate_ = tokens_per_second;
+}
+
+TokenUsage AppState::session_usage() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return session_usage_;
+}
+
+TokenUsage AppState::project_usage() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return project_usage_;
+}
+
+void AppState::set_project_usage(TokenUsage usage) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    project_usage_ = usage;
 }
 
 void AppState::fail_turn(std::size_t turn, std::string_view reason) {
@@ -154,6 +191,7 @@ void AppState::fail_turn(std::size_t turn, std::string_view reason) {
     Turn& entry = turns_[turn];
     entry.streaming = false;
     entry.failed    = true;
+    live_rate_      = 0.0;
     if (entry.reply.empty()) {
         entry.reply = reason;
     }

@@ -67,6 +67,27 @@ struct RoutingConfig {
     bool use_fallback_expert = true;
 };
 
+/// How the machine's GPUs are used.
+///
+/// This is a property of the hardware rather than of any one model, so it is
+/// configured once and applied to every model that gets loaded. Per-model
+/// `tensor_split` values in the config file are only honoured while `mode` is
+/// "auto" -- otherwise this wins, and the settings screen is the one place the
+/// arrangement is decided.
+struct GpuConfig {
+    /// auto | even | priority | single. See runtime/devices.hpp for what each
+    /// one does; "auto" leaves the decision to llama.cpp.
+    std::string mode = "auto";
+
+    /// Device indices, best first. Only read in "priority" mode. Indices are
+    /// ggml's, which is what `/devices` prints.
+    std::vector<int> priority;
+
+    /// The device "single" mode puts everything on, and the one llama.cpp uses
+    /// for small tensors in the other modes.
+    int main_gpu = 0;
+};
+
 /// Purely cosmetic knobs.
 struct UiConfig {
     int  animation_ms   = 90;    ///< frame interval while BatBot is busy
@@ -84,6 +105,7 @@ struct Config {
     ModelParams defaults;                            ///< inherited by every expert
     std::array<ModelParams, kSubjectCount> experts;  ///< indexed by Subject
     RoutingConfig routing;
+    GpuConfig     gpu;
     UiConfig      ui;
 
     std::string system_prompt =

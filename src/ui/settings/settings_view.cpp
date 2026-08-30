@@ -3,11 +3,13 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdio>
 #include <filesystem>
 #include <system_error>
 
 #include "batbot/config/paths.hpp"
+#include "batbot/runtime/devices.hpp"
 #include "batbot/ui/theme.hpp"
 
 using namespace ftxui;  // NOLINT(google-build-using-namespace)
@@ -66,7 +68,14 @@ void SettingsView::build_rows() {
     header("MODELS");
     rows_.push_back({Kind::Directory, "Models directory",
                      "where BatBot looks for .gguf files", &config_.models_dir,
-                     nullptr, nullptr, nullptr, 0, {}});
+                     nullptr, nullptr, nullptr, 0, {}, ActionId::None});
+    // The way back from a models directory that was moved somewhere awkward,
+    // or onto a drive that is no longer plugged in. The value column shows the
+    // path it would return to, so the row explains itself.
+    rows_.push_back({Kind::Action, "Reset to default",
+                     "put the models directory back where BatBot expects it",
+                     nullptr, nullptr, nullptr, nullptr, 0, {},
+                     ActionId::ResetModelsDir});
 
     header("DELEGATOR");
     rows_.push_back({Kind::ModelRef, "Router model",
@@ -112,9 +121,25 @@ void SettingsView::build_rows() {
                      nullptr, nullptr, &d.repeat_penalty, nullptr, 0, {}});
     rows_.push_back({Kind::Bool,  "Flash attention", "faster attention where supported",
                      nullptr, nullptr, nullptr, &d.flash_attn, 0, {}});
-    rows_.push_back({Kind::Enum,  "GPU split mode", "how an expert spreads across GPUs",
+    rows_.push_back({Kind::Enum,  "Split granularity",
+                     "what gets divided between GPUs: whole layers, or rows within them",
                      &d.split_mode, nullptr, nullptr, nullptr, 0,
                      {"layer", "row", "tensor", "none"}});
+
+    header("HARDWARE");
+    rows_.push_back({Kind::Panel, "Runtimes",
+                     "install or remove CUDA / Vulkan / CPU backends",
+                     nullptr, nullptr, nullptr, nullptr, 0, {}});
+    rows_.push_back({Kind::Enum, "Multi-GPU split",
+                     "how one expert is divided between the graphics cards",
+                     &config_.gpu.mode, nullptr, nullptr, nullptr, 0,
+                     {"auto", "even", "priority", "single"}});
+    rows_.push_back({Kind::Int, "Main GPU",
+                     "device index for small tensors, and the whole model in single mode",
+                     nullptr, &config_.gpu.main_gpu, nullptr, nullptr, 0, {}});
+    gpu_priority_to_text();
+    rows_.push_back({Kind::Text, "GPU priority order", gpu_priority_help(),
+                     &gpu_priority_text_, nullptr, nullptr, nullptr, 0, {}});
 
     header("BEHAVIOUR");
     rows_.push_back({Kind::Text, "System prompt", "sent to every expert",
@@ -127,6 +152,89 @@ void SettingsView::build_rows() {
                      nullptr, nullptr, nullptr, &config_.ui.show_roundtable, 0, {}});
     rows_.push_back({Kind::Bool, "Unicode glyphs", "off uses a pure-ASCII bat",
                      nullptr, nullptr, nullptr, &config_.ui.unicode, 0, {}});
+}
+
+// ---------------------------------------------------------------------------
+// GPU priority order
+//
+// Stored as device indices, edited as "0, 2, 1". Anything unparseable is
+// dropped rather than rejected, so a half-typed list never costs the whole
+// edit -- and the help line always shows what the numbers currently mean.
+// ---------------------------------------------------------------------------
+
+void SettingsView::gpu_priority_to_text() {
+    gpu_priority_text_.clear();
+    for (const int index : config_.gpu.priority) {
+        if (!gpu_priority_text_.empty()) {
+            gpu_priority_text_ += ", ";
+        }
+        gpu_priority_text_ += std::to_string(index);
+    }
+}
+
+void SettingsView::gpu_priority_from_text(const std::string& text) {
+    std::vector<int> order;
+    std::string digits;
+
+    const auto flush = [&] {
+        if (digits.empty()) {
+            return;
+        }
+        try {
+            const int index = std::stoi(digits);
+            // A device listed twice would take two shares of the split, so the
+            // first mention wins and the rest are ignored.
+            if (index >= 0 && std::find(order.begin(), order.end(), index) == order.end()) {
+                order.push_back(index);
+            }
+        } catch (const std::exception&) {
+            // Not a number: the user is mid-edit, and dropping it is kinder
+            // than refusing the whole line.
+        }
+        digits.clear();
+    };
+
+    for (const char c : text) {
+        if (std::isdigit(static_cast<unsigned char>(c)) != 0) {
+            digits += c;
+        } else {
+            flush();
+        }
+    }
+    flush();
+
+    config_.gpu.priority = std::move(order);
+    gpu_priority_to_text();
+}
+
+std::string SettingsView::gpu_priority_help() const {
+    const std::vector<ComputeDevice> gpus = gpu_devices();
+    if (gpus.empty()) {
+        return "device indices, best first -- no GPUs are visible yet";
+    }
+    if (config_.gpu.priority.empty()) {
+        std::string help = "device indices, best first -- available:";
+        for (const ComputeDevice& gpu : gpus) {
+            help += " " + std::to_string(gpu.index) + "=" +
+                    (gpu.description.empty() ? gpu.name : gpu.description) + ";";
+        }
+        return help;
+    }
+
+    std::string help = "order:";
+    for (const int index : config_.gpu.priority) {
+        const auto found = std::find_if(gpus.begin(), gpus.end(), [index](const ComputeDevice& gpu) {
+            return gpu.index == index;
+        });
+        help += " " + (found == gpus.end()
+                           ? "[" + std::to_string(index) + " not present]"
+                           : (found->description.empty() ? found->name : found->description));
+        help += " >";
+    }
+    if (help.size() > 2) {
+        help.erase(help.size() - 2);
+    }
+    return help;
 }
 
 std::string SettingsView::value_of(const Row& row) const {
@@ -143,6 +251,12 @@ std::string SettingsView::value_of(const Row& row) const {
                                                            : std::string{};
         case Kind::Float:    return row.real != nullptr ? format_float(*row.real) : std::string{};
         case Kind::Bool:     return (row.flag != nullptr && *row.flag) ? "on" : "off";
+        case Kind::Panel:    return "›";
+        case Kind::Action:
+            if (row.action == ActionId::ResetModelsDir) {
+                return paths::models_dir().string();
+            }
+            return "›";
     }
     return {};
 }
@@ -199,16 +313,57 @@ void SettingsView::activate_selection() {
             dialog_target_ = selected_;
             browser_.open(config_.resolved_models_dir());
             return;
+        case Kind::Panel:
+            // Handled by the caller, which owns the panel.
+            return;
+        case Kind::Action:
+            run_action(row.action);
+            return;
         default:
             begin_typing();
             return;
     }
 }
 
+void SettingsView::run_action(ActionId action) {
+    switch (action) {
+        case ActionId::None:
+            return;
+        case ActionId::ResetModelsDir: {
+            // An empty models_dir *means* the default, rather than storing the
+            // resolved path -- so a config written on one machine still points
+            // somewhere sensible on another.
+            if (config_.models_dir.empty()) {
+                status_ = "already using the default models directory";
+                return;
+            }
+            config_.models_dir.clear();
+            config_.resolve_models();
+            dirty_  = true;
+            // The path is on the row above; repeating it here only crowds the
+            // footer out of the hint and the unsaved-changes marker.
+            status_ = "models directory reset to the default";
+            // Rebuilds the rows, so the seats show which models still resolve.
+            refresh();
+            return;
+        }
+    }
+}
+
 void SettingsView::begin_typing() {
     const Row& row = rows_[selected_];
-    if (row.kind == Kind::Header || row.kind == Kind::Bool || row.kind == Kind::Enum) {
-        return;
+    // Rows with nothing to type into: a header, a toggle, a cycled enum, a
+    // row that opens a screen, or one that just does a thing. Opening an
+    // editor on those would offer an edit that is silently discarded.
+    switch (row.kind) {
+        case Kind::Header:
+        case Kind::Bool:
+        case Kind::Enum:
+        case Kind::Panel:
+        case Kind::Action:
+            return;
+        default:
+            break;
     }
     editor_.begin(value_of(row));
 }
@@ -226,6 +381,9 @@ void SettingsView::commit_edit() {
             // Moving the models directory changes what the picker can offer.
             if (row.text == &config_.models_dir) {
                 refresh();
+            }
+            if (row.text == &gpu_priority_text_) {
+                gpu_priority_from_text(text);
             }
             break;
         case Kind::Int:
@@ -297,6 +455,12 @@ SettingsAction SettingsView::handle(const Event& event, bool& consumed) {
     if (event == Event::ArrowUp   || event == Event::Character('k')) { move_selection(-1); return SettingsAction::None; }
     if (event == Event::ArrowDown || event == Event::Character('j')) { move_selection(1);  return SettingsAction::None; }
     if (event == Event::Return || event == Event::Character(' ')) {
+        // A panel row is the application's to open: it owns the panel, because
+        // the panel outlives this screen (a build keeps running after you
+        // leave settings).
+        if (!rows_.empty() && rows_[selected_].kind == Kind::Panel) {
+            return SettingsAction::OpenRuntimes;
+        }
         activate_selection();
         return SettingsAction::None;
     }
@@ -388,6 +552,10 @@ Element SettingsView::footer_hint() const {
                 return text(" enter browse folders   e type a path   ctrl-s save   esc back ");
             case Kind::ModelRef:
                 return text(" enter choose a model   r rescan   ctrl-s save   esc back ");
+            case Kind::Panel:
+                return text(" enter open   ↑↓ move   ctrl-s save   esc back ");
+            case Kind::Action:
+                return text(" enter reset to the default   ↑↓ move   ctrl-s save   esc back ");
             default:
                 break;
         }

@@ -8,6 +8,7 @@
 #include "batbot/app/uninstall.hpp"
 
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -71,13 +72,54 @@ bool remove_path(const std::filesystem::path& target) {
     return true;
 }
 
+/// $XDG_CACHE_HOME/batbot -- build trees left by install.sh when the checkout
+/// was on a filesystem that cannot hold them. Pure cache, but it can be a
+/// gigabyte, so it goes with the binary rather than being left behind.
+std::filesystem::path cache_dir() {
+    if (const char* value = std::getenv("XDG_CACHE_HOME"); value != nullptr && *value != '\0') {
+        if (const std::filesystem::path candidate(value); candidate.is_absolute()) {
+            return candidate / "batbot";
+        }
+    }
+    if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+        return std::filesystem::path(home) / ".cache" / "batbot";
+    }
+    return {};
+}
+
+/// The developer tool installed beside the binary. It is part of the same
+/// install, so it goes with it -- leaving a stray batbot-routebench on PATH
+/// after an uninstall is exactly the kind of litter that makes a clean
+/// reinstall test lie.
+std::filesystem::path tool_path(const std::filesystem::path& binary) {
+    if (binary.empty()) {
+        return {};
+    }
+    const std::filesystem::path candidate = binary.parent_path() / "batbot-routebench";
+    return std::filesystem::exists(candidate) ? candidate : std::filesystem::path{};
+}
+
+/// <prefix>/lib/batbot -- llama.cpp's shared libraries and the runtimes that
+/// shipped with the install. The binary alone is not the whole program any
+/// more, so removing it without these would leave most of the bytes behind.
+std::filesystem::path library_dir(const std::filesystem::path& binary) {
+    if (binary.empty()) {
+        return {};
+    }
+    const std::filesystem::path candidate = binary.parent_path().parent_path() / "lib" / "batbot";
+    return std::filesystem::exists(candidate) ? candidate : std::filesystem::path{};
+}
+
 }  // namespace
 
 int run_uninstall(bool assume_yes) {
-    const std::filesystem::path binary = own_path();
-    const std::filesystem::path config = paths::config_dir();
-    const std::filesystem::path data   = paths::data_dir();
-    const std::filesystem::path models = paths::models_dir();
+    const std::filesystem::path binary  = own_path();
+    const std::filesystem::path config  = paths::config_dir();
+    const std::filesystem::path data    = paths::data_dir();
+    const std::filesystem::path models  = paths::models_dir();
+    const std::filesystem::path libs    = library_dir(binary);
+    const std::filesystem::path cache   = cache_dir();
+    const std::filesystem::path tool    = tool_path(binary);
 
     std::cout << "\n  Uninstalling BatBot\n\n";
 
@@ -87,9 +129,20 @@ int run_uninstall(bool assume_yes) {
     if (std::filesystem::exists(config)) {
         std::cout << "  config   " << config.string() << "\n";
     }
+    if (!tool.empty()) {
+        std::cout << "  tool     " << tool.string() << "\n";
+    }
+    if (!libs.empty()) {
+        std::cout << "  runtime  " << libs.string() << "  ("
+                  << format::bytes(directory_size(libs)) << ")\n";
+    }
     if (std::filesystem::exists(data)) {
         std::cout << "  data     " << data.string() << "  ("
                   << format::bytes(directory_size(data)) << ")\n";
+    }
+    if (!cache.empty() && std::filesystem::exists(cache)) {
+        std::cout << "  cache    " << cache.string() << "  ("
+                  << format::bytes(directory_size(cache)) << ")\n";
     }
 
     const std::vector<ModelFile> found = scan_models(models);
@@ -108,6 +161,18 @@ int run_uninstall(bool assume_yes) {
             removed_binary = remove_path(binary);
             if (removed_binary) {
                 std::cout << "  removed " << binary.string() << "\n";
+            }
+            // Everything else the install put down goes with it: the tool,
+            // the shared libraries and the bundled runtimes are all useless
+            // without the binary.
+            if (!tool.empty() && remove_path(tool)) {
+                std::cout << "  removed " << tool.string() << "\n";
+            }
+            if (!libs.empty() && remove_path(libs)) {
+                std::cout << "  removed " << libs.string() << "\n";
+            }
+            if (!cache.empty() && std::filesystem::exists(cache) && remove_path(cache)) {
+                std::cout << "  removed " << cache.string() << "\n";
             }
         }
     }
@@ -132,7 +197,9 @@ int run_uninstall(bool assume_yes) {
                       << " model file" << (found.size() == 1 ? "" : "s") << " ("
                       << format::bytes(directory_size(models)) << ") that you supplied.\n";
         }
-        if (assume_yes || ask("Remove the models directory and logs too?", true)) {
+        // This is also where the GPU runtimes the user built live, along with
+        // the llama.cpp source they were built from and the project history.
+        if (assume_yes || ask("Remove the models, runtimes, history and logs too?", true)) {
             if (remove_path(data)) {
                 std::cout << "  removed " << data.string() << "\n";
             }

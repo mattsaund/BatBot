@@ -21,6 +21,7 @@
 #include <ftxui/screen/terminal.hpp>
 
 #include "batbot/config/paths.hpp"
+#include "batbot/session/usage.hpp"
 #include "batbot/ui/widgets/roundtable.hpp"
 #include "batbot/ui/settings/settings_view.hpp"
 #include "batbot/ui/theme.hpp"
@@ -37,6 +38,10 @@ App::App(Config config, const std::vector<std::string>& warnings)
     : config_(std::move(config)),
       bat_(config_.ui.unicode),
       settings_(config_),
+      // The runtime panel builds on a thread of its own and pokes the screen
+      // when progress moves, exactly as the engine does.
+      runtimes_([this] { screen_.PostEvent(Event::Custom); }),
+      store_(Project::current()),
       screen_(ScreenInteractive::Fullscreen()) {
     show_roundtable_ = config_.ui.show_roundtable;
 
@@ -44,6 +49,10 @@ App::App(Config config, const std::vector<std::string>& warnings)
         state_.add_notice(warning);
     }
     state_.configure_seats(config_);
+
+    // What this project has spent before today, so the counter continues
+    // rather than restarting at zero each time BatBot opens.
+    state_.set_project_usage(store_.project_usage());
 
     // The engine runs on its own thread and pokes the screen when the state
     // changes. PostEvent is the only FTXUI call safe to make from off-thread.
@@ -58,7 +67,12 @@ App::App(Config config, const std::vector<std::string>& warnings)
 }
 
 App::~App() {
+    // Every thread that can call back into this object has to be gone before
+    // any member is destroyed. The screen is declared after the runtime panel
+    // and so dies first, and a build thread still calling PostEvent to report
+    // progress would be reaching into freed memory.
     stop_ticker();
+    runtimes_.shutdown();
     if (engine_) {
         engine_->stop();
     }
@@ -123,17 +137,41 @@ Element App::render_status(const Snapshot& snapshot) const {
     }
 
     const std::string right = snapshot.busy
-        ? "ctrl-c cancel  ·  ctrl-e settings  ·  ctrl-t table  ·  /help"
-        : "ctrl-c quit  ·  ctrl-e settings  ·  ctrl-t table  ·  pgup/pgdn  ·  /help";
+        ? "ctrl-c cancel  ·  ctrl-e settings  ·  /help"
+        : "ctrl-c quit  ·  ctrl-e settings  ·  /resume  ·  /help";
 
     return hbox({
         text(left) | color(mood_color(snapshot.mood)),
         filler(),
-        text(right) | color(theme::kMeta) | dim,
+        render_usage(snapshot),
+        text("   " + right) | color(theme::kMeta) | dim,
     });
 }
 
+Element App::render_usage(const Snapshot& snapshot) const {
+    // Session first, because it is the number that changes as you work. The
+    // project total is the quieter one and sits behind a separator.
+    const bool unicode = config_.ui.unicode;
+    std::string text_out = usage_readout(snapshot.session_usage,
+                                         snapshot.live_tokens_per_second, unicode);
+
+    const TokenUsage& project = snapshot.project_usage;
+    if (project.total_tokens() > snapshot.session_usage.total_tokens()) {
+        text_out += unicode ? "   │  project " : "   |  project ";
+        text_out += format_tokens(project.total_tokens()) + " tok";
+    }
+
+    return text(text_out) |
+           color(snapshot.live_tokens_per_second > 0.0 ? Color(theme::kSeatActive)
+                                                       : Color(theme::kMeta));
+}
+
 Element App::render() {
+    // Panels stack: the runtime panel is opened from settings and drawn over
+    // it, so leaving one returns to the other rather than to the transcript.
+    if (runtimes_.active()) {
+        return dbox({settings_.render(), runtimes_.render() | center});
+    }
     if (in_settings_) {
         return settings_.render();
     }
@@ -168,8 +206,13 @@ Element App::render() {
         input_->Render() | flex,
     }));
 
-    return window(text(" BatBot " BATBOT_VERSION " ") | bold | color(theme::kBat),
-                  vbox(std::move(rows)));
+    Element screen = window(text(" BatBot " BATBOT_VERSION " ") | bold | color(theme::kBat),
+                            vbox(std::move(rows)));
+
+    if (sessions_.active()) {
+        screen = dbox({std::move(screen), sessions_.render() | center});
+    }
+    return screen;
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +249,67 @@ void App::save_settings() {
     engine_->apply_config(std::move(edited));
 }
 
+// ---------------------------------------------------------------------------
+// Session history
+// ---------------------------------------------------------------------------
+
+void App::persist_session() {
+    const Snapshot snapshot = state_.snapshot();
+
+    // Only write when a turn has actually finished. The engine wakes the
+    // screen for every token, and rewriting the file that often would be a
+    // disk write per token for no gain.
+    std::size_t finished = 0;
+    for (const Turn& turn : snapshot.turns) {
+        if (!turn.streaming && !turn.reply.empty()) {
+            ++finished;
+        }
+    }
+    if (finished == persisted_turns_) {
+        return;
+    }
+    persisted_turns_ = finished;
+
+    std::string error;
+    if (!store_.save(snapshot.turns, snapshot.session_usage, error)) {
+        say(error);
+    }
+}
+
+void App::resume_session(const std::string& id) {
+    std::vector<Turn> turns;
+    TokenUsage usage;
+    std::string error;
+    if (!store_.load(id, turns, usage, error)) {
+        say(error);
+        return;
+    }
+
+    // Continue the stored conversation rather than forking it: further turns
+    // append to the same file, which is what "resume" means.
+    store_.adopt(id);
+    state_.clear_turns();
+    state_.clear_notices();
+
+    // Hand the exchanges back to the engine too, or the expert would answer
+    // the next question with no memory of what is on screen.
+    engine_->reset_history();
+    std::vector<ChatMessage> history;
+    for (const Turn& turn : turns) {
+        state_.restore_turn(turn);
+        if (!turn.failed && !turn.cancelled && !turn.reply.empty()) {
+            history.push_back({"user", turn.prompt});
+            history.push_back({"assistant", turn.reply});
+        }
+    }
+    engine_->restore_history(std::move(history));
+
+    persisted_turns_ = turns.size();
+    follow_ = true;
+    say("resumed " + id + " -- " + std::to_string(turns.size()) +
+        (turns.size() == 1 ? " turn restored" : " turns restored"));
+}
+
 void App::on_submit() {
     const std::string text = format::trim(input_text_);
     input_text_.clear();
@@ -239,6 +343,50 @@ int App::run() {
     Component root = Renderer(input_, [this] { return render(); });
 
     root = CatchEvent(root, [this](const Event& event) {
+        // The engine wakes the screen with a Custom event after every change.
+        // A finished turn is the moment the conversation is worth writing, and
+        // persist_session() returns immediately when nothing has finished.
+        if (event == Event::Custom && !state_.busy()) {
+            persist_session();
+        }
+
+        // Modals are checked outermost-first, so the topmost one gets the key.
+
+        // The runtime panel sits above settings.
+        if (runtimes_.active()) {
+            if (event == Event::CtrlC) {
+                runtimes_.close();
+                return true;
+            }
+            if (runtimes_.handle(event) == RuntimeAction::Close) {
+                runtimes_.close();
+            }
+            return true;
+        }
+
+        if (sessions_.active()) {
+            switch (sessions_.handle(event)) {
+                case SessionPickerAction::Resume: {
+                    const std::string chosen = sessions_.chosen();
+                    sessions_.close();
+                    resume_session(chosen);
+                    return true;
+                }
+                case SessionPickerAction::Delete: {
+                    std::string error;
+                    if (!store_.remove(sessions_.chosen(), error)) {
+                        say(error);
+                    }
+                    sessions_.refresh(store_);
+                    return true;
+                }
+                case SessionPickerAction::Close:
+                case SessionPickerAction::None:
+                    break;
+            }
+            return true;
+        }
+
         // The settings screen takes the keyboard while it is open, apart from
         // Ctrl-C, so there is always a way out.
         if (in_settings_) {
@@ -253,6 +401,9 @@ int App::run() {
                     return true;
                 case SettingsAction::Apply:
                     save_settings();
+                    return true;
+                case SettingsAction::OpenRuntimes:
+                    runtimes_.open();
                     return true;
                 case SettingsAction::None:
                     break;

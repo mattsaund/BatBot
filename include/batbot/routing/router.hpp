@@ -35,6 +35,11 @@ struct RouteDecision {
 
 std::string_view route_source_name(RouteSource source);
 
+/// The inverse, for reading a stored session back. An unrecognised name is
+/// Fallback, which is the honest answer for "this came from somewhere we no
+/// longer understand".
+RouteSource route_source_from_name(std::string_view name);
+
 class Router {
 public:
     virtual ~Router() = default;

@@ -26,6 +26,31 @@ std::filesystem::path models_dir();
 /// cannot scribble over the TUI.
 std::filesystem::path log_file();
 
+/// data_dir()/runtimes -- the loadable ggml backends. One directory holding
+/// libggml-cuda.so and friends; adding or removing a file here is exactly what
+/// installing or uninstalling a runtime means.
+std::filesystem::path runtimes_dir();
+
+/// data_dir()/runtime-src -- the llama.cpp checkout GPU runtimes are built
+/// from. Seeded by install.sh, and cloned on demand if it is missing.
+std::filesystem::path runtime_src_dir();
+
+/// data_dir()/runtime-build -- scratch build trees, one per backend. Safe to
+/// delete at any time; the next build just takes longer.
+std::filesystem::path runtime_build_dir();
+
+/// data_dir()/projects -- per-project session history, keyed by directory.
+std::filesystem::path projects_dir();
+
+/// The directory holding the running executable, or empty if it cannot be
+/// determined. Used to find files installed alongside BatBot.
+std::filesystem::path executable_dir();
+
+/// <prefix>/lib/batbot/runtimes -- the runtimes shipped by `make install`,
+/// derived from executable_dir(). These are copied into runtimes_dir() on
+/// first run so there is exactly one directory to manage afterwards.
+std::filesystem::path bundled_runtimes_dir();
+
 /// Expand a leading `~` and resolve to an absolute path. Does not require the
 /// path to exist, so it is safe to call on a model path the user has not
 /// downloaded yet.

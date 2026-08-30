@@ -40,6 +40,35 @@ std::filesystem::path trust_file()  { return config_dir() / "trust.json"; }
 std::filesystem::path models_dir()  { return data_dir() / "models"; }
 std::filesystem::path log_file()    { return data_dir() / "batbot.log"; }
 
+std::filesystem::path runtimes_dir()      { return data_dir() / "runtimes"; }
+std::filesystem::path runtime_src_dir()   { return data_dir() / "runtime-src"; }
+std::filesystem::path runtime_build_dir() { return data_dir() / "runtime-build"; }
+std::filesystem::path projects_dir()      { return data_dir() / "projects"; }
+
+std::filesystem::path executable_dir() {
+    std::error_code ec;
+    const std::filesystem::path self = std::filesystem::read_symlink("/proc/self/exe", ec);
+    if (ec) {
+        return {};
+    }
+    return self.parent_path();
+}
+
+std::filesystem::path bundled_runtimes_dir() {
+    const std::filesystem::path bin = executable_dir();
+    if (bin.empty()) {
+        return {};
+    }
+    // The installed layout is <prefix>/bin/batbot with the libraries in
+    // <prefix>/lib/batbot, which is also what the binary's RPATH points at.
+    const std::filesystem::path installed = bin.parent_path() / "lib" / "batbot" / "runtimes";
+    if (std::filesystem::exists(installed)) {
+        return installed;
+    }
+    // In a build tree, ggml drops its backend modules next to the binary.
+    return bin;
+}
+
 std::filesystem::path expand_user(std::string_view raw) {
     if (raw.empty()) {
         return {};

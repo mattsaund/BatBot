@@ -132,6 +132,13 @@ std::string_view route_source_name(RouteSource source) {
     return "fallback";
 }
 
+RouteSource route_source_from_name(std::string_view name) {
+    if (name == "router model") { return RouteSource::Model; }
+    if (name == "keywords")     { return RouteSource::Keyword; }
+    if (name == "pinned")       { return RouteSource::Forced; }
+    return RouteSource::Fallback;
+}
+
 // ---------------------------------------------------------------------------
 // KeywordRouter
 // ---------------------------------------------------------------------------

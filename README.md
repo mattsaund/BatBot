@@ -63,12 +63,32 @@ At the table, a seat reads:
 
 ## Install
 
-One command. It installs the build toolchain, picks a GPU backend your hardware
+One command. It installs the build toolchain, picks a GPU runtime your hardware
 can actually use, builds, tests, and puts `batbot` on your PATH:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mattsaund/batbot/main/install.sh | bash
 ```
+
+It runs in five parts, with a main bar tracking the whole install underneath
+each one, and a second bar for whatever that part is doing:
+
+```
+==> [4/5] Getting the source
+    install  ███████░░░░░░░░░░░░░░░░░░░░░░░  23%
+    ██████████████░░░░░░░░░░░░░░  51%  install 29%  ·  Receiving objects
+
+==> [5/5] Building BatBot
+    install  ██████████░░░░░░░░░░░░░░░░░░░░  35%
+    ███████████░░░░░░░░░░░░░░░░░  42%  install 55%  ·  llama-model.cpp
+```
+
+The two bars are weighted differently on purpose. The parts are nothing like
+equal in length — checking CMake is milliseconds, building is minutes — so the
+main bar weights them by how long they actually take. One that moved a fifth
+per part would read 80% with the entire build still ahead of it. The long parts
+also carry the live overall figure on their own bar, so it keeps moving rather
+than freezing at 35% for ten minutes.
 
 Re-running it upgrades in place.
 
@@ -94,7 +114,7 @@ curl -fsSL .../install.sh | bash -s -- --gpu vulkan --prefix ~/.local
 
 | option | |
 |---|---|
-| `--gpu cuda\|vulkan\|cpu\|auto` | backend (default `auto`) |
+| `--gpu cuda\|vulkan\|cpu\|auto` | which GPU runtime to pre-build (default `auto`) |
 | `--prefix DIR` | install location (default `/usr/local`, or `~/.local` without sudo) |
 | `--jobs N` | parallel build jobs |
 | `--check` | report what would happen, change nothing, never ask for sudo |
@@ -102,15 +122,20 @@ curl -fsSL .../install.sh | bash -s -- --gpu vulkan --prefix ~/.local
 | `-y`, `--yes` | never prompt |
 | `--uninstall` | remove BatBot (leaves your config and models) |
 
+`--gpu` is not a permanent choice. It only decides which runtime gets built
+during the install so the first run is already accelerated; every backend can
+be added or removed later from the settings screen. See
+[Runtimes](#runtimes) below.
+
 ### What `--gpu auto` decides
 
-The installer reads your GPUs' compute capability and picks a backend it can
-genuinely build for, rather than the one that sounds best:
+The installer reads your GPUs' compute capability and picks a runtime it can
+genuinely build, rather than the one that sounds best:
 
 - **CUDA**, if an available toolkit is new enough for your *newest* card.
 - **Vulkan** otherwise, which works across NVIDIA, AMD and Intel through the
   driver and needs only a small shader compiler.
-- **CPU**, if neither can be installed.
+- **CPU**, if neither can be installed. CPU is always installed regardless.
 
 That check matters more than it sounds. A Blackwell card (RTX 50-series,
 compute capability 12.0) needs **CUDA ≥ 12.8**, but most distributions still
@@ -122,12 +147,90 @@ installer detects this, tells you, and uses Vulkan instead:
  !! CUDA 12.0 is too old for compute capability 12.0 (needs 12.8); using Vulkan
 ```
 
-To force CUDA anyway, install a current toolkit from
-[NVIDIA](https://developer.nvidia.com/cuda-downloads) and re-run with
-`--gpu cuda`.
+To use CUDA anyway, install a current toolkit from
+[NVIDIA](https://developer.nvidia.com/cuda-downloads) — then add the CUDA
+runtime from the settings screen, with no reinstall.
 
 The installer also handles a CMake that is too old (several current LTS
 releases ship < 3.24) by fetching an official build into `~/.cache/batbot`.
+
+---
+
+## Runtimes
+
+A **runtime** is one compute backend: a shared library that teaches llama.cpp
+how to talk to a piece of hardware. BatBot compiles none of them into the
+binary. They are files in `~/.local/share/batbot/runtimes`, and the settings
+screen adds and removes them.
+
+That means the backend is not a decision you make once, at install time, and
+live with. Install on a laptop with no GPU, add CUDA when you get a card, drop
+it again when a driver update breaks it — none of that needs a reinstall.
+
+Open the panel with `/runtimes`, or `ctrl-e` → **HARDWARE** → **Runtimes**:
+
+```
+ runtimes · /home/you/.local/share/batbot/runtimes
+ ▸ CPU     active · 1 device  ·  16.4 MB
+     Runs on the processor. Always works, and the slowest option by a wide margin.
+   CUDA    not installed · nvcc is not installed
+     NVIDIA cards, using the CUDA toolkit. The fastest option on NVIDIA hardware.
+   Vulkan  not installed · glslc is not installed
+     Any GPU with a Vulkan driver -- NVIDIA, AMD or Intel.
+
+ devices llama.cpp can see
+   [0] 12th Gen Intel(R) Core(TM) i5-12400 (46.8 GB)  CPU
+
+ ↑↓ choose   enter install   d remove   r rescan   esc back
+```
+
+`enter` builds the selected runtime from the llama.cpp source the installer
+saved, showing progress; it runs on its own thread, so BatBot stays usable and
+`esc` leaves it running in the background. `d` twice removes one. A new runtime
+is picked up on the next start.
+
+The CPU runtime cannot be removed — without it there is no way to run a model
+at all.
+
+**Runtimes need an SDK to build.** `install.sh` installs the Vulkan one
+automatically because it is small; CUDA is offered separately because it is
+several gigabytes. If one is missing, the panel says which program it wants and
+the exact command:
+
+```
+ CUDA: nvcc is not installed.  sudo apt install nvidia-cuda-toolkit
+```
+
+That check happens before the build starts, not ten minutes into it.
+
+### Multiple GPUs
+
+With more than one card, **HARDWARE → Multi-GPU split** decides how one expert
+is divided across them:
+
+| mode | what it does |
+|---|---|
+| `auto` | let llama.cpp decide (the default) |
+| `even` | proportional to each card's memory, so they finish together |
+| `priority` | fill the cards in the order you list, spilling into the next |
+| `single` | everything on **Main GPU** |
+
+`even` is even in *work*, not in count: a 16 GB card takes twice the layers of
+an 8 GB one. Splitting evenly by count would fill the small card first and fail
+a model that would otherwise have fitted.
+
+`priority` reads **GPU priority order**, written as device indices best-first
+(`0, 2, 1`). `/devices` prints the indices:
+
+```
+[0] NVIDIA GeForce RTX 4070 (12.0 GB)   CUDA
+[1] NVIDIA GeForce RTX 3060 (12.0 GB)   CUDA
+[2] 13th Gen Intel(R) Core(TM) i7-13700K   CPU  (cpu)
+```
+
+Only backends that can address several devices are affected — CUDA and Vulkan
+can, CPU cannot. The delegator is never split: it is small, and spreading a 1B
+model across three cards costs more in transfers than it saves in memory.
 
 ---
 
@@ -145,39 +248,59 @@ cmake --build build -j$(nproc)
 ./build/bin/batbot
 ```
 
-The result is a single self-contained binary.
+This builds the binary plus the CPU runtime. GPU runtimes are added afterwards
+from the settings screen — see [Runtimes](#runtimes).
 
 ```sh
-sudo cmake --install build          # or: cp build/bin/batbot ~/.local/bin/
+sudo cmake --install build --component batbot
+# or, for a user prefix:
+cmake --install build --component batbot --prefix ~/.local
 ```
 
-### GPU backends
+The install is `bin/batbot` plus `lib/batbot/` holding llama.cpp's shared
+libraries and the bundled CPU runtime. The binary's RPATH is relative, so it
+still works from anywhere on `PATH`.
 
-```sh
-# NVIDIA -- needs the CUDA toolkit (nvcc)
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DBATBOT_CUDA=ON
-
-# Anything Vulkan -- needs libvulkan-dev and glslc
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DBATBOT_VULKAN=ON
-```
-
-With multiple GPUs, `split_mode` and `tensor_split` in the config control how an
-expert is spread across them, so an expert can be larger than any single card.
+**Pass `--component batbot`.** llama.cpp and ggml carry their own install
+rules, written for people installing llama.cpp as a library: a plain
+`cmake --install` would also drop `libllama.so`, `libggml*.so`,
+`ggml-config.cmake` and `ggml.pc` loose into `<prefix>/lib`. BatBot does not
+use those copies — and on a system-wide install one of them could shadow
+another llama.cpp. The component installs what BatBot actually needs, all of
+it under `lib/batbot/`, which is also what makes `batbot --uninstall` able to
+remove everything it put down.
 
 ### Build options
 
 | option | default | what it does |
 |---|---|---|
-| `BATBOT_CUDA` | `OFF` | build llama.cpp's CUDA backend |
-| `BATBOT_VULKAN` | `OFF` | build llama.cpp's Vulkan backend |
-| `BATBOT_NATIVE` | `ON` | tune for this exact CPU (turn off for portable binaries) |
+| `BATBOT_BACKEND_DL` | `ON` | loadable GPU runtimes (see the note below) |
+| `BATBOT_NATIVE` | `ON` | tune for this machine; with runtimes on, builds one CPU module per feature level and picks the best at load |
 | `BATBOT_BUILD_TESTS` | `ON` | build the unit tests |
 | `BATBOT_BUILD_TOOLS` | `ON` | build `batbot-routebench` |
 | `BATBOT_WARNINGS` | `ON` | strict warnings on BatBot's own sources |
+| `BATBOT_CUDA` | `OFF` | monolithic builds only: compile CUDA in |
+| `BATBOT_VULKAN` | `OFF` | monolithic builds only: compile Vulkan in |
 
-> **Note on filesystems:** everything links statically, partly so the binary is
-> self-contained and partly because shared-library versioning needs symlinks —
-> which exFAT and NTFS volumes do not support.
+> **Note on filesystems:** a loadable runtime is a shared library, and shared
+> library versioning needs symlinks — which exFAT and NTFS volumes do not
+> support. Building a checkout on such a volume fails at the link step, so
+> **build somewhere else and leave the sources where they are**:
+>
+> ```sh
+> cmake -S . -B ~/.cache/batbot/build -DCMAKE_BUILD_TYPE=Release
+> ```
+>
+> `install.sh` detects this and relocates the build tree on its own. CMake
+> stops with this advice rather than letting the linker fail a thousand lines
+> into the log.
+
+#### Monolithic builds
+
+`-DBATBOT_BACKEND_DL=OFF` gives the older shape: one static binary with at most
+one backend compiled in, chosen by `BATBOT_CUDA` / `BATBOT_VULKAN`. Nothing is
+loadable and the Runtimes panel says so. It exists because it is the only mode
+that builds on a filesystem without symlinks.
 
 ---
 
@@ -227,6 +350,13 @@ the right move for a network mount, or anything easier pasted than navigated to.
 The line editor takes `←→` to move, `ctrl-a`/`ctrl-e` for either end, `ctrl-w`
 to drop the last path component, and `ctrl-u` to clear. A directory that is not
 there is flagged inline rather than failing later.
+
+**And the way back.** A **Reset to default** row sits directly under Models
+directory, showing the path it would return to. It is what you want when the
+folder was on a drive that is no longer plugged in, or when you simply want the
+standard layout again. It stores *no* path at all — an empty `models_dir` means
+"the default", so a config copied between machines still points somewhere
+sensible on each.
 
 Or set `models_dir` in the config file directly. An expert can also point
 outside the folder with an absolute or `~` path when you do not want to move a
@@ -359,13 +489,17 @@ The sky is blue because shorter wavelengths scatter more strongly...
 | command | |
 |---|---|
 | `/<subject> <prompt>` | skip routing, send straight to one expert |
+| `/resume` | reopen an earlier conversation about this project |
+| `/new` | start a fresh conversation, keeping the current one on disk |
+| `/usage` | tokens spent this session and on this project |
 | `/config` | open the settings screen |
+| `/runtimes` | install or remove compute backends |
 | `/models` | list the .gguf files in the models directory |
 | `/experts` | which seats are filled, and with what |
-| `/devices` | compute devices llama.cpp found |
+| `/devices` | compute devices, with the indices the GPU split uses |
 | `/release` | unload the resident expert, freeing its memory |
 | `/clear` | clear the transcript and the experts' history |
-| `/paths` | where the config, models, log and trust files live |
+| `/paths` | where the config, models, runtimes, history and log live |
 | `/help`, `/quit` | |
 
 | key | |
@@ -377,6 +511,49 @@ The sky is blue because shorter wavelengths scatter more strongly...
 
 The roundtable adapts to your terminal: the full ring above ~34 rows, a compact
 bat above ~24, and a single status strip below that.
+
+### Tokens
+
+The status bar carries a running count, and the rate of the reply arriving now:
+
+```
+● answering  │  resident: Physics    tok ↑ 1.4k  ↓ 830  ·  42.1 tok/s
+```
+
+`↑` is prompt tokens in, `↓` generated tokens out. While a reply streams, the
+rate is that reply's; when idle it is the session average. `/usage` breaks it
+down and adds the project total.
+
+The rate is measured from the first token, not from when the prompt was sent —
+otherwise a long prompt would make a fast expert look slow.
+
+Nothing here is billed. BatBot runs locally; the numbers are for knowing which
+expert is slow and how close a conversation is to filling its context.
+
+### Resuming a conversation
+
+BatBot keeps history per project — the directory you started it in. `/resume`
+lists what it has for *this* project and nothing else:
+
+```
+ resume · batbot
+ ▸ 2 hours ago    why does the JIT swap cost so little?     6 turns   4.1k tok
+   yesterday      explain the grammar-constrained sampler   3 turns   2.2k tok
+   12 Aug         first pass at the router prompt          14 turns  18.3k tok
+
+ ↑↓ choose   enter resume   d delete   esc cancel
+```
+
+`enter` restores the transcript **and** hands the exchanges back to the expert,
+so the next question continues the conversation rather than starting cold.
+Further turns append to the same session. `d` twice deletes one.
+
+A session is written after each completed turn, so a crash costs at most the
+turn in flight; a reply still streaming is never saved, because it is not
+something to resume into. `/new` starts a fresh one without discarding the old.
+
+History lives in `~/.local/share/batbot/projects/<name>-<hash>/`. The hash is
+what keeps two different checkouts called `src` apart.
 
 ---
 
@@ -418,8 +595,9 @@ independently, so the swap behaviour is real even when the file is the same.
 ### Unit tests
 
 The parts that need no model on disk — subject parsing, the router grammar,
-keyword routing, config inheritance, the trust store, UTF-8 chunking — are
-covered by a test suite that runs in well under a second:
+keyword routing, config inheritance, the trust store, UTF-8 chunking, the
+backend table, GPU splitting, token accounting and session history — are covered
+by a test suite that runs in well under a second:
 
 ```sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -434,7 +612,7 @@ Or run the binary directly to see each case:
 ```
 
 ```
-23 cases, 0 failed, 0 assertions failed
+80 cases, 0 failed, 0 assertions failed
 ```
 
 ### Routing quality
@@ -458,8 +636,12 @@ bash tests/test_uninstall.sh
 ```
 
 ```
-13 checks, 0 failed
+23 checks, 0 failed
 ```
+
+It covers the shared libraries and runtimes too: the binary is no longer the
+whole install, and leaving several hundred megabytes of `lib/batbot` behind
+would make "yes to everything" a lie.
 
 It asserts that declining keeps everything, that `-y` removes the binary and
 config but **never** the models, and that only an explicit yes to every question
@@ -516,16 +698,23 @@ curl -fsSL https://raw.githubusercontent.com/mattsaund/batbot/main/install.sh | 
 ```
 
 The installer's own logic — version comparison, the CUDA-vs-compute-capability
-table, CMake detection — has unit tests too, since a mistake there means a GPU
-that silently goes unused rather than an error anyone would notice:
+table, CMake detection, the package lists, and the build-directory relocation —
+has unit tests too, since a mistake there means a GPU that silently goes unused
+rather than an error anyone would notice:
 
 ```sh
 bash tests/test_install.sh
 ```
 
 ```
-23 checks, 0 failed
+37 checks, 0 failed
 ```
+
+One of those checks exists because of a real bug: the Vulkan package list was
+missing `spirv-headers`, and ggml's Vulkan backend does
+`find_package(SPIRV-Headers CONFIG REQUIRED)`. The install failed several
+minutes in, at configure time, naming a CMake package rather than anything you
+could install.
 
 ### Checking your setup
 
@@ -539,8 +728,10 @@ Inside BatBot:
 | | |
 |---|---|
 | `/experts` | which seats are filled, and with what |
-| `/devices` | the compute devices llama.cpp found — confirms your GPU backend is live |
-| `/config` | config, log, and trust file locations |
+| `/runtimes` | which backends are installed, and which are active |
+| `/devices` | the compute devices llama.cpp found — confirms your GPU runtime is live |
+| `/usage` | tokens spent this session and on this project |
+| `/paths` | config, models, runtimes, history and log locations |
 
 If a model will not load, the reason is in the log — llama.cpp's output is
 diverted there because anything on stderr would draw over the TUI:
@@ -563,8 +754,17 @@ src/
 ├── config/         what lives on disk
 │   ├── config.cpp      the Config type's own behaviour
 │   ├── config_io.cpp   reading and writing config.json
+│   ├── gpu_policy.cpp  turning a split mode into tensor_split
 │   ├── paths.cpp       XDG locations
 │   └── trust.cpp       the folder-trust store
+├── runtime/        the loadable compute backends
+│   ├── backend.cpp     the backend table; everything derives from it
+│   ├── registry.cpp    what is installed, and handing it to ggml
+│   ├── builder.cpp     compiling one on demand, off the UI thread
+│   └── devices.cpp     device enumeration and the GPU split policy
+├── session/        what a conversation costs, and remembering it
+│   ├── usage.cpp       token counting and its readout
+│   └── store.cpp       per-project session history
 ├── routing/        deciding who answers
 │   ├── subject.cpp     the subject table; grammar and prompt come from it
 │   └── router.cpp      KeywordRouter and ModelRouter
@@ -581,9 +781,11 @@ src/
 │   ├── app.cpp         shell, key handling, animation clock
 │   ├── commands.cpp    slash commands
 │   ├── transcript.cpp  drawing the conversation
+│   ├── session_picker.cpp  the /resume list
 │   ├── widgets/        bat sprite, roundtable
-│   └── settings/       view, directory browser, model picker, line editor
-└── util/           text and formatting helpers
+│   └── settings/       view, runtimes panel, directory browser,
+│                       model picker, line editor
+└── util/           text and formatting helpers, subprocess
 ```
 
 `include/batbot/` mirrors this exactly. Two threads, one boundary: the engine
@@ -619,6 +821,25 @@ a pure function it is tested without loading a model.
 `llama.cpp`'s own logging is redirected to `~/.local/share/batbot/batbot.log`,
 since anything on stderr would draw straight over the TUI.
 
+**No GPU backend is compiled in.** ggml is built with its dlopen-based backend
+loader, so CUDA and Vulkan are shared libraries in a directory rather than a
+decision frozen at compile time. `ModelHost`'s constructor seeds that directory
+from whatever shipped with the install and hands it to ggml before
+`llama_backend_init`, which is why a runtime added in settings is picked up by
+simply restarting.
+
+The same choice is what makes the CPU runtime fast without being fragile:
+ggml refuses `-march=native` for a loadable backend, so the build emits one
+module per x86-64 feature level (`sandybridge`, `haswell`, `zen4`, …) and ggml
+scores them at load and picks the best this machine can actually run.
+
+Building a runtime is a real cmake invocation against the llama.cpp checkout the
+installer saved, at the exact tag the binary was built from — `BATBOT_LLAMA_TAG`
+is compiled in for that reason, since a backend from a different tag would load
+and then crash on the first tensor. It runs under `util/subprocess.cpp` rather
+than `popen`, because a build has to be abandonable: `popen` returns no process
+id, so there would be nothing to signal when the user cancels.
+
 **The delegator is prompted with worked examples as real conversation turns**,
 not as a block of text inside its system message. That distinction is worth more
 than it sounds: on LFM2-1.2B, moving the same nine examples out of the system
@@ -635,6 +856,10 @@ almost everything.
 - [x] Models directory, and every setting editable in the app
 - [x] Routing benchmark, and a delegator prompt tuned against it
 - [x] `Fallback` seat for prompts the delegator cannot place
+- [x] Loadable runtimes — install and remove CUDA / Vulkan / CPU from settings
+- [x] Token counts per turn, session and project, with a live tok/s readout
+- [x] Multi-GPU splitting: even by memory, or a priority order you set
+- [x] `/resume` — per-project conversation history
 - [ ] **Agentic tools** — file read/edit, shell, web search, with a permission model
 - [ ] Prefix caching so an unchanged conversation is not re-ingested every turn
 - [ ] Predictive preloading of the likely next expert

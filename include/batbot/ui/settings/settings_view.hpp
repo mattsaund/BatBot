@@ -29,8 +29,9 @@ namespace batbot::ui {
 /// What the settings screen wants the application to do after a key.
 enum class SettingsAction {
     None,
-    Close,   ///< leave the settings screen
-    Apply,   ///< configuration changed: save it and hand it to the engine
+    Close,          ///< leave the settings screen
+    Apply,          ///< configuration changed: save it and hand it to the engine
+    OpenRuntimes,   ///< hand over to the runtimes panel
 };
 
 class SettingsView {
@@ -67,6 +68,15 @@ private:
         Float,
         Bool,       ///< Enter toggles; there is nothing to type
         Enum,       ///< Enter cycles through `options`
+        Panel,      ///< Enter hands off to a screen of its own
+        Action,     ///< Enter does something once; there is no value to edit
+    };
+
+    /// What an Action row does. Named rather than matched on the label, so
+    /// rewording a row cannot quietly break it.
+    enum class ActionId {
+        None,
+        ResetModelsDir,
     };
 
     /// One line of the screen.
@@ -86,13 +96,23 @@ private:
         /// kSubjectCount means the delegator.
         std::size_t  seat = 0;
         std::vector<std::string> options;  ///< for Enum rows
+        ActionId     action = ActionId::None;  ///< for Action rows
     };
 
     void build_rows();
     void move_selection(int delta);
 
+    /// The GPU priority order is a vector of device indices in the config and a
+    /// comma-separated string in the editor, so the two are synced explicitly
+    /// rather than pointing a Row at something that is not a std::string.
+    void  gpu_priority_to_text();
+    void  gpu_priority_from_text(const std::string& text);
+    /// Device names behind the configured order, for the row's help line.
+    std::string gpu_priority_help() const;
+
     /// Enter on the selected row: toggle, cycle, open a dialog, or start typing.
     void activate_selection();
+    void run_action(ActionId action);
     void begin_typing();
     void commit_edit();
 
@@ -108,6 +128,9 @@ private:
     std::size_t selected_ = 0;
     bool        dirty_    = false;
     std::string status_;
+
+    /// Mirror of Config::gpu.priority for the line editor. See the sync pair.
+    std::string      gpu_priority_text_;
 
     LineEditor       editor_;
     ModelPicker      picker_;

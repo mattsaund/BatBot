@@ -51,6 +51,11 @@ public:
     /// Forget the conversation history sent to experts.
     void reset_history();
 
+    /// Replace that history wholesale, which is what resuming a stored
+    /// conversation needs: the expert has to see what is already on screen or
+    /// it will answer the next question with no idea what came before.
+    void restore_history(std::vector<ChatMessage> history);
+
     /// Replace the running configuration, as the settings screen does.
     ///
     /// Applied on the worker thread between requests, never mid-generation.

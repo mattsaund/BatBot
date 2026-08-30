@@ -15,7 +15,10 @@
 #include "batbot/config/config.hpp"
 #include "batbot/engine/engine.hpp"
 #include "batbot/engine/state.hpp"
+#include "batbot/session/store.hpp"
+#include "batbot/ui/session_picker.hpp"
 #include "batbot/ui/widgets/bat_sprite.hpp"
+#include "batbot/ui/settings/runtime_view.hpp"
 #include "batbot/ui/settings/settings_view.hpp"
 
 namespace batbot::ui {
@@ -37,10 +40,18 @@ private:
     ftxui::Element render();
     void open_settings();
     void save_settings();
+
+    /// Write the conversation to the project's history. Called after every
+    /// completed turn, so a crash costs at most the turn in flight.
+    void persist_session();
+    /// Replace the transcript with a stored conversation and continue it.
+    void resume_session(const std::string& id);
     ftxui::Element render_transcript(const Snapshot& snapshot) const;
     ftxui::Element render_turn(const Turn& turn) const;
     ftxui::Element render_welcome() const;
     ftxui::Element render_status(const Snapshot& snapshot) const;
+    /// The token counters: session totals, project totals, and the live rate.
+    ftxui::Element render_usage(const Snapshot& snapshot) const;
 
     void on_submit();
     /// Returns true if the text was a slash command and has been dealt with.
@@ -55,8 +66,15 @@ private:
     AppState                state_;
     BatSprite               bat_;
     SettingsView            settings_;
+    RuntimeView             runtimes_;
+    SessionPicker           sessions_;
+    SessionStore            store_;
     bool                    in_settings_ = false;
     std::unique_ptr<Engine> engine_;
+
+    /// How many turns had finished when the session was last written, so a
+    /// redraw does not rewrite the file on every frame.
+    std::size_t             persisted_turns_ = 0;
 
     ftxui::ScreenInteractive screen_;
     ftxui::Component         input_;

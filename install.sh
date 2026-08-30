@@ -4,8 +4,9 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/mattsaund/batbot/main/install.sh | bash
 #
-# Installs the build toolchain, picks and installs a GPU backend, builds BatBot,
-# and puts the binary on your PATH. Safe to re-run: it upgrades in place.
+# Installs the build toolchain and the GPU SDKs, builds BatBot with loadable
+# runtimes, pre-builds the GPU runtime this machine wants, and puts the binary
+# on your PATH. Safe to re-run: it upgrades in place.
 
 set -euo pipefail
 
@@ -13,7 +14,11 @@ REPO_URL="https://github.com/mattsaund/batbot.git"
 RAW_URL="https://raw.githubusercontent.com/mattsaund/batbot/main/install.sh"
 
 BRANCH="main"
-GPU="auto"
+RUNTIME="auto"
+
+# Must match BATBOT_LLAMA_TAG in cmake/BatBotDependencies.cmake: a runtime
+# built from a different tag would load and then crash on the first tensor.
+LLAMA_TAG="b10678"
 PREFIX=""
 INSTALL_DEPS=1
 ASSUME_YES=0
@@ -54,6 +59,14 @@ esac
 
 BAR_WIDTH=28
 PROGRESS_LAST=-1
+
+# Set while a step bar should also report where the whole install has got to.
+# BASE and SPAN map that bar's own 0-100 onto a slice of the current part, so
+# two long operations inside one part (building BatBot, then building a GPU
+# runtime) advance the main figure instead of each restarting it.
+OVERALL_TRACK=0
+OVERALL_BASE=0
+OVERALL_SPAN=100
 SPINNER_PID=""
 
 repeat_char() {
@@ -100,6 +113,12 @@ progress_render() {
     [ "$percent" -lt 0 ] && percent=0
     [ "$percent" -gt 100 ] && percent=100
 
+    # A long part would otherwise leave the main bar frozen for minutes, so the
+    # step bar carries the live overall figure while it runs.
+    if [ "$OVERALL_TRACK" = 1 ]; then
+        label="install $(overall_percent $((OVERALL_BASE + percent * OVERALL_SPAN / 100)))%  ·  $label"
+    fi
+
     if [ "$IS_TTY" != 1 ]; then
         # Not a terminal (CI, or output redirected to a file): emit a line at
         # each 20% instead of a bar, so logs stay readable.
@@ -132,9 +151,18 @@ progress_render() {
 
 progress_begin() { PROGRESS_LAST=-1; hide_cursor; }
 
+# Report overall progress from the next step bar, mapping its 0-100 onto
+# [base, base+span] of the current part.
+progress_track() {
+    OVERALL_TRACK=1
+    OVERALL_BASE="$1"
+    OVERALL_SPAN="$2"
+}
+
 progress_end() {
     local message="${1:-}"
     PROGRESS_LAST=-1
+    OVERALL_TRACK=0
     clear_line
     show_cursor
     [ -n "$message" ] && ok "$message"
@@ -197,11 +225,63 @@ trap cleanup EXIT INT TERM
 STEP_NUM=0
 STEP_TOTAL=5
 
+# --------------------------------------------------------------------------
+# Overall progress
+#
+# The five parts of an install are nothing like equal in length: building is
+# minutes and checking CMake is milliseconds. A bar that moved a fifth per part
+# would sit at 80% for almost the entire install, which is worse than no bar at
+# all -- so each part carries a weight, and they are what the main bar counts.
+#
+# The numbers are rough measurements of a cold install on a mid-range machine,
+# not guesses; they only have to be right about the shape.
+# --------------------------------------------------------------------------
+# Indexed by step number, so [0] is unused and the rest sum to 100.
+STEP_WEIGHTS=(0 4 16 3 12 65)
+
+# How far through the whole install we are, given `fraction` (0-100) of the
+# part currently running.
+overall_percent() {
+    local fraction="${1:-0}" done=0 i
+    for ((i = 1; i < STEP_NUM && i <= STEP_TOTAL; i++)); do
+        done=$((done + STEP_WEIGHTS[i]))
+    done
+    if [ "$STEP_NUM" -ge 1 ] && [ "$STEP_NUM" -le "$STEP_TOTAL" ]; then
+        done=$((done + STEP_WEIGHTS[STEP_NUM] * fraction / 100))
+    fi
+    [ "$done" -gt 100 ] && done=100
+    printf '%s' "$done"
+}
+
+# The main bar. Drawn once per part rather than redrawn continuously, so it
+# stays in the scrollback as a record of how far each part got -- and so it can
+# never fight with the per-step bar for the same terminal row.
+overall_bar() {
+    local percent="$1" width=30 filled empty cols
+    cols="$(term_cols)"
+    [ "$cols" -lt 70 ] && width=18
+    [ "$cols" -lt 50 ] && width=10
+    [ "$percent" -lt 0 ]   && percent=0
+    [ "$percent" -gt 100 ] && percent=100
+
+    filled=$((percent * width / 100))
+    empty=$((width - filled))
+
+    # Green, where the per-step bar is cyan: at a glance the two are telling
+    # you different things, and the colour is the fastest way to say so.
+    printf '    %sinstall%s  %s%s%s%s%s %3d%%\n' \
+        "$C_DIM" "$C_RESET" \
+        "$C_GRN" "$(repeat_char "$BAR_FILL" "$filled")" \
+        "$C_DIM" "$(repeat_char "$BAR_VOID" "$empty")" "$C_RESET" \
+        "$percent"
+}
+
 step()  {
     STEP_NUM=$((STEP_NUM + 1))
     printf '\n%s==>%s %s[%d/%d]%s %s%s%s\n' \
         "$C_CYN" "$C_RESET" "$C_DIM" "$STEP_NUM" "$STEP_TOTAL" "$C_RESET" \
         "$C_BOLD" "$*" "$C_RESET"
+    overall_bar "$(overall_percent 0)"
 }
 info()  { printf '    %s\n' "$*"; }
 muted() { printf '    %s%s%s\n' "$C_DIM" "$*" "$C_RESET"; }
@@ -238,7 +318,7 @@ usage: install.sh [options]
   --jobs N         parallel build jobs (default: all cores)
   --no-deps        do not install system packages
   -y, --yes        assume yes; never prompt
-  --check          report what would be installed and which GPU backend
+  --check          report what would be installed and which runtime is chosen
                    would be chosen, then exit without changing anything
   --uninstall      remove an installed batbot
   -h, --help       this message
@@ -255,8 +335,8 @@ EOF
 # --------------------------------------------------------------------------
 while [ $# -gt 0 ]; do
     case "$1" in
-        --gpu)       GPU="${2:-}";    shift 2 ;;
-        --gpu=*)     GPU="${1#*=}";   shift ;;
+        --gpu)       RUNTIME="${2:-}";    shift 2 ;;
+        --gpu=*)     RUNTIME="${1#*=}";   shift ;;
         --prefix)    PREFIX="${2:-}"; shift 2 ;;
         --prefix=*)  PREFIX="${1#*=}";shift ;;
         --branch)    BRANCH="${2:-}"; shift 2 ;;
@@ -272,7 +352,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-case "$GPU" in
+case "$RUNTIME" in
     auto|cuda|vulkan|cpu) ;;
     *) die "--gpu must be one of: auto, cuda, vulkan, cpu" ;;
 esac
@@ -436,6 +516,7 @@ download_with_progress() {
     pid=$!
 
     if [ -n "$total" ] && [ "$total" -gt 0 ] 2>/dev/null && [ "$IS_TTY" = 1 ]; then
+        progress_track 0 100
         progress_begin
         while kill -0 "$pid" 2>/dev/null; do
             now=0
@@ -554,18 +635,18 @@ decide_backend() {
         fi
     fi
 
-    if [ "$GPU" != "auto" ]; then
-        info "backend: $GPU (requested)"
+    if [ "$RUNTIME" != "auto" ]; then
+        info "backend: $RUNTIME (requested)"
         return
     fi
 
     if [ "$have_nvidia" = 0 ]; then
         # No NVIDIA card. Vulkan still covers AMD and Intel GPUs.
         if [ "$PKG" != "unknown" ]; then
-            GPU="vulkan"
+            RUNTIME="vulkan"
             info "no NVIDIA GPU detected; choosing Vulkan (covers AMD and Intel)"
         else
-            GPU="cpu"
+            RUNTIME="cpu"
         fi
         return
     fi
@@ -577,10 +658,10 @@ decide_backend() {
     [ -n "$available" ] || available="$(apt_cuda_candidate || true)"
 
     if [ -n "$available" ] && version_ge "$available" "$required"; then
-        GPU="cuda"
+        RUNTIME="cuda"
         info "CUDA $available covers compute capability $highest; choosing CUDA"
     else
-        GPU="vulkan"
+        RUNTIME="vulkan"
         detected="${available:-none}"
         CUDA_NOTE="Your newest GPU is compute capability ${highest}, which needs CUDA >= ${required}.
     The CUDA toolkit available here is ${detected}, which cannot build for it, so
@@ -595,68 +676,84 @@ decide_backend() {
 # Dependencies
 # --------------------------------------------------------------------------
 PKGS_BASE=()
-PKGS_GPU=()
+PKGS_VULKAN=()
+PKGS_CUDA=()
 
 # Which packages this distribution needs for the chosen backend. Split out from
 # the install so --check can report them without touching anything.
 resolve_packages() {
-    PKGS_BASE=(); PKGS_GPU=()
+    PKGS_BASE=(); PKGS_VULKAN=(); PKGS_CUDA=()
     case "$PKG" in
         apt)    PKGS_BASE=(build-essential cmake git pkg-config curl ca-certificates)
-                [ "$GPU" = "vulkan" ] && PKGS_GPU=(glslc libvulkan-dev)
-                [ "$GPU" = "cuda" ]   && PKGS_GPU=(nvidia-cuda-toolkit) ;;
+                # spirv-headers is the one that is easy to miss: ggml's Vulkan
+                # backend does find_package(SPIRV-Headers CONFIG REQUIRED), and
+                # without it the build dies at configure time with an error
+                # naming a CMake package rather than anything installable.
+                PKGS_VULKAN=(glslc libvulkan-dev spirv-headers)
+                PKGS_CUDA=(nvidia-cuda-toolkit) ;;
         dnf)    PKGS_BASE=(gcc-c++ make cmake git pkgconf-pkg-config curl)
-                [ "$GPU" = "vulkan" ] && PKGS_GPU=(glslc vulkan-loader-devel)
-                [ "$GPU" = "cuda" ]   && PKGS_GPU=(cuda-toolkit) ;;
+                PKGS_VULKAN=(glslc vulkan-loader-devel spirv-headers-devel)
+                PKGS_CUDA=(cuda-toolkit) ;;
         pacman) PKGS_BASE=(base-devel cmake git curl)
-                [ "$GPU" = "vulkan" ] && PKGS_GPU=(shaderc vulkan-headers vulkan-icd-loader)
-                [ "$GPU" = "cuda" ]   && PKGS_GPU=(cuda) ;;
+                PKGS_VULKAN=(shaderc vulkan-headers vulkan-icd-loader spirv-headers)
+                PKGS_CUDA=(cuda) ;;
         zypper) PKGS_BASE=(gcc-c++ make cmake git-core curl)
-                [ "$GPU" = "vulkan" ] && PKGS_GPU=(shaderc vulkan-devel)
-                [ "$GPU" = "cuda" ]   && PKGS_GPU=(cuda) ;;
+                PKGS_VULKAN=(shaderc vulkan-devel spirv-headers)
+                PKGS_CUDA=(cuda) ;;
     esac
-    # The trailing `[ ... ] && ...` above returns 1 whenever the backend is not
-    # CUDA, and under `set -e` that would abort the caller. Return success
-    # explicitly.
+    return 0
+}
+
+# Are all of `$@` installable on this distribution?
+packages_available() {
+    local p
+    for p in "$@"; do
+        pkg_available "$p" || return 1
+    done
     return 0
 }
 
 install_dependencies() {
-    local base=() gpu_pkgs=()
     resolve_packages
-    base=("${PKGS_BASE[@]}")
-    gpu_pkgs=("${PKGS_GPU[@]}")
 
-    pkg_install "${base[@]}" || die "could not install the build toolchain"
+    pkg_install "${PKGS_BASE[@]}" || die "could not install the build toolchain"
 
-    if [ "${#gpu_pkgs[@]}" -gt 0 ]; then
-        local missing=()
-        for p in "${gpu_pkgs[@]}"; do
-            pkg_available "$p" || missing+=("$p")
-        done
-
-        if [ "${#missing[@]}" -gt 0 ]; then
-            warn "not available on this distribution: ${missing[*]}"
-            warn "falling back to a CPU-only build."
-            GPU="cpu"
-            return
-        fi
-
-        if [ "$GPU" = "cuda" ]; then
-            muted "the CUDA toolkit is a large download (often 2-4 GB)"
-            if ! confirm "Install the CUDA toolkit now?" y; then
-                info "skipping CUDA; building for Vulkan instead"
-                GPU="vulkan"
-                install_dependencies
-                return
-            fi
-        fi
-
-        if ! pkg_install "${gpu_pkgs[@]}"; then
-            warn "GPU packages failed to install; falling back to a CPU-only build."
-            GPU="cpu"
+    # The Vulkan SDK goes in whatever backend was chosen, and it goes in
+    # without asking. It is a few megabytes, it is what lets the settings
+    # screen build a Vulkan runtime later without root, and needing sudo from
+    # inside a TUI is the problem this avoids.
+    if [ "${#PKGS_VULKAN[@]}" -gt 0 ]; then
+        if packages_available "${PKGS_VULKAN[@]}"; then
+            pkg_install "${PKGS_VULKAN[@]}" ||
+                warn "the Vulkan SDK did not install; Vulkan runtimes cannot be built"
+        else
+            warn "no Vulkan SDK packages on this distribution; Vulkan runtimes cannot be built"
         fi
     fi
+
+    # CUDA is different in kind: several gigabytes, and useless without an
+    # NVIDIA card. It is only offered when the hardware asked for it.
+    if [ "$RUNTIME" = "cuda" ]; then
+        if ! packages_available "${PKGS_CUDA[@]}"; then
+            warn "the CUDA toolkit is not packaged here; using Vulkan instead"
+            RUNTIME="vulkan"
+            return 0
+        fi
+        if command -v nvcc >/dev/null 2>&1; then
+            return 0
+        fi
+        muted "the CUDA toolkit is a large download (often 2-4 GB)"
+        if confirm "Install the CUDA toolkit now?" y; then
+            pkg_install "${PKGS_CUDA[@]}" || {
+                warn "the CUDA toolkit failed to install; using Vulkan instead"
+                RUNTIME="vulkan"
+            }
+        else
+            info "skipping CUDA -- you can install it later and add the runtime in settings"
+            RUNTIME="vulkan"
+        fi
+    fi
+    return 0
 }
 
 # --------------------------------------------------------------------------
@@ -668,6 +765,7 @@ git_clone_with_progress() {
     local url="$1" dest="$2" branch="$3" status=0 log
     log="$(mktemp)"
 
+    progress_track 0 100
     progress_begin
     set +e
     git clone --depth 1 --branch "$branch" --progress "$url" "$dest" 2>&1 \
@@ -750,10 +848,37 @@ show_log_tail() {
     printf '%s--- end ---%s\n\n' "$C_DIM" "$C_RESET" >&2
 }
 
+# Where to build.
+#
+# Loadable runtimes are shared libraries, and shared libraries need symlinks to
+# carry their version suffix. A checkout on exFAT or NTFS -- an external drive
+# shared with Windows, say -- cannot make one, and the link step fails with
+# "Operation not permitted" a long way into the build. So the build tree is
+# only kept beside the source when the filesystem can support it, and moved to
+# the cache directory when it cannot.
+choose_build_dir() {
+    local candidate="$SRC_DIR/build"
+    mkdir -p "$candidate" 2>/dev/null || true
+
+    if ln -sfn "$candidate" "$candidate/.symlink-probe" 2>/dev/null; then
+        rm -f "$candidate/.symlink-probe"
+        BUILD_DIR="$candidate"
+        return 0
+    fi
+
+    # Do not leave the empty probe directory behind in the checkout.
+    rmdir "$candidate" 2>/dev/null || true
+
+    BUILD_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/batbot/build"
+    mkdir -p "$BUILD_DIR"
+    info "this filesystem has no symlinks; building in $BUILD_DIR instead"
+    return 0
+}
+
 build_and_install() {
-    local build_dir="$SRC_DIR/build" cuda_flag=OFF vulkan_flag=OFF status=0
-    [ "$GPU" = "cuda" ]   && cuda_flag=ON
-    [ "$GPU" = "vulkan" ] && vulkan_flag=ON
+    local status=0
+    choose_build_dir
+    local build_dir="$BUILD_DIR"
 
     # The log is only interesting when something breaks, so its path is
     # announced on failure rather than upfront, and it is removed on success
@@ -763,25 +888,32 @@ build_and_install() {
     # --- configure ---------------------------------------------------------
     # The first configure clones llama.cpp and FTXUI, so it is slow and has no
     # percentage of its own.
-    spinner_start "configuring (backend: $GPU) "
+    # No GPU backend is compiled in. BatBot is built with ggml's loadable
+    # backends, so CUDA and Vulkan are files the settings screen manages rather
+    # than a decision frozen here -- which is the whole point of this install
+    # producing something you can change your mind about later.
+    spinner_start "configuring (loadable runtimes) "
     "$CMAKE" -S "$SRC_DIR" -B "$build_dir" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-        -DBATBOT_CUDA="$cuda_flag" \
-        -DBATBOT_VULKAN="$vulkan_flag" \
+        -DBATBOT_BACKEND_DL=ON \
         > "$BUILD_LOG" 2>&1 || status=$?
     if [ "$status" -ne 0 ]; then
         spinner_stop
         show_log_tail "$BUILD_LOG"
-        die "cmake configure failed. Re-run with --gpu cpu to rule out the GPU backend."
+        die "cmake configure failed. The full log is at $BUILD_LOG"
     fi
-    spinner_stop "configured for $GPU"
+    spinner_stop "configured"
 
     # --- compile -----------------------------------------------------------
     # CMake's Makefile generator prints "[ 42%] Building ..." for every unit,
     # which is a real, ordered percentage worth turning into a bar. The full
     # output still goes to the log so a failure can be diagnosed.
     info "compiling with $JOBS jobs (several minutes on a first build)"
+    # Part 5 also builds a GPU runtime afterwards, so this compile is only the
+    # first stretch of it -- otherwise the overall figure would reach 100%
+    # with minutes of work still to go.
+    progress_track 5 65
     progress_begin
     status=0
     set +e
@@ -829,13 +961,13 @@ build_and_install() {
     spinner_start "installing to ${PREFIX}/bin "
     status=0
     if [ -w "$PREFIX" ] || [ "$(id -u)" -eq 0 ]; then
-        "$CMAKE" --install "$build_dir" >> "$BUILD_LOG" 2>&1 || status=$?
+        "$CMAKE" --install "$build_dir" --component batbot >> "$BUILD_LOG" 2>&1 || status=$?
     else
         mkdir -p "$PREFIX/bin" 2>/dev/null || true
         if [ -w "$PREFIX/bin" ]; then
-            "$CMAKE" --install "$build_dir" >> "$BUILD_LOG" 2>&1 || status=$?
+            "$CMAKE" --install "$build_dir" --component batbot >> "$BUILD_LOG" 2>&1 || status=$?
         else
-            $SUDO "$CMAKE" --install "$build_dir" >> "$BUILD_LOG" 2>&1 || status=$?
+            $SUDO "$CMAKE" --install "$build_dir" --component batbot >> "$BUILD_LOG" 2>&1 || status=$?
         fi
     fi
     if [ "$status" -ne 0 ]; then
@@ -845,10 +977,156 @@ build_and_install() {
     fi
     spinner_stop "installed"
 
+    seed_runtime_source "$build_dir"
+    prebuild_runtime
+
     if [ -z "${KEEP_BUILD_LOG:-}" ]; then
         rm -f "$BUILD_LOG"
         BUILD_LOG=""
     fi
+}
+
+# --------------------------------------------------------------------------
+# Runtimes
+#
+# BatBot ships with the CPU runtime and builds GPU ones on demand, from the
+# settings screen. Both of those need a llama.cpp checkout at the exact tag the
+# binary was built against -- and the build we just did already downloaded one.
+# Copying it here means adding a runtime later needs no network at all.
+# --------------------------------------------------------------------------
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/batbot"
+
+seed_runtime_source() {
+    local build_dir="$1"
+    local fetched="$build_dir/_deps/llama-src"
+    local target="$DATA_DIR/runtime-src"
+
+    [ -d "$fetched" ] || return 0
+    if [ -f "$target/CMakeLists.txt" ]; then
+        return 0
+    fi
+
+    spinner_start "saving the llama.cpp source for future runtimes "
+    mkdir -p "$DATA_DIR"
+    rm -rf "$target"
+    # Without .git this is a fraction of the size and still builds.
+    if cp -r "$fetched" "$target" 2>/dev/null; then
+        rm -rf "$target/.git"
+        spinner_stop "runtime source ready ($(du -sh "$target" 2>/dev/null | cut -f1))"
+    else
+        spinner_stop
+        warn "could not copy the llama.cpp source; adding a runtime later will re-download it"
+    fi
+    return 0
+}
+
+# Build one GPU runtime now, so the first run is already accelerated. Exactly
+# what the settings screen would do, and skippable -- the point of the whole
+# design is that this is never a one-time decision.
+prebuild_runtime() {
+    local kind="$RUNTIME" option tool target_dir src status=0
+
+    # Check for the compiler the backend needs rather than for whether we
+    # installed it: --no-deps users often already have the SDK, and this is
+    # the same test the in-app runtime builder makes.
+    case "$kind" in
+        cuda)   option=GGML_CUDA;   tool=nvcc  ;;
+        vulkan) option=GGML_VULKAN; tool=glslc ;;
+        # cpu ships with the binary, and "none" is an explicit opt-out.
+        *)      return 0 ;;
+    esac
+
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        warn "$tool is not installed, so the $kind runtime was not built"
+        muted "install it, then add the runtime from settings (ctrl-e, Runtimes)"
+        return 0
+    fi
+
+    src="$DATA_DIR/runtime-src"
+    [ -f "$src/CMakeLists.txt" ] || return 0
+
+    local build_dir="$DATA_DIR/runtime-build/$kind"
+    target_dir="$DATA_DIR/runtimes"
+    mkdir -p "$build_dir" "$target_dir"
+
+    RUNTIME_LOG="$(mktemp -t batbot-runtime-XXXXXX.log)"
+
+    spinner_start "configuring the $kind runtime "
+    "$CMAKE" -S "$src" -B "$build_dir" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=ON \
+        -DGGML_BACKEND_DL=ON \
+        -DGGML_NATIVE=OFF \
+        -DGGML_CPU=OFF \
+        -D${option}=ON \
+        -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+        -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_SERVER=OFF \
+        -DLLAMA_BUILD_COMMON=OFF -DLLAMA_CURL=OFF \
+        > "$RUNTIME_LOG" 2>&1 || status=$?
+
+    if [ "$status" -ne 0 ]; then
+        spinner_stop
+        show_log_tail "$RUNTIME_LOG" 20
+        warn "the $kind runtime could not be configured; BatBot will run on CPU"
+        warn "you can retry from the settings screen (ctrl-e, Runtimes)"
+        return 0
+    fi
+    spinner_stop "configured the $kind runtime"
+
+    info "compiling the $kind runtime (this is the long part)"
+    progress_track 75 25
+    progress_begin
+    status=0
+    set +e
+    "$CMAKE" --build "$build_dir" --target ggml -j "$JOBS" 2>&1 \
+        | while IFS= read -r line; do
+              printf '%s\n' "$line" >> "$RUNTIME_LOG"
+              case "$line" in
+                  \[*%\]*)
+                      percent="${line#*[}"
+                      percent="${percent%%\%*}"
+                      percent="${percent// /}"
+                      case "$percent" in
+                          ''|*[!0-9]*) ;;
+                          *) target="${line#*] }"; progress_render "$percent" "${target:0:30}" ;;
+                      esac
+                      ;;
+              esac
+          done
+    status="${PIPESTATUS[0]}"
+    set -e
+    progress_end
+
+    if [ "$status" -ne 0 ]; then
+        show_log_tail "$RUNTIME_LOG" 20
+        warn "the $kind runtime failed to build; BatBot will run on CPU"
+        warn "the full log is at $RUNTIME_LOG"
+        warn "you can retry from the settings screen (ctrl-e, Runtimes)"
+        return 0
+    fi
+
+    spinner_start "installing the $kind runtime "
+    local copied=0 f
+    for f in "$build_dir"/bin/libggml-"$kind"*.so; do
+        [ -f "$f" ] || continue
+        cp "$f" "$target_dir/" && copied=$((copied + 1))
+    done
+    if [ "$copied" -eq 0 ]; then
+        spinner_stop
+        warn "the $kind build produced no module; BatBot will run on CPU"
+        return 0
+    fi
+
+    # The manifest is what the settings screen reads to say where a runtime
+    # came from, so write it the same way the in-app builder does.
+    printf '{\n  "%s": {\n    "llama_tag": "%s",\n    "built_at": "%s"\n  }\n}\n' \
+        "$kind" "$LLAMA_TAG" "$(date -u '+%Y-%m-%d %H:%M UTC')" \
+        > "$target_dir/manifest.json"
+
+    RUNTIME_INSTALLED="$kind"
+    spinner_stop "$kind runtime installed"
+    rm -f "$RUNTIME_LOG"
+    return 0
 }
 
 uninstall() {
@@ -930,16 +1208,29 @@ run_check() {
     printf '\n%swould install:%s\n' "$C_BOLD" "$C_RESET"
     if [ "$INSTALL_DEPS" = 1 ]; then
         resolve_packages
-        info "toolchain : ${PKGS_BASE[*]:-none}"
-        info "backend   : ${PKGS_GPU[*]:-none needed}"
+        info "toolchain  : ${PKGS_BASE[*]:-none}"
+        info "vulkan sdk : ${PKGS_VULKAN[*]:-none available}"
+        if [ "$RUNTIME" = "cuda" ]; then
+            info "cuda sdk   : ${PKGS_CUDA[*]:-none available}  (you will be asked first)"
+        else
+            muted "cuda sdk   : not needed for the $RUNTIME runtime"
+        fi
     else
         muted "(package installation disabled with --no-deps)"
     fi
 
     printf '\n%swould build and install:%s\n' "$C_BOLD" "$C_RESET"
-    info "backend   : $GPU"
-    info "binary    : $PREFIX/bin/batbot"
-    info "config    : ${XDG_CONFIG_HOME:-$HOME/.config}/batbot/config.json"
+    info "binary     : $PREFIX/bin/batbot"
+    info "libraries  : $PREFIX/lib/batbot"
+    info "config     : ${XDG_CONFIG_HOME:-$HOME/.config}/batbot/config.json"
+    info "runtimes   : ${XDG_DATA_HOME:-$HOME/.local/share}/batbot/runtimes"
+    if [ "$RUNTIME" = "cpu" ] || [ "$RUNTIME" = "none" ]; then
+        info "prebuild   : CPU only -- add a GPU runtime later in settings"
+    else
+        info "prebuild   : the $RUNTIME runtime, on top of CPU"
+    fi
+    muted "GPU backends are loadable: they can be added or removed at any time"
+    muted "from the settings screen, without rebuilding BatBot."
 
     if [ -n "$CUDA_NOTE" ]; then
         printf '\n'
@@ -982,11 +1273,22 @@ main() {
     local models_dir="${XDG_DATA_HOME:-$HOME/.local/share}/batbot/models"
     mkdir -p "$models_dir" 2>/dev/null || true
 
+    # Close the main bar out at 100%, so the last thing on screen agrees with
+    # the five that came before it rather than leaving it stuck at 96%.
+    STEP_NUM=$((STEP_TOTAL + 1))
+    printf '\n'
+    overall_bar 100
+
     printf '\n%s%s  BatBot is installed.%s\n\n' "$C_GRN" "$C_BOLD" "$C_RESET"
     info "binary   : $PREFIX/bin/batbot"
-    info "backend  : $GPU"
     info "models   : $models_dir"
     info "config   : ${XDG_CONFIG_HOME:-$HOME/.config}/batbot/config.json"
+    if [ -n "${RUNTIME_INSTALLED:-}" ]; then
+        info "runtimes : CPU + ${RUNTIME_INSTALLED}"
+    else
+        info "runtimes : CPU"
+        muted "add a GPU runtime any time: run batbot, ctrl-e, open Runtimes"
+    fi
 
     if [ -n "$CUDA_NOTE" ]; then
         printf '\n'

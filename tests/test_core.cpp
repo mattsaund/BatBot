@@ -10,12 +10,19 @@
 #include <nlohmann/json.hpp>
 
 #include "batbot/config/config.hpp"
+#include "batbot/config/gpu_policy.hpp"
 #include "batbot/engine/route_policy.hpp"
 #include "batbot/llm/model_catalog.hpp"
 #include "batbot/config/paths.hpp"
 #include "batbot/routing/router.hpp"
 #include "batbot/engine/state.hpp"
 #include "batbot/routing/subject.hpp"
+#include "batbot/runtime/backend.hpp"
+#include "batbot/runtime/devices.hpp"
+#include "batbot/runtime/registry.hpp"
+#include "batbot/session/store.hpp"
+#include "batbot/session/usage.hpp"
+#include "batbot/util/subprocess.hpp"
 #include "batbot/util/text.hpp"
 #include "batbot/config/trust.hpp"
 #include "harness.hpp"
@@ -791,6 +798,602 @@ TEST(xdg_config_home_is_honoured_when_absolute) {
     CHECK_EQ(file.filename().string(), std::string("config.json"));
     CHECK_EQ(file.parent_path().filename().string(), std::string("batbot"));
     CHECK(file.is_absolute());
+}
+
+TEST(an_empty_models_dir_means_the_default_so_resetting_is_clearing_it) {
+    // This is what the "Reset to default" row does. It stores an empty string
+    // rather than the resolved path, so a config written on one machine still
+    // points somewhere sensible on another -- and so the default can move
+    // without stranding anyone who reset.
+    Config moved;
+    moved.models_dir = "/mnt/external/ggufs";
+    CHECK_EQ(moved.resolved_models_dir().string(), std::string("/mnt/external/ggufs"));
+
+    moved.models_dir.clear();
+    CHECK_EQ(moved.resolved_models_dir(), paths::models_dir());
+}
+
+TEST(resetting_the_models_dir_re_resolves_every_model_reference) {
+    Config config;
+    config.models_dir            = "/mnt/external/ggufs";
+    config.router.model          = "router.gguf";
+    config.experts[0].model      = "maths.gguf";
+    // An absolute reference is not relative to the models directory, so moving
+    // that directory must leave it exactly where it points.
+    config.experts[1].model      = "/opt/models/programming.gguf";
+    config.resolve_models();
+    CHECK_EQ(config.router.path, std::string("/mnt/external/ggufs/router.gguf"));
+
+    config.models_dir.clear();
+    config.resolve_models();
+    CHECK_EQ(config.router.path, (paths::models_dir() / "router.gguf").string());
+    CHECK_EQ(config.experts[0].path, (paths::models_dir() / "maths.gguf").string());
+    CHECK_EQ(config.experts[1].path, std::string("/opt/models/programming.gguf"));
+}
+
+// ---------------------------------------------------------------------------
+// Backends
+// ---------------------------------------------------------------------------
+
+TEST(the_backend_table_is_indexed_by_the_enum) {
+    const auto& backends = all_backends();
+    CHECK_EQ(backends.size(), kBackendCount);
+    for (std::size_t i = 0; i < backends.size(); ++i) {
+        // backend_info() indexes straight into the array, so a table written
+        // out of order would silently return the wrong entry for every lookup.
+        CHECK_EQ(static_cast<std::size_t>(backends[i].kind), i);
+    }
+}
+
+TEST(every_backend_has_a_unique_id_and_round_trips) {
+    for (const BackendInfo& info : all_backends()) {
+        const auto parsed = backend_from_id(info.id);
+        CHECK(parsed.has_value());
+        CHECK_EQ(static_cast<int>(*parsed), static_cast<int>(info.kind));
+        CHECK(!info.name.empty());
+        CHECK(!info.blurb.empty());
+        CHECK(!info.cmake_option.empty());
+    }
+    CHECK(!backend_from_id("metal").has_value());
+    CHECK(!backend_from_id("").has_value());
+}
+
+TEST(ggml_registry_names_map_onto_backends_whatever_their_case) {
+    // ggml reports "CUDA" and "Vulkan"; the ids are lower case. Getting this
+    // wrong would make every installed runtime report itself as inactive.
+    CHECK(backend_from_reg_name("CUDA").has_value());
+    CHECK_EQ(static_cast<int>(*backend_from_reg_name("CUDA")),
+             static_cast<int>(BackendKind::Cuda));
+    CHECK_EQ(static_cast<int>(*backend_from_reg_name("Vulkan")),
+             static_cast<int>(BackendKind::Vulkan));
+    CHECK_EQ(static_cast<int>(*backend_from_reg_name("CPU")),
+             static_cast<int>(BackendKind::Cpu));
+    CHECK(!backend_from_reg_name("BLAS").has_value());
+}
+
+TEST(the_cpu_backend_is_the_one_that_cannot_be_removed) {
+    // Removing it would leave an install that cannot run a model at all.
+    CHECK(!backend_info(BackendKind::Cpu).removable);
+    CHECK(backend_info(BackendKind::Cuda).removable);
+    CHECK(backend_info(BackendKind::Vulkan).removable);
+
+    std::string error;
+    CHECK(!RuntimeRegistry::remove(BackendKind::Cpu, error));
+    CHECK(!error.empty());
+}
+
+TEST(only_multi_device_backends_advertise_gpu_splitting) {
+    CHECK(!backend_info(BackendKind::Cpu).multi_device);
+    CHECK(backend_info(BackendKind::Cuda).multi_device);
+    CHECK(backend_info(BackendKind::Vulkan).multi_device);
+}
+
+TEST(the_vulkan_backend_asks_for_the_spirv_headers) {
+    // The package that was missing from the installer, and whose absence made
+    // the Vulkan build fail at configure time with an error naming a CMake
+    // package rather than anything installable.
+    const std::string apt(backend_info(BackendKind::Vulkan).apt_packages);
+    CHECK(apt.find("spirv-headers") != std::string::npos);
+    CHECK(apt.find("glslc") != std::string::npos);
+    CHECK(apt.find("libvulkan-dev") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// GPU splitting
+// ---------------------------------------------------------------------------
+
+namespace {
+
+ComputeDevice fake_gpu(int index, std::string name, std::uint64_t bytes) {
+    ComputeDevice device;
+    device.index        = index;
+    device.name         = name;
+    device.description  = std::move(name);
+    device.memory_total = bytes;
+    device.memory_free  = bytes;
+    device.is_gpu       = true;
+    return device;
+}
+
+constexpr std::uint64_t kGb = 1024ULL * 1024ULL * 1024ULL;
+
+float sum_of(const std::vector<float>& split) {
+    float total = 0.0F;
+    for (const float share : split) {
+        total += share;
+    }
+    return total;
+}
+
+}  // namespace
+
+TEST(auto_split_leaves_the_decision_to_llama_cpp) {
+    const std::vector<ComputeDevice> gpus{fake_gpu(0, "A", 8 * kGb), fake_gpu(1, "B", 8 * kGb)};
+    CHECK(compute_tensor_split(GpuSplitMode::Auto, gpus, {}, 0).empty());
+}
+
+TEST(a_single_gpu_is_never_split) {
+    const std::vector<ComputeDevice> gpus{fake_gpu(0, "A", 8 * kGb)};
+    CHECK(compute_tensor_split(GpuSplitMode::Even, gpus, {}, 0).empty());
+    CHECK(compute_tensor_split(GpuSplitMode::Priority, gpus, {}, 0).empty());
+}
+
+TEST(even_split_is_proportional_to_memory_not_to_device_count) {
+    // The whole point: a 16 GB card should take twice the work of an 8 GB one,
+    // or the small card runs out first and a model that would have fit fails.
+    const std::vector<ComputeDevice> gpus{
+        fake_gpu(0, "big", 16 * kGb),
+        fake_gpu(1, "small", 8 * kGb),
+    };
+    const std::vector<float> split = compute_tensor_split(GpuSplitMode::Even, gpus, {}, 0);
+
+    CHECK_EQ(split.size(), std::size_t{2});
+    CHECK(std::abs(sum_of(split) - 1.0F) < 0.001F);
+    CHECK(std::abs(split[0] - (2.0F / 3.0F)) < 0.001F);
+    CHECK(std::abs(split[1] - (1.0F / 3.0F)) < 0.001F);
+}
+
+TEST(even_split_falls_back_to_equal_shares_when_memory_is_unknown) {
+    std::vector<ComputeDevice> gpus{fake_gpu(0, "A", 0), fake_gpu(1, "B", 0)};
+    const std::vector<float> split = compute_tensor_split(GpuSplitMode::Even, gpus, {}, 0);
+    CHECK_EQ(split.size(), std::size_t{2});
+    CHECK(std::abs(split[0] - 0.5F) < 0.001F);
+    CHECK(std::abs(split[1] - 0.5F) < 0.001F);
+}
+
+TEST(priority_split_favours_the_order_it_is_given) {
+    const std::vector<ComputeDevice> gpus{
+        fake_gpu(0, "slow", 8 * kGb),
+        fake_gpu(1, "fast", 8 * kGb),
+    };
+    // Device 1 is named first, so it must take the larger share even though
+    // the two cards are identical and device 0 comes first by index.
+    const std::vector<float> split = compute_tensor_split(GpuSplitMode::Priority, gpus, {1, 0}, 0);
+    CHECK_EQ(split.size(), std::size_t{2});
+    CHECK(split[1] > split[0]);
+    CHECK(std::abs(sum_of(split) - 1.0F) < 0.001F);
+}
+
+TEST(priority_split_places_unranked_devices_after_ranked_ones) {
+    const std::vector<ComputeDevice> gpus{
+        fake_gpu(0, "A", 8 * kGb),
+        fake_gpu(1, "B", 8 * kGb),
+        fake_gpu(2, "C", 8 * kGb),
+    };
+    // Only device 2 is ranked. A GPU appearing later must never outrank one
+    // that was deliberately placed.
+    const std::vector<float> split = compute_tensor_split(GpuSplitMode::Priority, gpus, {2}, 0);
+    CHECK_EQ(split.size(), std::size_t{3});
+    CHECK(split[2] > split[0]);
+    CHECK(split[2] > split[1]);
+}
+
+TEST(priority_split_ignores_repeats_and_devices_that_are_not_there) {
+    const std::vector<ComputeDevice> gpus{fake_gpu(0, "A", 8 * kGb), fake_gpu(1, "B", 8 * kGb)};
+    // A device listed twice would otherwise take two shares of the split.
+    const std::vector<float> split =
+        compute_tensor_split(GpuSplitMode::Priority, gpus, {1, 1, 7}, 0);
+    CHECK_EQ(split.size(), std::size_t{2});
+    CHECK(split[1] > split[0]);
+    CHECK(std::abs(sum_of(split) - 1.0F) < 0.001F);
+}
+
+TEST(single_mode_puts_everything_on_the_main_gpu) {
+    const std::vector<ComputeDevice> gpus{
+        fake_gpu(0, "A", 8 * kGb),
+        fake_gpu(1, "B", 8 * kGb),
+    };
+    const std::vector<float> split = compute_tensor_split(GpuSplitMode::Single, gpus, {}, 1);
+    CHECK_EQ(split.size(), std::size_t{2});
+    CHECK(std::abs(split[0]) < 0.001F);
+    CHECK(std::abs(split[1] - 1.0F) < 0.001F);
+}
+
+TEST(the_split_vector_is_indexed_by_ggml_device_index_not_by_position) {
+    // A machine whose GPUs are devices 1 and 3 (device 0 being the CPU) must
+    // produce a four-long vector, or llama.cpp reads the weights off the end.
+    const std::vector<ComputeDevice> gpus{fake_gpu(1, "A", 8 * kGb), fake_gpu(3, "B", 8 * kGb)};
+    const std::vector<float> split = compute_tensor_split(GpuSplitMode::Even, gpus, {}, 1);
+    CHECK_EQ(split.size(), std::size_t{4});
+    CHECK(std::abs(split[0]) < 0.001F);
+    CHECK(std::abs(split[2]) < 0.001F);
+    CHECK(split[1] > 0.0F);
+    CHECK(split[3] > 0.0F);
+}
+
+TEST(split_modes_round_trip_through_their_ids) {
+    for (const GpuSplitMode mode : {GpuSplitMode::Auto, GpuSplitMode::Even,
+                                    GpuSplitMode::Priority, GpuSplitMode::Single}) {
+        CHECK_EQ(static_cast<int>(gpu_split_mode_from_id(gpu_split_mode_id(mode))),
+                 static_cast<int>(mode));
+    }
+    // Anything unrecognised must be the safe option, not a crash.
+    CHECK_EQ(static_cast<int>(gpu_split_mode_from_id("nonsense")),
+             static_cast<int>(GpuSplitMode::Auto));
+}
+
+TEST(the_gpu_policy_leaves_a_hand_written_split_alone_in_auto_mode) {
+    Config config;
+    config.gpu.mode = "auto";
+    config.defaults.tensor_split = {0.7F, 0.3F};
+
+    CHECK(apply_gpu_policy(config).empty());
+    CHECK_EQ(config.defaults.tensor_split.size(), std::size_t{2});
+    CHECK(std::abs(config.defaults.tensor_split[0] - 0.7F) < 0.001F);
+}
+
+// ---------------------------------------------------------------------------
+// Token accounting
+// ---------------------------------------------------------------------------
+
+TEST(token_counts_are_abbreviated_once_they_stop_being_readable) {
+    CHECK_EQ(format_tokens(0), std::string("0"));
+    CHECK_EQ(format_tokens(847), std::string("847"));
+    CHECK_EQ(format_tokens(999), std::string("999"));
+    CHECK_EQ(format_tokens(1000), std::string("1.0k"));
+    CHECK_EQ(format_tokens(1234), std::string("1.2k"));
+    CHECK_EQ(format_tokens(999999), std::string("1000.0k"));
+    CHECK_EQ(format_tokens(3400000), std::string("3.4M"));
+}
+
+TEST(usage_accumulates_across_turns) {
+    GenerationStats first;
+    first.prompt_tokens = 100;
+    first.output_tokens = 50;
+    first.output_ms     = 1000.0;
+
+    GenerationStats second;
+    second.prompt_tokens = 200;
+    second.output_tokens = 150;
+    second.output_ms     = 3000.0;
+
+    TokenUsage usage;
+    usage.add(first);
+    usage.add(second);
+
+    CHECK_EQ(usage.input_tokens, std::uint64_t{300});
+    CHECK_EQ(usage.output_tokens, std::uint64_t{200});
+    CHECK_EQ(usage.turns, std::uint64_t{2});
+    CHECK_EQ(usage.total_tokens(), std::uint64_t{500});
+    // 200 output tokens in 4 seconds.
+    CHECK(std::abs(usage.tokens_per_second() - 50.0) < 0.001);
+}
+
+TEST(a_rate_is_only_reported_once_there_is_something_to_divide) {
+    TokenUsage empty;
+    CHECK(std::abs(empty.tokens_per_second()) < 0.001);
+
+    TokenUsage no_time;
+    no_time.output_tokens = 100;
+    CHECK(std::abs(no_time.tokens_per_second()) < 0.001);
+}
+
+TEST(the_readout_prefers_the_live_rate_while_a_reply_is_arriving) {
+    TokenUsage usage;
+    usage.input_tokens  = 1200;
+    usage.output_tokens = 800;
+    usage.output_ms     = 8000.0;   // an average of 100 tok/s
+
+    const std::string average = usage_readout(usage, 0.0);
+    CHECK(average.find("1.2k") != std::string::npos);
+    CHECK(average.find("100.0 tok/s") != std::string::npos);
+    // The counts have to say what they are: two bare numbers beside an arrow
+    // tell the reader nothing.
+    CHECK(average.find("tok") != std::string::npos);
+
+    // While streaming, the number being asked about is the one happening now.
+    const std::string live = usage_readout(usage, 42.5);
+    CHECK(live.find("42.5 tok/s") != std::string::npos);
+    CHECK(live.find("100.0 tok/s") == std::string::npos);
+
+    // ui.unicode off means a terminal that cannot draw the arrows, so the
+    // readout has to say the same thing in ASCII rather than emit mojibake.
+    const std::string ascii = usage_readout(usage, 0.0, /*unicode=*/false);
+    CHECK(ascii.find("tok in 1.2k") != std::string::npos);
+    CHECK(ascii.find("out 800") != std::string::npos);
+    CHECK(ascii.find("\u2191") == std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// Session history
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Point the XDG data directory at a temporary place, so session tests write
+/// nowhere near the real history.
+class ScopedDataHome {
+public:
+    explicit ScopedDataHome(const std::filesystem::path& dir) {
+        if (const char* existing = std::getenv("XDG_DATA_HOME"); existing != nullptr) {
+            previous_ = existing;
+            had_      = true;
+        }
+        ::setenv("XDG_DATA_HOME", dir.c_str(), 1);
+    }
+    ~ScopedDataHome() {
+        if (had_) {
+            ::setenv("XDG_DATA_HOME", previous_.c_str(), 1);
+        } else {
+            ::unsetenv("XDG_DATA_HOME");
+        }
+    }
+    ScopedDataHome(const ScopedDataHome&)            = delete;
+    ScopedDataHome& operator=(const ScopedDataHome&) = delete;
+
+private:
+    std::string previous_;
+    bool        had_ = false;
+};
+
+Turn finished_turn(std::string prompt, std::string reply, int output_tokens) {
+    Turn turn;
+    turn.prompt        = std::move(prompt);
+    turn.reply         = std::move(reply);
+    turn.output_tokens = output_tokens;
+    turn.streaming     = false;
+    return turn;
+}
+
+}  // namespace
+
+TEST(a_session_round_trips_through_disk) {
+    TempDir temp;
+    const ScopedDataHome scoped(temp.path());
+
+    SessionStore store(Project::current());
+    std::vector<Turn> turns{
+        finished_turn("what is a tensor?", "A tensor is...", 42),
+        finished_turn("and a manifold?", "A manifold is...", 58),
+    };
+    turns[1].route = RouteDecision{Subject::Mathematics, 0.9F, RouteSource::Model, "picked"};
+
+    TokenUsage usage;
+    usage.input_tokens  = 30;
+    usage.output_tokens = 100;
+    usage.turns         = 2;
+
+    std::string error;
+    CHECK(store.save(turns, usage, error));
+    CHECK(error.empty());
+
+    std::vector<Turn> loaded;
+    TokenUsage loaded_usage;
+    CHECK(store.load(store.session_id(), loaded, loaded_usage, error));
+    CHECK_EQ(loaded.size(), std::size_t{2});
+    CHECK_EQ(loaded[0].prompt, std::string("what is a tensor?"));
+    CHECK_EQ(loaded[1].reply, std::string("A manifold is..."));
+    CHECK_EQ(loaded[1].output_tokens, 58);
+    CHECK(loaded[1].route.has_value());
+    CHECK_EQ(static_cast<int>(loaded[1].route->subject), static_cast<int>(Subject::Mathematics));
+    // How it was routed has to survive too: labelling a resumed turn
+    // "fallback" when the delegator chose it is an untrue claim about history.
+    CHECK_EQ(static_cast<int>(loaded[1].route->source), static_cast<int>(RouteSource::Model));
+    CHECK(std::abs(loaded[1].route->confidence - 0.9F) < 0.001F);
+    CHECK_EQ(loaded_usage.output_tokens, std::uint64_t{100});
+}
+
+TEST(every_route_source_survives_a_round_trip_through_its_name) {
+    for (const RouteSource source : {RouteSource::Model, RouteSource::Keyword,
+                                     RouteSource::Forced, RouteSource::Fallback}) {
+        CHECK_EQ(static_cast<int>(route_source_from_name(route_source_name(source))),
+                 static_cast<int>(source));
+    }
+    CHECK_EQ(static_cast<int>(route_source_from_name("something else")),
+             static_cast<int>(RouteSource::Fallback));
+}
+
+TEST(a_reply_still_streaming_is_not_written) {
+    TempDir temp;
+    const ScopedDataHome scoped(temp.path());
+
+    SessionStore store(Project::current());
+    std::vector<Turn> turns{finished_turn("done", "an answer", 10)};
+    Turn in_flight;
+    in_flight.prompt    = "still going";
+    in_flight.reply     = "half an ans";
+    in_flight.streaming = true;
+    turns.push_back(in_flight);
+
+    std::string error;
+    CHECK(store.save(turns, TokenUsage{}, error));
+
+    std::vector<Turn> loaded;
+    TokenUsage usage;
+    CHECK(store.load(store.session_id(), loaded, usage, error));
+    // A half-finished reply is not something to resume into.
+    CHECK_EQ(loaded.size(), std::size_t{1});
+    CHECK_EQ(loaded[0].prompt, std::string("done"));
+}
+
+TEST(sessions_are_listed_newest_first_with_the_first_prompt_as_the_title) {
+    TempDir temp;
+    const ScopedDataHome scoped(temp.path());
+
+    SessionStore store(Project::current());
+    std::string error;
+
+    store.adopt("20260101-120000");
+    CHECK(store.save({finished_turn("the older question", "...", 5)}, TokenUsage{}, error));
+
+    store.adopt("20260830-090000");
+    CHECK(store.save({finished_turn("the newer question", "...", 5)}, TokenUsage{}, error));
+
+    const std::vector<SessionSummary> listed = store.list();
+    CHECK_EQ(listed.size(), std::size_t{2});
+    CHECK_EQ(listed[0].id, std::string("20260830-090000"));
+    CHECK_EQ(listed[0].title, std::string("the newer question"));
+    CHECK_EQ(listed[1].title, std::string("the older question"));
+    CHECK_EQ(listed[0].turns, 1);
+}
+
+TEST(a_multi_line_prompt_still_makes_a_one_line_title) {
+    TempDir temp;
+    const ScopedDataHome scoped(temp.path());
+
+    SessionStore store(Project::current());
+    std::string error;
+    CHECK(store.save({finished_turn("first line\nsecond line", "...", 1)}, TokenUsage{}, error));
+
+    const std::vector<SessionSummary> listed = store.list();
+    CHECK_EQ(listed.size(), std::size_t{1});
+    // A newline in the title would break the picker's row layout.
+    CHECK(listed[0].title.find('\n') == std::string::npos);
+    CHECK(listed[0].title.find("second line") != std::string::npos);
+}
+
+TEST(the_project_total_counts_each_token_once_however_often_a_session_is_saved) {
+    TempDir temp;
+    const ScopedDataHome scoped(temp.path());
+
+    SessionStore store(Project::current());
+    std::string error;
+
+    TokenUsage usage;
+    usage.input_tokens  = 100;
+    usage.output_tokens = 200;
+    usage.turns         = 1;
+
+    std::vector<Turn> turns{finished_turn("q", "a", 200)};
+    CHECK(store.save(turns, usage, error));
+    CHECK_EQ(store.project_usage().output_tokens, std::uint64_t{200});
+
+    // Saving the same session again after another turn must add the delta,
+    // not the whole total a second time.
+    turns.push_back(finished_turn("q2", "a2", 100));
+    usage.input_tokens  = 150;
+    usage.output_tokens = 300;
+    usage.turns         = 2;
+    CHECK(store.save(turns, usage, error));
+
+    CHECK_EQ(store.project_usage().output_tokens, std::uint64_t{300});
+    CHECK_EQ(store.project_usage().input_tokens, std::uint64_t{150});
+    CHECK_EQ(store.project_usage().turns, std::uint64_t{2});
+}
+
+TEST(resuming_a_session_does_not_double_count_what_it_already_spent) {
+    TempDir temp;
+    const ScopedDataHome scoped(temp.path());
+
+    std::string error;
+    TokenUsage usage;
+    usage.input_tokens  = 100;
+    usage.output_tokens = 200;
+    usage.turns         = 1;
+
+    std::string id;
+    {
+        SessionStore store(Project::current());
+        CHECK(store.save({finished_turn("q", "a", 200)}, usage, error));
+        id = store.session_id();
+        CHECK_EQ(store.project_usage().output_tokens, std::uint64_t{200});
+    }
+
+    // A second run of BatBot resumes it. Its tokens are already in the total.
+    SessionStore resumed(Project::current());
+    resumed.adopt(id);
+    CHECK(resumed.save({finished_turn("q", "a", 200)}, usage, error));
+    CHECK_EQ(resumed.project_usage().output_tokens, std::uint64_t{200});
+}
+
+TEST(a_session_can_be_deleted) {
+    TempDir temp;
+    const ScopedDataHome scoped(temp.path());
+
+    SessionStore store(Project::current());
+    std::string error;
+    CHECK(store.save({finished_turn("q", "a", 1)}, TokenUsage{}, error));
+    CHECK_EQ(store.list().size(), std::size_t{1});
+
+    CHECK(store.remove(store.session_id(), error));
+    CHECK_EQ(store.list().size(), std::size_t{0});
+    CHECK(!store.remove("20200101-000000", error));
+}
+
+TEST(projects_in_different_directories_do_not_share_history) {
+    TempDir temp;
+    const ScopedDataHome scoped(temp.path());
+
+    // Two directories whose last component is the same -- the case a slug
+    // alone would collide on, which is why the key carries a hash.
+    TempDir a;
+    TempDir b;
+    std::filesystem::create_directories(a.path() / "src");
+    std::filesystem::create_directories(b.path() / "src");
+
+    const std::filesystem::path original = std::filesystem::current_path();
+    std::filesystem::current_path(a.path() / "src");
+    const Project first = Project::current();
+    std::filesystem::current_path(b.path() / "src");
+    const Project second = Project::current();
+    std::filesystem::current_path(original);
+
+    CHECK_EQ(first.name, std::string("src"));
+    CHECK_EQ(second.name, std::string("src"));
+    CHECK(first.dir != second.dir);
+}
+
+// ---------------------------------------------------------------------------
+// Subprocess
+// ---------------------------------------------------------------------------
+
+TEST(a_child_process_reports_its_output_and_status) {
+    util::Subprocess child;
+    std::string error;
+    CHECK(child.start({"sh", "-c", "echo one; echo two >&2; exit 3"}, {}, {}, error));
+    CHECK(error.empty());
+
+    std::vector<std::string> lines;
+    std::string line;
+    while (child.read_line(line)) {
+        lines.push_back(line);
+    }
+    // stdout and stderr are merged, so both appear.
+    CHECK_EQ(lines.size(), std::size_t{2});
+    CHECK_EQ(child.wait(), 3);
+    // wait() is idempotent: the builder calls it from more than one place.
+    CHECK_EQ(child.wait(), 3);
+}
+
+TEST(a_command_that_does_not_exist_fails_rather_than_hanging) {
+    util::Subprocess child;
+    std::string error;
+    CHECK(child.start({"batbot-no-such-program"}, {}, {}, error));
+
+    std::string line;
+    while (child.read_line(line)) {
+        // drain
+    }
+    // execvp failed in the child, which exits 127 the way a shell would.
+    CHECK_EQ(child.wait(), 127);
+}
+
+TEST(on_path_finds_real_programs_and_not_invented_ones) {
+    CHECK(util::on_path("sh"));
+    CHECK(!util::on_path("batbot-definitely-not-a-program"));
+    // An empty requirement means "nothing needed", which is how a backend with
+    // no SDK says so.
+    CHECK(util::on_path(""));
 }
 
 int main() {

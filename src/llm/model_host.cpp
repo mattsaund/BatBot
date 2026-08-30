@@ -26,6 +26,7 @@
 #include <llama.h>
 
 #include "batbot/llm/sampling.hpp"
+#include "batbot/runtime/registry.hpp"
 
 namespace batbot {
 namespace {
@@ -115,6 +116,18 @@ ModelHost::ModelHost(std::filesystem::path log_path) {
     // Install the diversion before backend init so even startup chatter about
     // devices and backends goes to the file rather than over the TUI.
     llama_log_set(log_to_file, nullptr);
+
+    // Bring the loadable runtimes in before llama.cpp initialises, so the
+    // devices they provide are there from the first model load. A fresh
+    // install has none of its own yet, so the CPU runtime that shipped with
+    // the binary is copied across first; after that this is a no-op.
+    std::string seed_error;
+    RuntimeRegistry::seed_from_bundle(seed_error);
+    if (!seed_error.empty()) {
+        log_to_file(GGML_LOG_LEVEL_WARN, ("runtime seed: " + seed_error + "\n").c_str(), nullptr);
+    }
+    RuntimeRegistry::load_all();
+
     llama_backend_init();
 }
 

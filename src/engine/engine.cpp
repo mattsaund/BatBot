@@ -15,6 +15,7 @@
 #include <chrono>
 #include <exception>
 
+#include "batbot/config/gpu_policy.hpp"
 #include "batbot/config/paths.hpp"
 #include "batbot/engine/route_policy.hpp"
 
@@ -101,11 +102,26 @@ void Engine::reset_history() {
     history_.clear();
 }
 
+void Engine::restore_history(std::vector<ChatMessage> history) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    history_ = std::move(history);
+}
+
 void Engine::run() {
+    // Constructing the host loads the runtimes, so nothing before this point
+    // knows what hardware exists -- which is why the GPU policy is applied
+    // here rather than when the config was parsed.
     host_ = std::make_unique<ModelHost>(paths::log_file());
 
     for (const std::string& device : ModelHost::devices()) {
         state_.add_notice("device: " + device);
+    }
+
+    {
+        const std::lock_guard<std::mutex> lock(config_mutex_);
+        if (const std::string split = apply_gpu_policy(config_); !split.empty()) {
+            state_.add_notice("GPU split (" + config_.gpu.mode + "): " + split);
+        }
     }
 
     load_router();
@@ -219,6 +235,7 @@ void Engine::load_router() {
 
 void Engine::do_apply_config(Config config) {
     config.resolve_models();
+    apply_gpu_policy(config);
 
     std::string previous_router;
     std::string previous_expert;
@@ -363,16 +380,36 @@ void Engine::handle(const Request& request) {
     }
     messages.push_back({"user", request.prompt});
 
+    // The live tok/s readout is measured from the first token rather than from
+    // the start of the call: everything before that is prompt ingestion, and
+    // folding it in would make a long prompt look like a slow expert.
     bool first_token = true;
+    std::chrono::steady_clock::time_point first_token_at;
+    int streamed_chunks = 0;
+
     const GenerationStats stats = expert->generate(
         expert->format_chat(messages, true), params,
         [&](std::string_view chunk) {
             if (first_token) {
-                first_token = false;
+                first_token    = false;
+                first_token_at = std::chrono::steady_clock::now();
                 state_.set_mood(Mood::Talking,
                                 std::string(subject_name(decision.subject)) + " is answering");
             }
             state_.append_reply(turn, chunk);
+
+            // Recomputing the rate on every token would be noise on screen and
+            // work in the hot path; a few times a second is what a person can
+            // actually read.
+            if (++streamed_chunks % 8 == 0) {
+                const double elapsed_s =
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                                  first_token_at).count();
+                if (elapsed_s > 0.05) {
+                    state_.set_live_rate(static_cast<double>(streamed_chunks) / elapsed_s);
+                }
+            }
+
             if (wake_) {
                 wake_();
             }
