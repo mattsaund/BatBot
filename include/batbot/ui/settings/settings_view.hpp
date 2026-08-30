@@ -33,6 +33,7 @@ enum class SettingsAction {
     Apply,          ///< configuration changed: save it and hand it to the engine
     OpenRuntimes,   ///< hand over to the runtimes panel
     OpenGpuOrder,   ///< hand over to the GPU priority panel
+    OpenModels,     ///< hand over to the model manager panel
 };
 
 class SettingsView {
@@ -62,6 +63,16 @@ public:
     /// is open and hands back the finished order.
     void set_gpu_priority(std::vector<int> order);
 
+    /// Every model file the config currently points at, for the model manager
+    /// panel -- which marks those rows and warns before deleting one.
+    std::vector<std::string> models_in_use() const;
+
+    /// Empty every seat that named one of `names`, after the files behind them
+    /// were deleted. A seat left pointing at a file that is gone would show as
+    /// "(missing)" and fail at load time; clearing it says the same thing at
+    /// the moment it becomes true.
+    void forget_models(const std::vector<std::string>& names);
+
 private:
     /// What a row edits, which decides what Enter does to it.
     enum class Kind {
@@ -89,6 +100,7 @@ private:
         None,
         Runtimes,
         GpuOrder,
+        Models,
     };
 
     /// One line of the screen.

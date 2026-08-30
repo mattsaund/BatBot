@@ -82,4 +82,17 @@ std::optional<BackendKind> backend_from_id(std::string_view id);
 /// error -- it just means the device came from somewhere else.
 std::optional<BackendKind> backend_from_reg_name(std::string_view reg_name);
 
+/// What a loadable backend module is called on this platform.
+///
+/// ggml opens its modules by an exact file name, so these have to agree with
+/// ggml_backend_load_all_from_path down to the character: "libggml-cuda.so"
+/// everywhere except Windows, where there is no `lib` and the extension is
+/// ".dll". macOS is not the odd one out here -- CMake gives a MODULE library
+/// the ".so" suffix there too, which is why ggml only special-cases Windows.
+///
+/// Everything that scans, installs or names a module goes through these rather
+/// than writing ".so" inline, so porting is one edit rather than a search.
+std::string_view module_prefix();
+std::string_view module_suffix();
+
 }  // namespace batbot

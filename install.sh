@@ -64,19 +64,24 @@ BAR_WIDTH=26
 # --------------------------------------------------------------------------
 # Progress
 #
-# Two bars, drawn one above the other and updated together:
+# One bar, for the whole install:
 #
-#     install  ██████████░░░░░░░░░░░░░░░░  38%
-#     [4/5]    ████████████████░░░░░░░░░░  62%  / cloning source (14s)
+#     install  ██████████░░░░░░░░░░░░░░░░  38%  / cloning source (14s)
 #
-# The top one is the whole install; the bottom one is the part running now.
-# Neither is derived from a guess about elapsed time -- the top is a weighted
-# sum over the five parts (see STEP_WEIGHTS) and the bottom is a weighted sum
-# over the phases of the current part, with the measurable phases (a download,
-# a compile) reporting real percentages from the tool doing the work.
+# It appears before the first part begins and only ever moves forward, to 100%.
+# There used to be a second bar underneath for the part running now, which
+# meant two numbers to read and two of them disagreeing about how far along
+# things were. The part being worked on is already named in the `==> [3/5]`
+# heading above and in the label beside the bar, so the second bar was saying
+# nothing the screen did not already say.
 #
-# The pair lives at the bottom of the screen and every message is printed above
-# it, which is why ok/info/warn all go through note().
+# The figure is not a guess about elapsed time. Each of the five parts carries
+# a weight (STEP_WEIGHTS) and each phase within a part owns a slice of it, with
+# the measurable phases -- a download, a compile -- reporting real percentages
+# from the tool doing the work.
+#
+# The bar lives on the bottom row and every message is printed above it, which
+# is why ok/info/warn all go through note().
 # --------------------------------------------------------------------------
 
 # Where the current part has got to, 0-100.
@@ -92,10 +97,16 @@ PHASE_LABEL=""
 # elapsed clock.
 PHASE_START=-1
 
-# Whether the two-line block is currently on screen. Every write to the
-# terminal has to know, because the block is erased and redrawn rather than
-# scrolled past.
+# Whether the bar is currently on screen. Every write to the terminal has to
+# know, because the bar is erased and redrawn rather than scrolled past.
 BLOCK_SHOWN=0
+
+# Whether there is an install to report on at all. The bar is put up before the
+# first part starts -- so it is on screen from the beginning rather than
+# appearing a few seconds in -- but it must stay out of the dry run, the
+# banner and the uninstaller, all of which print through note() and none of
+# which are an install.
+PROGRESS_ON=0
 SPINNER_PID=""
 
 # Last percentage pair reported without a terminal, so a log gets one line per
@@ -184,35 +195,54 @@ overall_percent() {
     printf '%s' "$done"
 }
 
-# The escape sequence that erases the block and leaves the cursor where its
-# first row was. Returned rather than printed, so a redraw can go out as one
-# write -- see block_draw.
+# The escape sequence that erases the bar and leaves the cursor where its row
+# began. Returned rather than printed, so a redraw can go out as one write --
+# see block_draw.
 block_erase_seq() {
     [ "$IS_TTY" = 1 ] || return 0
     [ "$BLOCK_SHOWN" = 1 ] || return 0
-    printf '\033[2A\r\033[J'
+    printf '\033[1A\r\033[J'
 }
 
-# Erase the block for something else to print in its place.
+# Erase the bar for something else to print in its place.
 block_clear() {
     block_erase_seq
     BLOCK_SHOWN=0
     return 0
 }
 
-# Draw both bars. `glyph` is the spinner frame for a phase with no percentage
-# of its own; blank for one that has.
+# Put the bar up at 0%, before any part has started.
+progress_begin() {
+    PROGRESS_ON=1
+    PHASE_LABEL="starting"
+    hide_cursor
+    block_draw
+}
+
+# Take the bar down for good, leaving one finished bar in the scrollback.
+# Everything printed after this is a plain printf that knows nothing about the
+# cursor arithmetic, so the bar has to stop redrawing itself first.
+progress_end() {
+    STEP_PCT=100
+    STEP_NUM="$STEP_TOTAL"
+    block_draw
+    block_clear
+    PROGRESS_ON=0
+    show_cursor
+    [ "$IS_TTY" = 1 ] || return 0
+    printf '\n    %sinstall%s  %s\n' "$C_DIM" "$C_RESET" "$(draw_bar 100 "$C_GRN")"
+}
+
+# Draw the bar. `glyph` is the spinner frame for a phase with no percentage of
+# its own; blank for one that has.
 block_draw() {
     local glyph="${1:- }" label elapsed=""
 
-    # Nothing to draw before the first part begins, which is what keeps the
-    # bars out of the dry run, the banner and the uninstaller -- all of which
-    # print through note() and none of which are an install.
-    [ "$STEP_NUM" -ge 1 ] || return 0
+    [ "$PROGRESS_ON" = 1 ] || return 0
 
     if [ "$IS_TTY" != 1 ]; then
         # No terminal (CI, or output redirected): a bar is meaningless, so
-        # report the overall figure at every fifth of the way instead.
+        # report the figure at every fifth of the way instead.
         local overall
         overall="$(overall_percent)"
         if [ "$((overall / 5))" -ne "$((LOG_LAST / 5))" ]; then
@@ -223,16 +253,14 @@ block_draw() {
     fi
 
     [ "$PHASE_START" -ge 0 ] && elapsed=" $C_DIM($((SECONDS - PHASE_START))s)$C_RESET"
-    label="$(fit_label "$PHASE_LABEL" $(( $(bar_width) + 26 )))"
+    label="$(fit_label "$PHASE_LABEL" $(( $(bar_width) + 22 )))"
 
-    # Erase and redraw in a single write. Three separate printfs would leave
-    # the terminal briefly showing an erased or half-drawn block, which reads
-    # as a flicker on every frame the spinner draws.
-    printf '%s    %sinstall%s  %s\n    %s[%d/%d]%s    %s  %s%s%s%s\n' \
+    # Erase and redraw in a single write. Two separate printfs would leave the
+    # terminal briefly showing an erased bar, which reads as a flicker on every
+    # frame the spinner draws.
+    printf '%s    %sinstall%s  %s  %s%s%s%s\n' \
         "$(block_erase_seq)" \
         "$C_DIM" "$C_RESET" "$(draw_bar "$(overall_percent)" "$C_GRN")" \
-        "$C_DIM" "$STEP_NUM" "$STEP_TOTAL" "$C_RESET" \
-        "$(draw_bar "$STEP_PCT" "$C_CYN")" \
         "$C_CYN" "$glyph" "$C_RESET" " $label$elapsed"
     BLOCK_SHOWN=1
     return 0
@@ -272,7 +300,6 @@ step() {
     printf '\n%s==>%s %s[%d/%d]%s %s%s%s\n' \
         "$C_CYN" "$C_RESET" "$C_DIM" "$STEP_NUM" "$STEP_TOTAL" "$C_RESET" \
         "$C_BOLD" "$*" "$C_RESET"
-    hide_cursor
     block_draw
 }
 
@@ -976,30 +1003,29 @@ show_log_tail() {
     printf '%s--- end ---%s\n\n' "$C_DIM" "$C_RESET" >&2
 }
 
-# Where to build.
+# Where to build: beside the source, always.
 #
-# Loadable runtimes are shared libraries, and shared libraries need symlinks to
-# carry their version suffix. A checkout on exFAT or NTFS -- an external drive
-# shared with Windows, say -- cannot make one, and the link step fails with
-# "Operation not permitted" a long way into the build. So the build tree is
-# only kept beside the source when the filesystem can support it, and moved to
-# the cache directory when it cannot.
+# This used to probe the filesystem for symlink support and move the build tree
+# into the cache directory when there was none, because llama.cpp's shared
+# libraries were written under a versioned name with an unversioned symlink
+# beside them -- and exFAT and NTFS cannot hold a symlink, so the link step
+# failed a long way into the build. BatBot now builds those libraries without
+# the version suffix (see cmake/BatBotUnversion.cmake), so there is nothing
+# left to detect and the build tree can stay where the user put the checkout.
 choose_build_dir() {
-    local candidate="$SRC_DIR/build"
-    mkdir -p "$candidate" 2>/dev/null || true
-
-    if ln -sfn "$candidate" "$candidate/.symlink-probe" 2>/dev/null; then
-        rm -f "$candidate/.symlink-probe"
-        BUILD_DIR="$candidate"
-        return 0
-    fi
-
-    # Do not leave the empty probe directory behind in the checkout.
-    rmdir "$candidate" 2>/dev/null || true
-
-    BUILD_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/batbot/build"
+    BUILD_DIR="$SRC_DIR/build"
     mkdir -p "$BUILD_DIR"
-    info "this filesystem has no symlinks; building in $BUILD_DIR instead"
+    return 0
+}
+
+# The configure invocation, in one place so the retry below cannot drift from
+# the first attempt.
+run_configure() {
+    "$CMAKE" -S "$SRC_DIR" -B "$BUILD_DIR" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+        -DBATBOT_BACKEND_DL=ON \
+        > "$BUILD_LOG" 2>&1 || status=$?
     return 0
 }
 
@@ -1022,12 +1048,30 @@ build_and_install() {
     # producing something you can change your mind about later.
     phase 12 "configuring (loadable runtimes)"
     spinner_start
-    "$CMAKE" -S "$SRC_DIR" -B "$build_dir" \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-        -DBATBOT_BACKEND_DL=ON \
-        > "$BUILD_LOG" 2>&1 || status=$?
+    run_configure
     spinner_stop
+
+    # Configure failed with a build directory already there. By far the most
+    # likely reason is a CMakeCache.txt remembering paths this tree no longer
+    # has -- a moved home directory, a restored backup, a source directory that
+    # was pointed somewhere else once -- and cmake refuses to reuse it. Since
+    # the build tree now stays in the checkout rather than being relocated to a
+    # fresh cache directory, re-running the installer over an old one is the
+    # ordinary case rather than a rare one.
+    #
+    # The cache is pure derived data, so throwing it away and trying once more
+    # is both safe and the fix the user would otherwise have to find out about
+    # from a log. The runtime builder does the same thing for the same reason.
+    if [ "$status" -ne 0 ] && [ -f "$build_dir/CMakeCache.txt" ]; then
+        warn "the existing build directory is stale; clearing it and trying again"
+        rm -rf "$build_dir"
+        mkdir -p "$build_dir"
+        status=0
+        spinner_start
+        run_configure
+        spinner_stop
+    fi
+
     if [ "$status" -ne 0 ]; then
         show_log_tail "$BUILD_LOG"
         die "cmake configure failed. The full log is at $BUILD_LOG"
@@ -1266,6 +1310,8 @@ main() {
     banner
     [ "$DO_UNINSTALL" = 1 ] && uninstall
 
+    progress_begin
+
     step "Checking your system"
     phase 50 "detecting the platform"
     detect_platform
@@ -1300,18 +1346,9 @@ main() {
     local models_dir="${XDG_DATA_HOME:-$HOME/.local/share}/batbot/models"
     mkdir -p "$models_dir" 2>/dev/null || true
 
-    # Retire the live block, and leave one last full bar behind in the
-    # scrollback. Everything printed from here on is a plain printf, so the
-    # block has to stop redrawing itself or it would land in the middle of it.
-    STEP_PCT=100
-    block_draw
-    block_clear
-    STEP_NUM=0
-    show_cursor
-    printf '\n    %sinstall%s  %s\n\n' \
-        "$C_DIM" "$C_RESET" "$(draw_bar 100 "$C_GRN")"
+    progress_end
 
-    printf '%s%s  BatBot is installed.%s\n\n' "$C_GRN" "$C_BOLD" "$C_RESET"
+    printf '\n%s%s  BatBot is installed.%s\n\n' "$C_GRN" "$C_BOLD" "$C_RESET"
     printf '    binary   : %s\n' "$PREFIX/bin/batbot"
     printf '    models   : %s\n' "$models_dir"
     printf '    config   : %s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/batbot/config.json"

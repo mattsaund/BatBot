@@ -63,6 +63,9 @@ App::App(Config config, const std::vector<std::string>& warnings)
     InputOption option;
     option.multiline = false;  // FTXUI 7 defaults this on; we want Enter to send
     option.on_enter  = [this] { on_submit(); };
+    // Bound so the completion can see the caret and move it after a Tab.
+    option.cursor_position = &caret_;
+    option.on_change = [this] { update_completion(); };
     input_ = Input(&input_text_, "ask BatBot anything, or /help", option);
 }
 
@@ -175,6 +178,9 @@ Element App::render() {
     if (gpu_order_.active()) {
         return dbox({settings_.render(), gpu_order_.render() | center});
     }
+    if (models_.active()) {
+        return dbox({settings_.render(), models_.render() | center});
+    }
     if (in_settings_) {
         return settings_.render();
     }
@@ -204,10 +210,12 @@ Element App::render() {
     rows.push_back(render_transcript(snapshot) | flex);
     rows.push_back(separator());
     rows.push_back(render_status(snapshot));
-    rows.push_back(hbox({
-        text(" › ") | color(theme::kAccent) | bold,
-        input_->Render() | flex,
-    }));
+    // The command menu folds up out of the prompt, so it goes directly above
+    // it and below everything else.
+    if (Element menu = render_completion(); menu != nullptr) {
+        rows.push_back(std::move(menu));
+    }
+    rows.push_back(render_prompt());
 
     Element screen = window(text(" BatBot " BATBOT_VERSION " ") | bold | color(theme::kBat),
                             vbox(std::move(rows)));
@@ -216,6 +224,133 @@ Element App::render() {
         screen = dbox({std::move(screen), sessions_.render() | center});
     }
     return screen;
+}
+
+// ---------------------------------------------------------------------------
+// Slash-command completion
+//
+// The matching itself is in completion.cpp, which knows nothing about
+// terminals. What is here is the part that has to: where the menu is drawn,
+// where the grey suffix lands relative to the cursor, and which keys mean
+// "take it".
+// ---------------------------------------------------------------------------
+
+void App::update_completion() {
+    completions_      = command_matches(input_text_);
+    completion_index_ = 0;
+    // Dismissal lasts until the line changes, so escape closes the menu for
+    // the command being typed rather than for the rest of the session.
+    completion_dismissed_ = false;
+}
+
+std::string App::completion_suffix() const {
+    if (completions_.empty() || completion_dismissed_) {
+        return {};
+    }
+    // Only with the caret at the end. Anywhere else the suggestion would be
+    // drawn after text the user is no longer adding to, which would read as
+    // characters that are already there.
+    if (caret_ != static_cast<int>(input_text_.size())) {
+        return {};
+    }
+    return command_completion(input_text_, completions_[completion_index_]);
+}
+
+void App::accept_completion() {
+    const std::string suffix = completion_suffix();
+    if (suffix.empty()) {
+        return;
+    }
+    input_text_ += suffix;
+    caret_ = static_cast<int>(input_text_.size());
+    update_completion();
+}
+
+Element App::render_completion() const {
+    if (completions_.empty() || completion_dismissed_) {
+        return nullptr;
+    }
+
+    // Enough to choose from without burying the conversation. A "/" on its own
+    // matches every command there is, and a menu twenty rows tall would push
+    // the transcript off the screen every time the key was pressed.
+    constexpr std::size_t kMaxRows = 8;
+    const std::size_t shown = std::min(completions_.size(), kMaxRows);
+
+    // Keep the highlighted row visible when the cursor has walked past the
+    // window: scroll the list rather than the selection.
+    std::size_t first = 0;
+    if (completion_index_ >= shown) {
+        first = completion_index_ - shown + 1;
+    }
+
+    std::size_t width = 0;
+    for (const CommandInfo& command : completions_) {
+        width = std::max(width, command.name.size());
+    }
+
+    Elements rows;
+    for (std::size_t i = first; i < first + shown; ++i) {
+        const CommandInfo& command = completions_[i];
+        const bool selected = i == completion_index_;
+
+        std::string name = "/" + command.name;
+        name.resize(width + 2, ' ');
+
+        Element row = hbox({
+            text(selected ? " › " : "   ") | color(theme::kAccent),
+            text(name) | (selected ? bold : nothing),
+            text(command.summary) | color(meta_color(selected)),
+        });
+        rows.push_back(selected ? row | bgcolor(theme::kHighlight) : row);
+    }
+
+    if (completions_.size() > shown) {
+        rows.push_back(text("   " + std::to_string(completions_.size() - shown) +
+                            " more -- keep typing to narrow") |
+                       color(theme::kMeta) | dim);
+    }
+    rows.push_back(text("   tab completes   ↑↓ choose   esc dismiss") |
+                   color(theme::kMeta) | dim);
+
+    return vbox(std::move(rows));
+}
+
+Element App::render_prompt() const {
+    Element arrow = text(" › ") | color(theme::kAccent) | bold;
+
+    const std::string suffix = completion_suffix();
+    if (suffix.empty()) {
+        return hbox({std::move(arrow), input_->Render() | flex});
+    }
+
+    // The suggestion is drawn as a second layer rather than as the next thing
+    // in the row, and this is the reason: FTXUI's input ends with a blank cell
+    // for the cursor to sit on, so anything placed after it starts one column
+    // too far right and the line reads as two words with a space between them.
+    // Clipping that cell off is no good either -- the input scrolls its
+    // content to keep the cursor in view, so a narrower box eats the leading
+    // "/" instead.
+    //
+    // Layering puts the first grey character *on* the cursor cell, which is
+    // where it belongs: the cursor marks where typing would continue, and
+    // where typing would continue is exactly the first suggested character.
+    // The padding is emptyElement rather than spaces because dbox composites
+    // by painting, and a space would paint over what is underneath it.
+    constexpr int kArrowWidth = 3;  // " › "
+    const int typed = static_cast<int>(string_width(input_text_));
+
+    Element typed_row = hbox({
+        std::move(arrow),
+        input_->Render() | size(WIDTH, EQUAL, typed + 1),
+        filler(),
+    });
+    Element suggestion = hbox({
+        emptyElement() | size(WIDTH, EQUAL, kArrowWidth + typed),
+        text(suffix) | color(theme::kMeta) | dim,
+        filler(),
+    });
+    return dbox({std::move(typed_row), std::move(suggestion)});
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +451,9 @@ void App::resume_session(const std::string& id) {
 void App::on_submit() {
     const std::string text = format::trim(input_text_);
     input_text_.clear();
+    caret_ = 0;
+    completions_.clear();
+    completion_dismissed_ = false;
     if (text.empty()) {
         return;
     }
@@ -401,6 +539,34 @@ int App::run() {
             return true;
         }
 
+        // And the model manager.
+        if (models_.active()) {
+            if (event == Event::CtrlC) {
+                models_.close();
+                return true;
+            }
+            switch (models_.handle(event)) {
+                case ModelManagerAction::Deleted:
+                    // A deleted file empties whatever seat named it. Saved
+                    // straight away rather than left dirty: the file is
+                    // already gone, so a config still pointing at it is wrong
+                    // on disk from this moment whatever the user does next.
+                    settings_.forget_models(models_.take_removed());
+                    save_settings();
+                    settings_.set_status(models_.status());
+                    break;
+                case ModelManagerAction::Close:
+                    models_.close();
+                    if (!models_.status().empty()) {
+                        settings_.set_status(models_.status());
+                    }
+                    break;
+                case ModelManagerAction::None:
+                    break;
+            }
+            return true;
+        }
+
         if (sessions_.active()) {
             switch (sessions_.handle(event)) {
                 case SessionPickerAction::Resume: {
@@ -445,6 +611,10 @@ int App::run() {
                 case SettingsAction::OpenGpuOrder:
                     gpu_order_.open(settings_.config().gpu.priority);
                     return true;
+                case SettingsAction::OpenModels:
+                    models_.open(settings_.config().resolved_models_dir(),
+                                 settings_.models_in_use());
+                    return true;
                 case SettingsAction::None:
                     break;
             }
@@ -454,6 +624,28 @@ int App::run() {
         if (event == Event::CtrlE) {
             open_settings();
             return true;
+        }
+
+        // The slash-command menu. Checked before the input component sees the
+        // key, because Tab and the arrows would otherwise be swallowed by it.
+        if (!completions_.empty() && !completion_dismissed_) {
+            if (event == Event::Tab) {
+                accept_completion();
+                return true;
+            }
+            if (event == Event::ArrowDown) {
+                completion_index_ = (completion_index_ + 1) % completions_.size();
+                return true;
+            }
+            if (event == Event::ArrowUp) {
+                completion_index_ =
+                    (completion_index_ + completions_.size() - 1) % completions_.size();
+                return true;
+            }
+            if (event == Event::Escape) {
+                completion_dismissed_ = true;
+                return true;
+            }
         }
 
         if (event == Event::CtrlC) {

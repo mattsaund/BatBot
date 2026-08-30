@@ -71,9 +71,11 @@ Element App::render_turn(const Turn& turn) const {
 Element App::render_welcome() const {
     const std::vector<Subject> configured = config_.configured_experts();
     if (!configured.empty()) {
+        // Just "ready". The seat count that used to be here read "10 of 9
+        // expert seats are filled" once a custom subject was added, which is
+        // both wrong and a number nobody was waiting for.
         return vbox({
-            text("BatBot is ready. " + std::to_string(configured.size())
-                 + " of 9 expert seats are filled.") | color(theme::kMeta),
+            text("BatBot is ready.") | color(theme::kMeta),
             text("Ask anything; BatBot picks the expert. /help lists the commands.")
                 | color(theme::kMeta) | dim,
             text(" "),

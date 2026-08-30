@@ -28,22 +28,27 @@ using json = nlohmann::json;
 /// ships as a dozen variants (haswell, icelake, ...) that all belong to the
 /// same runtime, which is why this maps a file to a *backend* rather than
 /// expecting one file per backend.
+///
+/// The prefix and extension are ggml's, not ours -- see module_prefix().
 std::optional<BackendKind> kind_of_module(const std::filesystem::path& file) {
     const std::string name = file.filename().string();
 
-    constexpr std::string_view kPrefix = "libggml-";
-    if (name.rfind(kPrefix, 0) != 0) {
+    const std::string_view prefix = module_prefix();
+    const std::string_view suffix = module_suffix();
+    if (name.rfind(prefix, 0) != 0) {
         return std::nullopt;
     }
-    // Only the bare .so is a module worth counting. The versioned aliases
-    // (libggml-cpu-haswell.so.0) are the same file under another name, and
-    // counting them would double every size shown in settings.
-    if (!file.has_extension() || file.extension() != ".so") {
+    // Only a file ending in exactly the module extension counts. Anything
+    // else in the directory -- a half-copied ".new", a leftover versioned
+    // alias from an older BatBot -- is the same module under another name,
+    // and counting it would double every size shown in settings.
+    if (name.size() <= prefix.size() + suffix.size() ||
+        name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) {
         return std::nullopt;
     }
 
-    std::string rest = name.substr(kPrefix.size());
-    rest.erase(rest.size() - 3);  // drop ".so"
+    std::string rest = name.substr(prefix.size());
+    rest.erase(rest.size() - suffix.size());
 
     const std::size_t dash = rest.find('-');
     if (dash != std::string::npos) {
@@ -274,9 +279,11 @@ bool RuntimeRegistry::remove(BackendKind kind, std::string& error) {
 
     std::error_code ec;
     for (const std::filesystem::path& file : found->second) {
-        // Take the versioned aliases with it: libggml-cuda.so.0 and
-        // libggml-cuda.so.0.9.4 sit beside the module and would otherwise be
-        // left behind as several hundred megabytes of orphan.
+        // Take any versioned aliases with it. BatBot no longer produces them
+        // (see cmake/BatBotUnversion.cmake), but a runtime built by an older
+        // one has libggml-cuda.so.0 and libggml-cuda.so.0.9.4 sitting beside
+        // the module, and those would be left behind as several hundred
+        // megabytes of orphan.
         for (const std::filesystem::directory_entry& entry :
              std::filesystem::directory_iterator(file.parent_path(), ec)) {
             const std::string name = entry.path().filename().string();

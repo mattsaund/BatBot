@@ -29,8 +29,10 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # binary, and CUDA/Vulkan are built later and on demand by the settings screen.
 # Turning it OFF gives the old monolithic build: one static binary with at most
 # one backend frozen in, selected by BATBOT_CUDA / BATBOT_VULKAN below. That
-# mode still exists because it is the only one that builds on a filesystem
-# without symlinks.
+# mode exists for anyone who wants a single self-contained executable and is
+# willing to decide the backend at compile time. It is no longer the fallback
+# for filesystems without symlinks -- the loadable build works there now, see
+# cmake/BatBotUnversion.cmake.
 option(BATBOT_BACKEND_DL "Build with loadable GPU runtimes (recommended)" ON)
 
 # Only consulted when BATBOT_BACKEND_DL is OFF:
@@ -79,12 +81,14 @@ add_library(batbot_core STATIC
     src/session/usage.cpp
     src/session/store.cpp
 
-    # routing: the subject table and the two routers
+    # routing: the subject table, the two routers, and the command list
     src/routing/subject.cpp
     src/routing/router.cpp
+    src/routing/completion.cpp
 
     # llm: everything that touches llama.cpp
     src/llm/model_catalog.cpp
+    src/llm/model_shape.cpp
     src/llm/sampling.cpp
     src/llm/loaded_model.cpp
     src/llm/model_host.cpp
@@ -131,6 +135,7 @@ add_executable(batbot
     src/ui/settings/directory_browser.cpp
     src/ui/settings/runtime_view.cpp
     src/ui/settings/gpu_order_view.cpp
+    src/ui/settings/model_manager_view.cpp
     src/ui/session_picker.cpp
 )
 

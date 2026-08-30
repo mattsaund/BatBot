@@ -138,7 +138,49 @@ echo "  choose_build_dir"
 SRC_DIR="$TMP/checkout"
 mkdir -p "$SRC_DIR"
 choose_build_dir
-check_eq  "an ordinary filesystem builds in place" "$BUILD_DIR" "$SRC_DIR/build"
+check_eq  "the build tree sits beside the source" "$BUILD_DIR" "$SRC_DIR/build"
+
+# --------------------------------------------------------------------------
+# Symlink-free shared libraries
+#
+# llama.cpp writes libggml-base.so.0.9.4 with libggml-base.so as a symlink
+# beside it, and neither exFAT nor NTFS can hold a symlink -- so a checkout on
+# an external drive shared with Windows could not be built in. The installer
+# used to detect that and move the build tree into the cache directory. It no
+# longer has to, because BatBot strips the version suffixes and the libraries
+# come out as plain files; these pin that the detection stays gone and the
+# stripping stays wired up, in both places that compile llama.cpp.
+# --------------------------------------------------------------------------
+# Re-running the installer over an old build tree is now the ordinary case,
+# not a rare one: the build stays in the checkout instead of being relocated to
+# a fresh cache directory. A CMakeCache remembering paths this tree no longer
+# has -- a moved home, a restored backup, a source directory pointed elsewhere
+# once -- makes cmake refuse to reuse it, and the cache is pure derived data,
+# so the installer clears it and tries once more rather than dying on a log.
+check     "a stale build cache is cleared and retried, not fatal" \
+          grep -q "the existing build directory is stale" "$HERE/../install.sh"
+check     "and the retry runs the same configure as the first attempt" \
+          test "$(grep -c 'run_configure' "$HERE/../install.sh")" -ge 3
+
+check_not "the installer no longer probes for symlink support" \
+          grep -q "symlink-probe" "$HERE/../install.sh"
+check_not "and never relocates the build tree" \
+          grep -q "no symlinks; building in" "$HERE/../install.sh"
+check     "the unversioning helper exists" \
+          test -f "$HERE/../cmake/BatBotUnversion.cmake"
+check     "the dependency setup includes it" \
+          grep -q "BatBotUnversion.cmake" "$HERE/../cmake/BatBotDependencies.cmake"
+check     "and sweeps llama.cpp's targets once they exist" \
+          grep -q 'batbot_unversion_directory("\${llama_SOURCE_DIR}")' \
+               "$HERE/../cmake/BatBotDependencies.cmake"
+check_not "configuring without symlinks is no longer a fatal error" \
+          grep -q "BATBOT_FS_HAS_SYMLINKS" "$HERE/../cmake/BatBotDependencies.cmake"
+# The in-app runtime builder runs cmake on llama.cpp directly, with no BatBot
+# CMakeLists in the picture, so it has to inject the same thing itself.
+check     "the runtime builder injects the same hook" \
+          grep -q "CMAKE_PROJECT_INCLUDE" "$HERE/../src/runtime/builder.cpp"
+check     "and defines the sweep it points at" \
+          grep -q "batbot_unversion_directory" "$HERE/../src/runtime/builder.cpp"
 
 echo
 echo "  llama tag"
@@ -286,15 +328,22 @@ check     "an out-of-range percentage is clamped, not drawn off the end" \
 check     "a negative percentage clamps to zero" \
           grep -q "0%" <<< "$(draw_bar -20 "")"
 
-# Both bars are drawn together, and the top one is labelled so the two are
-# never mistaken for each other.
+# One bar, for the whole install. There used to be a second bar underneath for
+# the part running now; it is gone, and these pin that it stays gone -- two
+# progress figures on screen at once is two numbers to reconcile, and the part
+# being worked on is already named twice (in the ==> heading and in the label
+# beside the bar).
 IS_TTY=1
+PROGRESS_ON=1
 STEP_NUM=3; STEP_PCT=50; PHASE_LABEL="probe"; PHASE_START=0
 BLOCK="$(block_draw)"
-check     "the block names the whole install"  grep -q "install" <<< "$BLOCK"
-check     "the block names the part"           grep -q "\[3/5\]" <<< "$BLOCK"
-check     "the block shows the phase label"    grep -q "probe"   <<< "$BLOCK"
-check_eq  "the block is exactly two rows"      "$(printf '%s' "$BLOCK" | grep -c '')" "2"
+check     "the bar names the whole install"   grep -q "install" <<< "$BLOCK"
+check     "the bar shows the phase label"     grep -q "probe"   <<< "$BLOCK"
+check_eq  "the bar is exactly one row"        "$(printf '%s' "$BLOCK" | grep -c '')" "1"
+check_not "the bar carries no second percentage" \
+          grep -q "%.*%" <<< "$BLOCK"
+check_not "the step counter is left to the heading above" \
+          grep -q "\[3/5\]" <<< "$BLOCK"
 
 # The elapsed clock. SECONDS is 0 for the whole first second of a run, so a
 # phase that starts promptly must still be recognised as running.
@@ -306,11 +355,32 @@ PHASE_START=-1
 check_not "a part with no phase running shows no clock" \
           grep -q "s)" <<< "$(block_draw)"
 
-# Before the first part there is no install to report on, which is what keeps
-# the bars out of --check and out of the uninstaller.
-STEP_NUM=0
-check_eq  "nothing is drawn before the first part" "$(block_draw)" ""
+# The bar goes up before the first part rather than with it, so it is on screen
+# from the start of the install instead of appearing a few seconds in.
+PROGRESS_ON=1; STEP_NUM=0; STEP_PCT=0; PHASE_LABEL="starting"
+check     "the bar is drawn before the first part begins" \
+          grep -q "install" <<< "$(block_draw)"
+
+# ...but only once an install is actually under way, which is what keeps it out
+# of --check, the banner and the uninstaller. All of those print through note(),
+# which draws the block after every line.
+PROGRESS_ON=0
+check_eq  "nothing is drawn when no install is running" "$(block_draw)" ""
+
+# Retiring it leaves one finished bar in the scrollback and stops the redraws,
+# so the closing summary -- which is written with plain printf and knows nothing
+# about the cursor arithmetic -- cannot land inside the block.
+PROGRESS_ON=1; STEP_NUM=2; STEP_PCT=10; BLOCK_SHOWN=0
+# Redirected rather than captured with $(...): a command substitution runs in a
+# subshell, so the PROGRESS_ON=0 that retirement depends on would be discarded
+# along with it and the test would be checking nothing.
+progress_end > "$TMP/retired"
+check     "retiring the bar leaves it at 100%" grep -q "100%" "$TMP/retired"
+check_eq  "and stops it redrawing"             "$PROGRESS_ON" "0"
+check_eq  "and nothing is drawn afterwards"    "$(block_draw)" ""
+
 IS_TTY=0
+PROGRESS_ON=0
 STEP_NUM=0; STEP_PCT=0
 
 # --------------------------------------------------------------------------

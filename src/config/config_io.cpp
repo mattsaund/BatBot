@@ -138,9 +138,11 @@ bool save_config(const Config& config, const std::filesystem::path& file) {
         {"defaults",      model_params_to_json(config.defaults, /*include_model=*/false)},
         {"experts",       experts},
         {"gpu", json{
-            {"mode",     config.gpu.mode},
-            {"priority", config.gpu.priority},
-            {"main_gpu", config.gpu.main_gpu},
+            {"mode",      config.gpu.mode},
+            {"priority",  config.gpu.priority},
+            {"main_gpu",  config.gpu.main_gpu},
+            {"gpu_only",  config.gpu.gpu_only},
+            {"vram_only", config.gpu.vram_only},
         }},
         {"routing", json{
             {"min_confidence",       tidy(config.routing.min_confidence)},
@@ -215,9 +217,11 @@ void write_default_config(const std::filesystem::path& file) {
         {"defaults", model_params_to_json(defaults.defaults, /*include_model=*/false)},
         {"experts", experts},
         {"gpu", json{
-            {"mode",     defaults.gpu.mode},
-            {"priority", defaults.gpu.priority},
-            {"main_gpu", defaults.gpu.main_gpu},
+            {"mode",      defaults.gpu.mode},
+            {"priority",  defaults.gpu.priority},
+            {"main_gpu",  defaults.gpu.main_gpu},
+            {"gpu_only",  defaults.gpu.gpu_only},
+            {"vram_only", defaults.gpu.vram_only},
         }},
         {"routing", json{
             {"min_confidence",       defaults.routing.min_confidence},
@@ -297,8 +301,10 @@ Config load_config(const std::filesystem::path& file, std::vector<std::string>& 
     }
 
     if (const auto gpu = doc.find("gpu"); gpu != doc.end() && gpu->is_object()) {
-        read_field(*gpu, "mode",     config.gpu.mode,     "gpu", warnings);
-        read_field(*gpu, "main_gpu", config.gpu.main_gpu, "gpu", warnings);
+        read_field(*gpu, "mode",      config.gpu.mode,      "gpu", warnings);
+        read_field(*gpu, "main_gpu",  config.gpu.main_gpu,  "gpu", warnings);
+        read_field(*gpu, "gpu_only",  config.gpu.gpu_only,  "gpu", warnings);
+        read_field(*gpu, "vram_only", config.gpu.vram_only, "gpu", warnings);
         if (const auto priority = gpu->find("priority");
             priority != gpu->end() && priority->is_array()) {
             config.gpu.priority.clear();

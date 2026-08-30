@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 
 namespace batbot::format {
@@ -23,5 +24,12 @@ std::string duration_ms(long milliseconds);
 /// A byte count in the largest unit that keeps it readable: `"469 MB"`,
 /// `"1.2 GB"`. Whole numbers below a kilobyte.
 std::string bytes(std::uintmax_t count);
+
+/// A path with the home directory written as `~`.
+///
+/// Panel titles sit beside the directory they are about, and BatBot's own
+/// directories are four levels below $HOME -- spelling one out in full pushes
+/// the title off its own header on any normal terminal.
+std::string short_path(const std::filesystem::path& path);
 
 }  // namespace batbot::format

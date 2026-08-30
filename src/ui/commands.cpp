@@ -49,20 +49,18 @@ bool App::handle_command(const std::string& text) {
 
     if (command == "help" || command == "h") {
         state_.clear_notices();
-        say("/help                 this list");
+        // Printed from the same list the completion menu offers, so a command
+        // cannot exist in one and be missing from the other.
+        for (const CommandInfo& entry : all_commands()) {
+            if (entry.takes_prompt) {
+                continue;  // the experts are summarised in one line below
+            }
+            std::string line = "/" + entry.name;
+            line.resize(22, ' ');
+            say(line + entry.summary);
+        }
         say("/<subject> <prompt>   send straight to one expert, e.g. /physics why is the sky blue");
-        say("/resume               reopen an earlier conversation about this project");
-        say("/new                  start a fresh conversation, keeping this one on disk");
-        say("/usage                tokens spent this session and on this project");
-        say("/experts              which seats are filled");
-        say("/runtimes             install or remove CUDA / Vulkan / CPU backends");
-        say("/devices              compute devices llama.cpp found");
-        say("/release              unload the resident expert and free its memory");
-        say("/clear                clear the transcript and the experts' history");
-        say("/config               open the settings screen (also ctrl-e)");
-        say("/models               list the .gguf files in the models directory");
-        say("/paths                where the config, models and log live");
-        say("/quit                 leave");
+        say("                      tab completes any of these");
         return true;
     }
 

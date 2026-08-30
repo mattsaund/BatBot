@@ -79,6 +79,10 @@ void SettingsView::build_rows() {
                      "put the models directory back where BatBot expects it",
                      nullptr, nullptr, nullptr, nullptr, 0, {},
                      ActionId::ResetModelsDir});
+    rows_.push_back({Kind::Panel, "Manage models",
+                     "delete GGUF files you no longer want",
+                     nullptr, nullptr, nullptr, nullptr, 0, {},
+                     ActionId::None, PanelId::Models});
 
     header("DELEGATOR");
     rows_.push_back({Kind::ModelRef, "Router model",
@@ -145,6 +149,12 @@ void SettingsView::build_rows() {
                      "which card is filled first, when the split is by priority",
                      nullptr, nullptr, nullptr, nullptr, 0, {},
                      ActionId::None, PanelId::GpuOrder});
+    rows_.push_back({Kind::Bool, "GPU-only compute",
+                     "put every layer on the GPU and keep the processor out of it",
+                     nullptr, nullptr, nullptr, &config_.gpu.gpu_only, 0, {}});
+    rows_.push_back({Kind::Bool, "Dedicated VRAM only",
+                     "refuse a model that would spill out of video memory into RAM",
+                     nullptr, nullptr, nullptr, &config_.gpu.vram_only, 0, {}});
 
     header("BEHAVIOUR");
     rows_.push_back({Kind::Text, "System prompt", "sent to every expert",
@@ -174,6 +184,52 @@ void SettingsView::set_gpu_priority(std::vector<int> order) {
     dirty_ = true;
     // The row's value column reads the new order straight out of the config,
     // so nothing else has to be kept in step.
+}
+
+std::vector<std::string> SettingsView::models_in_use() const {
+    std::vector<std::string> names;
+    const auto add = [&names](const std::string& model) {
+        // Only bare file names: a seat pointing at /mnt/big/x.gguf does not
+        // name anything in the models directory, so nothing there can be the
+        // file it means.
+        if (!model.empty() && is_bare_name(model) &&
+            std::find(names.begin(), names.end(), model) == names.end()) {
+            names.push_back(model);
+        }
+    };
+    add(config_.router.model);
+    for (const ModelParams& expert : config_.experts) {
+        add(expert.model);
+    }
+    return names;
+}
+
+void SettingsView::forget_models(const std::vector<std::string>& names) {
+    const auto gone = [&names](const std::string& model) {
+        return !model.empty() &&
+               std::find(names.begin(), names.end(), model) != names.end();
+    };
+
+    bool changed = false;
+    if (gone(config_.router.model)) {
+        config_.router.model.clear();
+        config_.router.path.clear();
+        changed = true;
+    }
+    for (ModelParams& expert : config_.experts) {
+        if (gone(expert.model)) {
+            expert.model.clear();
+            expert.path.clear();
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        dirty_ = true;
+    }
+    // Rebuild either way: the file list at the top of the screen changed even
+    // when no seat pointed at what went.
+    refresh();
 }
 
 std::string SettingsView::gpu_priority_summary() const {
@@ -219,8 +275,14 @@ std::string SettingsView::value_of(const Row& row) const {
         case Kind::Panel:
             // The GPU order row is worth reading without opening it; the
             // Runtimes row is not, since its panel is the whole story.
-            return row.panel == PanelId::GpuOrder ? gpu_priority_summary()
-                                                  : std::string("›");
+            if (row.panel == PanelId::GpuOrder) {
+                return gpu_priority_summary();
+            }
+            if (row.panel == PanelId::Models) {
+                return std::to_string(models_.size()) +
+                       (models_.size() == 1 ? " model" : " models");
+            }
+            return std::string("›");
         case Kind::Action:  return "›";
     }
     return {};
@@ -424,6 +486,7 @@ SettingsAction SettingsView::handle(const Event& event, bool& consumed) {
             switch (rows_[selected_].panel) {
                 case PanelId::Runtimes: return SettingsAction::OpenRuntimes;
                 case PanelId::GpuOrder: return SettingsAction::OpenGpuOrder;
+                case PanelId::Models:   return SettingsAction::OpenModels;
                 case PanelId::None:     break;
             }
             return SettingsAction::None;

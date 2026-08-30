@@ -70,27 +70,26 @@ hardware can actually use, builds BatBot, tests it, and puts it on your PATH:
 curl -fsSL https://raw.githubusercontent.com/mattsaund/batbot/main/install.sh | bash
 ```
 
-It runs in five parts, and shows two live bars: the whole install on top, the
-part running now underneath, with what it is doing and how long it has been
-doing it.
+It runs in five parts and shows one bar, for the whole install. The bar goes up
+before the first part starts and only ever moves forward, to 100%; beside it is
+what is happening now and how long it has been happening.
 
 ```
 ==> [5/5] Building BatBot
     ✓ configured
     compiling with 12 jobs
-    install  █████████████░░░░░░░░░░░░░  51%
-    [5/5]    █████░░░░░░░░░░░░░░░░░░░░░  21%    llama-model.cpp (37s)
+    install  █████████████░░░░░░░░░░░░░  51%    llama-model.cpp (37s)
 ```
 
-The two are weighted differently on purpose. The parts are nothing like equal
-in length — checking CMake is milliseconds, building is minutes — so the top
-bar weights them by how long they actually take. One that moved a fifth per
-part would read 80% with the entire build still ahead of it.
+The figure is not a guess about elapsed time. The five parts are nothing like
+equal in length — checking CMake is milliseconds, building is minutes — so each
+carries a weight and the bar counts those. One that moved a fifth per part would
+read 80% with the entire build still ahead of it.
 
-Within a part the same trick is applied again: each phase owns a slice of the
-part, so the lower bar moves through the whole 0–100% whether that part is
-downloading something with a real percentage or waiting on a package manager
-that reports nothing at all.
+Inside a part the same trick is applied again: each phase owns a slice of the
+part's weight, so the bar keeps moving whether the phase has a real percentage
+to report (a download, a compile) or is waiting on a package manager that says
+nothing at all.
 
 **BatBot installs with no compute runtime.** Not even the CPU one. The first
 thing to do after installing is to open the settings screen and pick one — see
@@ -254,7 +253,7 @@ is divided across them:
 |---|---|
 | `auto` | let llama.cpp decide (the default) |
 | `even` | proportional to each card's memory, so they finish together |
-| `priority` | fill the cards in the order you list, spilling into the next |
+| `priority` | fill the cards in the order you list, spilling into the next only when one is full |
 | `single` | everything on **Main GPU** |
 
 `even` is even in *work*, not in count: a 16 GB card takes twice the layers of
@@ -279,9 +278,109 @@ order** lists the cards in the order they will be filled:
 bottom last. A card the config names that is no longer in the machine is
 dropped; one that has appeared since is added at the bottom.
 
+**Filled means filled.** Each card in turn takes as much of the model as it can
+hold, and the next one gets only what is left over — so a model that fits on
+the first card never touches the second, and a large one uses the whole
+machine. On a 12/16/12 GB set of cards with the 16 GB one ranked first, a 32 GB
+model lands like this:
+
+```
+RTX 5060 Ti   43%    13.9 GB of 13.9 GB usable
+RTX 3060      33%    10.5 GB of 10.5 GB usable
+RTX 4070      24%     7.7 GB of 10.4 GB usable
+```
+
+This is per-model, not per-machine: a 1B delegator and a 30B expert get
+different splits from the same priority order, because how far down the order a
+model reaches depends on how big it is.
+
+Each card keeps back enough for its own compute buffers before anything is
+placed on it — a card filled to its last byte with weights has nowhere to put
+them and fails to allocate. That reserve is the model's own figure, read from
+its header, not a percentage someone picked.
+
+One limit worth knowing: the split is worked out from the memory free when the
+config is applied, and the delegator loads after that. On a machine where the
+largest expert only just fits, the delegator's couple of gigabytes are not
+accounted for in the expert's arrangement. The reserve usually absorbs it; if
+it does not, `/release` frees the resident expert and the next load is
+recalculated against what is actually free.
+
 Only backends that can address several devices are affected — CUDA and Vulkan
 can, CPU cannot. The delegator is never split: it is small, and spreading a 1B
 model across three cards costs more in transfers than it saves in memory.
+
+### Keeping the work on the GPU
+
+Two settings under **HARDWARE** decide whether the processor and system memory
+get involved at all.
+
+| setting | default | what it does |
+|---|---|---|
+| **GPU-only compute** | on | every layer on the GPU, whatever **GPU layers** says |
+| **Dedicated VRAM only** | off | refuse a model that will not fit in video memory |
+
+**GPU-only compute** exists because llama.cpp will happily run part of a model
+on the processor — that is what a GPU-layer count lower than the model's layer
+count means — and the CPU's share is slower by two orders of magnitude. A model
+90% offloaded runs at roughly the speed of one not offloaded at all. Nobody
+chooses that; they get there by leaving a number behind in the config. On, the
+offload is pinned to every layer plus the output whenever there is a GPU to put
+them on, and the weights are not staged through host memory on the way.
+
+The difference is visible in llama.cpp's own accounting. The same 16-layer model
+on three cards, once with the setting off and `n_gpu_layers` left at 5, once
+with it on:
+
+| | layer placement | graph splits |
+|---|---|---|
+| off | 24 × CPU, 10 × CUDA | 124 |
+| on | 34 × CUDA, 0 × CPU | 4 |
+
+A graph split is a hand-off between backends. Going from 124 to 4 is the
+processor leaving the inference loop.
+
+On a machine with no GPU this setting does nothing at all — the processor is
+the only thing there is to compute on, and overwriting your layer count to say
+so would be an empty gesture.
+
+The trade is that there is no partial offload to fall back on. A model too large
+for the card fails to load rather than quietly running half of itself on the
+processor, which is the point — but BatBot says so, and names the setting to
+turn off if you would rather have the slow version than none.
+
+**Dedicated VRAM only** is about the other failure mode. A driver asked for more
+memory than the card has usually does not fail; it spills the excess into system
+RAM and carries on, and the model then runs perhaps twenty times slower with
+nothing on screen to say why. On, BatBot checks the free video memory before
+allocating anything and says so instead:
+
+```
+qwen3-coder-next-56b-REAP-Q4_K_M.gguf needs about 40.1 GB of video memory but
+only 34.8 GB is free on NVIDIA GeForce RTX 4070 + NVIDIA GeForce RTX 5060 Ti +
+NVIDIA GeForce RTX 3060 -- close something using the GPU, lower the context
+size, or turn off "Dedicated VRAM only" in settings
+```
+
+The figure is read from the model, not guessed at. GGUF keeps its metadata at
+the front of the file, so BatBot reads the layer count and attention shape —
+about 50 ms even for a 34 GB model — and works out the cache exactly:
+
+```
+weights      32.1 GB     the file
+kv @ 8192   768.0 MB     48 layers x 2 KV heads x 512 x 2 bytes x 8192 tokens
+compute     552.8 MB     mostly the logits: 151936 vocab x 512 batch x 4 bytes
+TOTAL        33.4 GB
+```
+
+Hybrid architectures are handled properly: a model that writes `head_count_kv`
+as one value per layer, with zeros for the layers that keep no cache at all, is
+charged only for the layers that do.
+
+It also switches the load to direct I/O, so the weights go from disk to the card
+without passing through the operating system's page cache — which would
+otherwise hold a second, full-size copy of every model in RAM long after it had
+been uploaded.
 
 ---
 
@@ -334,25 +433,32 @@ remove everything it put down.
 | `BATBOT_CUDA` | `OFF` | monolithic builds only: compile CUDA in |
 | `BATBOT_VULKAN` | `OFF` | monolithic builds only: compile Vulkan in |
 
-> **Note on filesystems:** a loadable runtime is a shared library, and shared
-> library versioning needs symlinks — which exFAT and NTFS volumes do not
-> support. Building a checkout on such a volume fails at the link step, so
-> **build somewhere else and leave the sources where they are**:
->
-> ```sh
-> cmake -S . -B ~/.cache/batbot/build -DCMAKE_BUILD_TYPE=Release
-> ```
->
-> `install.sh` detects this and relocates the build tree on its own. CMake
-> stops with this advice rather than letting the linker fail a thousand lines
-> into the log.
+#### A note on filesystems
+
+BatBot builds anywhere, including on exFAT and NTFS — an external drive shared
+with a Windows install is an ordinary place to keep a project.
+
+That took work. A shared library is normally written under a versioned name,
+`libggml-base.so.0.9.4`, with the plain `libggml-base.so` beside it as a
+symlink; exFAT and NTFS cannot hold a symlink, so the link step failed with
+`Operation not permitted` a thousand lines into the build. BatBot used to
+detect that and tell you to build somewhere else, and `install.sh` used to move
+the build tree into `~/.cache` behind your back.
+
+Neither is needed now. `cmake/BatBotUnversion.cmake` clears `VERSION` and
+`SOVERSION` from every shared library and loadable module in llama.cpp's tree,
+so each one comes out as a single plain file with no alias to link. Nothing
+downstream ever wanted the version: RPATH finds the libraries by directory and
+ggml opens backend modules by exact file name. The in-app runtime builder does
+the same thing to its own llama.cpp build, through `CMAKE_PROJECT_INCLUDE`.
 
 #### Monolithic builds
 
 `-DBATBOT_BACKEND_DL=OFF` gives the older shape: one static binary with at most
 one backend compiled in, chosen by `BATBOT_CUDA` / `BATBOT_VULKAN`. Nothing is
-loadable and the Runtimes panel says so. It exists because it is the only mode
-that builds on a filesystem without symlinks.
+loadable and the Runtimes panel says so. It is there for anyone who wants a
+single self-contained executable and is willing to fix the backend at compile
+time — not, any longer, as the fallback for an awkward filesystem.
 
 ---
 
@@ -412,6 +518,33 @@ copied between machines still points somewhere sensible on each.
 Or set `models_dir` in the config file directly. An expert can also point
 outside the folder with an absolute or `~` path when you do not want to move a
 file.
+
+**Deleting models.** Models are the largest thing BatBot puts on your disk by a
+wide margin, so getting rid of one should not mean leaving the program to find
+the folder by hand. **Manage models** sits under the models directory rows and
+lists what is there, with sizes:
+
+```
+╭──────────────────────────────────────────────────────────────────╮
+│ models  · ~/.local/share/batbot/models                           │
+├──────────────────────────────────────────────────────────────────┤
+│ ▸ llama-3-8b-q4.gguf                        4.6 GB       in use  │
+│   qwen-coder-14b-q5.gguf                   10.1 GB               │
+│   phi-4-mini-q8.gguf                        4.1 GB       in use  │
+│   Delete all models  ·  3 files, 18.8 GB                         │
+├──────────────────────────────────────────────────────────────────┤
+│ ↑↓ choose   enter or d delete   r rescan   esc back              │
+╰──────────────────────────────────────────────────────────────────╯
+```
+
+`in use` marks a file some seat is pointing at. Enter asks before anything
+happens — naming the file, its size, and whether deleting it will empty a
+seat — and only `y`, `enter`, `n` or `esc` answer it, so a redraw cannot
+answer for you. The last row deletes everything, and asks the same way.
+
+Deleting is not a wastebasket: the file goes. Any seat that named it is emptied
+and the config saved straight away, since a seat pointing at a file that no
+longer exists is wrong on disk from that moment whatever you do next.
 
 ### Configure it in the app
 
@@ -553,8 +686,24 @@ The sky is blue because shorter wavelengths scatter more strongly...
 | `/paths` | where the config, models, runtimes, history and log live |
 | `/help`, `/quit` | |
 
+Type `/` and the list folds up out of the prompt, narrowing as you type, with
+the rest of the best match in grey after the cursor. `Tab` takes it:
+
+```
+ › /resume   reopen an earlier conversation about this project
+   /release  unload the resident expert and free its memory
+   tab completes   ↑↓ choose   esc dismiss
+ › /resume
+     ▲── typed "/re"; "sume" is the suggestion
+```
+
+The experts are in there too, so `/phy` + `Tab` gives `/physics ` with the
+cursor ready for the prompt. `↑↓` picks a different match, `esc` dismisses the
+menu until the line changes again, and `Enter` still just sends what you typed.
+
 | key | |
 |---|---|
+| `Tab` | accept the suggested command |
 | `Ctrl-E` | settings: assign models, move the models directory, tune sampling |
 | `Ctrl-C` | cancel the current answer; again when idle to quit |
 | `Ctrl-T` | show/hide the roundtable |
@@ -646,9 +795,10 @@ independently, so the swap behaviour is real even when the file is the same.
 ### Unit tests
 
 The parts that need no model on disk — subject parsing, the router grammar,
-keyword routing, config inheritance, the trust store, UTF-8 chunking, the
-backend table, GPU splitting, token accounting and session history — are covered
-by a test suite that runs in well under a second:
+keyword routing, slash-command completion, config inheritance, the trust store,
+UTF-8 chunking, the backend table, GPU splitting and the GPU memory policy,
+token accounting and session history — are covered by a test suite that runs in
+well under a second:
 
 ```sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -663,7 +813,7 @@ Or run the binary directly to see each case:
 ```
 
 ```
-80 cases, 0 failed, 0 assertions failed
+116 cases, 0 failed, 0 assertions failed
 ```
 
 ### Routing quality
@@ -751,16 +901,17 @@ curl -fsSL https://raw.githubusercontent.com/mattsaund/batbot/main/install.sh | 
 ```
 
 The installer's own logic — version comparison, the CUDA-vs-compute-capability
-table, CMake detection, the package lists, and the build-directory relocation —
-has unit tests too, since a mistake there means a GPU that silently goes unused
-rather than an error anyone would notice:
+table, CMake detection, the package lists, the progress bar, and the shared
+libraries being built without symlinks — has unit tests too, since a mistake
+there means a GPU that silently goes unused rather than an error anyone would
+notice:
 
 ```sh
 bash tests/test_install.sh
 ```
 
 ```
-77 checks, 0 failed
+90 checks, 0 failed
 ```
 
 One of those checks exists because of a real bug: the Vulkan package list was
@@ -820,12 +971,14 @@ src/
 │   └── store.cpp       per-project session history
 ├── routing/        deciding who answers
 │   ├── subject.cpp     the subject table; grammar and prompt come from it
-│   └── router.cpp      KeywordRouter and ModelRouter
+│   ├── router.cpp      KeywordRouter and ModelRouter
+│   └── completion.cpp  the slash-command list, and matching a prefix to it
 ├── llm/            everything that touches llama.cpp
 │   ├── model_host.cpp    owns the backend; one expert resident at a time
 │   ├── loaded_model.cpp  the generation loop
 │   ├── sampling.cpp      building a sampler chain
-│   └── model_catalog.cpp reading the models directory
+│   ├── model_catalog.cpp reading the models directory
+│   └── model_shape.cpp   what a GGUF says about itself, before it is loaded
 ├── engine/         the delegation loop            [worker thread]
 │   ├── engine.cpp        route -> JIT swap -> generate
 │   ├── route_policy.cpp  what to do with the delegator's answer
@@ -837,7 +990,8 @@ src/
 │   ├── session_picker.cpp  the /resume list
 │   ├── widgets/        bat sprite, roundtable
 │   └── settings/       view, runtimes panel, GPU priority panel,
-│                       directory browser, model picker, line editor
+│                       model manager, directory browser, model picker,
+│                       line editor
 └── util/           text and formatting helpers, subprocess
 ```
 

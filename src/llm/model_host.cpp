@@ -26,8 +26,11 @@
 #include <ggml-backend.h>
 #include <llama.h>
 
+#include "batbot/llm/model_shape.hpp"
 #include "batbot/llm/sampling.hpp"
+#include "batbot/runtime/devices.hpp"
 #include "batbot/runtime/registry.hpp"
+#include "batbot/util/format.hpp"
 
 namespace batbot {
 namespace {
@@ -91,6 +94,94 @@ llama_split_mode split_mode_from_string(const std::string& name) {
     if (name == "row")    { return LLAMA_SPLIT_MODE_ROW; }
     if (name == "tensor") { return LLAMA_SPLIT_MODE_TENSOR; }
     return LLAMA_SPLIT_MODE_LAYER;
+}
+
+/// Will this model fit in the free memory of the cards it would land on?
+///
+/// Returns an empty string when it fits (or when there is nothing to check --
+/// no GPU, or a backend that does not report its memory), and an explanation
+/// when it does not.
+///
+/// The figure is read from the model rather than guessed at. This used to be
+/// the file size times a flat 1.25, which refused a 32 GB model on 34.8 GB of
+/// free video memory: the allowance invented eight gigabytes of KV cache for a
+/// model whose cache is under one. See model_shape.hpp.
+std::string vram_shortfall(const std::string& path, const ModelParams& params) {
+    const ModelShape shape = read_model_shape(path);
+    if (shape.weights == 0) {
+        return {};
+    }
+
+    const std::vector<ComputeDevice> gpus = gpu_devices();
+    if (gpus.empty()) {
+        return {};
+    }
+
+    // Which cards this model would actually land on, which is not always all
+    // of them: "single" mode, and a priority order that gives a card nothing,
+    // both leave some out -- and counting memory the model will never be
+    // allowed to touch is how a check like this waves through the case it
+    // exists to catch.
+    //
+    // tensor_split is indexed by ggml device index, the same number as
+    // ComputeDevice::index, and a zero share means "not used". An empty split
+    // is llama.cpp's own default: every GPU.
+    const std::vector<float>& split = params.tensor_split;
+    const auto share_of = [&split](const ComputeDevice& gpu) {
+        const auto index = static_cast<std::size_t>(gpu.index);
+        return index < split.size() ? split[index] : 0.0F;
+    };
+    const bool everywhere = split.empty();
+
+    // LLAMA_SPLIT_MODE_NONE puts the whole model on main_gpu whatever the
+    // split says.
+    const bool single = params.split_mode == "none";
+
+    std::uint64_t available = 0;
+    std::string   where;
+    for (const ComputeDevice& gpu : gpus) {
+        if (single ? gpu.index != params.main_gpu
+                   : (!everywhere && share_of(gpu) <= 0.0F)) {
+            continue;
+        }
+        available += gpu.memory_free;
+        if (!where.empty()) {
+            where += " + ";
+        }
+        where += (gpu.description.empty() ? gpu.name : gpu.description);
+    }
+    if (available == 0) {
+        // A backend that does not report free memory. Nothing to compare
+        // against, so let the load proceed rather than refuse on a guess.
+        return {};
+    }
+
+    // Weights, plus the cache at the context actually configured, plus the
+    // compute buffers. A model whose header could not be read falls back to a
+    // tenth over the file size -- small enough not to refuse anything that
+    // would have fitted, which is the right way to be wrong when the numbers
+    // are unknown.
+    const std::uint64_t needed =
+        shape.known ? shape.total_bytes(params.n_ctx, params.n_batch)
+                    : static_cast<std::uint64_t>(static_cast<double>(shape.weights) * 1.1);
+    if (needed <= available) {
+        return {};
+    }
+
+    std::string detail;
+    if (shape.known && shape.kv_bytes(params.n_ctx) > 0) {
+        // Which part is too big matters: the weights cannot be changed, but
+        // the context can, and it is the one number on the settings screen
+        // that would make this fit.
+        detail = " (" + format::bytes(shape.weights) + " of weights plus " +
+                 format::bytes(shape.kv_bytes(params.n_ctx)) + " of context at " +
+                 std::to_string(params.n_ctx) + " tokens)";
+    }
+
+    return "needs about " + format::bytes(needed) + " of video memory" + detail +
+           " but only " + format::bytes(available) + " is free on " + where +
+           " -- close something using the GPU, lower the context size, or turn off "
+           "\"Dedicated VRAM only\" in settings";
 }
 
 int resolve_threads(int configured) {
@@ -174,6 +265,17 @@ std::unique_ptr<LoadedModel> ModelHost::load(const ModelParams& params,
         return nullptr;
     }
 
+    // Refuse before allocating anything, when asked to. A driver handed more
+    // than the card holds does not fail -- it spills into system RAM and runs
+    // on at a crawl -- so this is the only point at which saying no is cheap.
+    if (params.vram_only) {
+        if (const std::string shortfall = vram_shortfall(params.path, params);
+            !shortfall.empty()) {
+            error = std::filesystem::path(params.path).filename().string() + " " + shortfall;
+            return nullptr;
+        }
+    }
+
     ProgressBridge bridge{&progress, -1.0F};
 
     llama_model_params model_params = llama_model_default_params();
@@ -186,10 +288,30 @@ std::unique_ptr<LoadedModel> ModelHost::load(const ModelParams& params,
         model_params.tensor_split = params.tensor_split.data();
     }
 
+    // Keep the weights off the host. `no_host` drops the pinned staging buffer
+    // llama.cpp would otherwise keep in RAM for transfers to the card, and
+    // direct I/O reads the file straight to the device instead of through the
+    // operating system's page cache -- which would otherwise hold a second,
+    // full-size copy of every model in RAM long after it was uploaded.
+    model_params.no_host = params.no_host;
+    if (params.direct_io) {
+        model_params.load_mode = LLAMA_LOAD_MODE_DIRECT_IO;
+    }
+
     llama_model* model = llama_model_load_from_file(params.path.c_str(), model_params);
     if (model == nullptr) {
         error = "llama.cpp could not load " + params.path
               + " (see the BatBot log for details)";
+        // The most likely reason, and the one the user can act on. With every
+        // layer pinned to the GPU there is no partial offload to fall back on,
+        // so a model that no longer fits fails outright rather than quietly
+        // running part of itself on the processor -- which is the whole point
+        // of the setting, but is worth saying when it is what just happened.
+        if (params.gpu_only) {
+            error += ". If it is too large for the card, turn off "
+                     "\"GPU-only compute\" in settings to let it use the "
+                     "processor for the rest";
+        }
         return nullptr;
     }
 

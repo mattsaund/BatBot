@@ -34,6 +34,17 @@ struct ModelParams {
     std::string split_mode = "layer";  ///< none | layer | row | tensor
     std::vector<float> tensor_split;   ///< per-GPU share; empty = let llama.cpp decide
 
+    /// Keep the weights out of host memory entirely.
+    ///
+    /// Derived from GpuConfig, not written to the config file: these are the
+    /// llama.cpp-level knobs that the machine-wide GPU settings translate into,
+    /// the same way `tensor_split` is derived from the split mode. See
+    /// gpu_policy.hpp.
+    bool no_host   = false;  ///< no pinned host buffer for weights
+    bool direct_io = false;  ///< read straight to the device, not via the page cache
+    bool vram_only = false;  ///< refuse the load rather than spill into system RAM
+    bool gpu_only  = false;  ///< every layer on the GPU; no partial offload
+
     // Context
     int  n_ctx     = 8192;
     int  n_batch   = 512;
@@ -86,6 +97,32 @@ struct GpuConfig {
     /// The device "single" mode puts everything on, and the one llama.cpp uses
     /// for small tensors in the other modes.
     int main_gpu = 0;
+
+    /// Put every layer on the GPU, whatever "GPU layers" says.
+    ///
+    /// llama.cpp will happily run part of a model on the processor -- that is
+    /// what a GPU-layer count lower than the model's layer count means -- and
+    /// the CPU's share is slower than the GPU's by two orders of magnitude, so
+    /// a model that is 90% offloaded runs at roughly the speed of one that is
+    /// not offloaded at all. Nobody chooses that on purpose; they get there by
+    /// leaving a number behind in the config.
+    ///
+    /// On, this pins the offload to every layer plus the output whenever there
+    /// is a GPU to put them on, and stops the weights being staged through
+    /// host memory. It does nothing on a machine with no GPU, where the
+    /// processor is the only thing there is to compute on.
+    bool gpu_only = true;
+
+    /// Refuse to load a model that does not fit in dedicated video memory.
+    ///
+    /// A graphics driver asked for more memory than the card has does not
+    /// usually fail. It spills the excess into system RAM and carries on, and
+    /// the model then runs perhaps twenty times slower with nothing on screen
+    /// to say why -- which is a far worse outcome than being told it will not
+    /// fit. On, BatBot checks the free video memory first and says so, and the
+    /// weights are read straight to the card rather than through the operating
+    /// system's page cache, so they never occupy RAM on the way past either.
+    bool vram_only = false;
 };
 
 /// Purely cosmetic knobs.

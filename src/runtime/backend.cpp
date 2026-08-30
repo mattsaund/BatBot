@@ -63,6 +63,22 @@ std::optional<BackendKind> backend_from_id(std::string_view id) {
     return std::nullopt;
 }
 
+std::string_view module_prefix() {
+#ifdef _WIN32
+    return "ggml-";
+#else
+    return "libggml-";
+#endif
+}
+
+std::string_view module_suffix() {
+#ifdef _WIN32
+    return ".dll";
+#else
+    return ".so";
+#endif
+}
+
 std::optional<BackendKind> backend_from_reg_name(std::string_view reg_name) {
     // ggml reports "CUDA", "Vulkan", "CPU"; our ids are lower case.
     std::string lowered(reg_name);

@@ -13,13 +13,20 @@
 
 namespace batbot {
 
-/// Fill in `tensor_split` and `main_gpu` on every model in `config` from the
-/// machine's actual GPUs and the chosen split mode.
+/// Translate the machine-wide GPU settings into per-model load parameters.
 ///
-/// A no-op in "auto" mode, which leaves any hand-written `tensor_split` in the
-/// config file exactly as it was. Returns a one-line description of what was
-/// applied, for the log and the settings screen, or an empty string when
-/// nothing was changed.
+/// Two independent things happen here:
+///
+///   * The memory policy -- GpuConfig::gpu_only and ::vram_only -- is stamped
+///     onto every model, whatever the split mode is. Whether the processor
+///     does any of the computing is not a question about how many cards there
+///     are.
+///   * `tensor_split` and `main_gpu` are filled in from the split mode. That
+///     part is a no-op in "auto" mode, which leaves any hand-written
+///     `tensor_split` in the config file exactly as it was.
+///
+/// Returns a one-line description of the split that was applied, for the log
+/// and the settings screen, or an empty string when the split was left alone.
 std::string apply_gpu_policy(Config& config);
 
 }  // namespace batbot

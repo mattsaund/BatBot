@@ -7,12 +7,15 @@
 #include <filesystem>
 #include <fstream>
 
+#include <gguf.h>
 #include <nlohmann/json.hpp>
 
 #include "batbot/config/config.hpp"
 #include "batbot/config/gpu_policy.hpp"
+#include "batbot/routing/completion.hpp"
 #include "batbot/engine/route_policy.hpp"
 #include "batbot/llm/model_catalog.hpp"
+#include "batbot/llm/model_shape.hpp"
 #include "batbot/config/paths.hpp"
 #include "batbot/routing/router.hpp"
 #include "batbot/engine/state.hpp"
@@ -1072,6 +1075,37 @@ ComputeDevice fake_gpu(int index, std::string name, std::uint64_t bytes) {
 
 constexpr std::uint64_t kGb = 1024ULL * 1024ULL * 1024ULL;
 
+/// Write a GGUF carrying just the keys read_model_shape looks at.
+///
+/// Built with ggml's own writer rather than hand-rolled bytes, so the test
+/// exercises the same encoding a real model file uses. `kv_heads` is written
+/// as a single value when it has one entry and as a per-layer array otherwise,
+/// which is exactly how the two families of model in the wild spell it.
+void write_test_gguf(const std::filesystem::path& file, std::uint32_t layers,
+                     std::uint32_t embd, std::uint32_t heads,
+                     const std::vector<std::int32_t>& kv_heads, std::uint32_t key_len,
+                     std::uint32_t vocab) {
+    gguf_context* gguf = gguf_init_empty();
+    gguf_set_val_str(gguf, "general.architecture", "testarch");
+    gguf_set_val_u32(gguf, "testarch.block_count", layers);
+    gguf_set_val_u32(gguf, "testarch.embedding_length", embd);
+    gguf_set_val_u32(gguf, "testarch.attention.head_count", heads);
+    gguf_set_val_u32(gguf, "testarch.attention.key_length", key_len);
+    gguf_set_val_u32(gguf, "testarch.attention.value_length", key_len);
+    gguf_set_val_u32(gguf, "testarch.vocab_size", vocab);
+
+    if (kv_heads.size() == 1) {
+        gguf_set_val_u32(gguf, "testarch.attention.head_count_kv",
+                         static_cast<std::uint32_t>(kv_heads.front()));
+    } else {
+        gguf_set_arr_data(gguf, "testarch.attention.head_count_kv", GGUF_TYPE_INT32,
+                          kv_heads.data(), kv_heads.size());
+    }
+
+    gguf_write_to_file(gguf, file.string().c_str(), /*only_meta=*/true);
+    gguf_free(gguf);
+}
+
 float sum_of(const std::vector<float>& split) {
     float total = 0.0F;
     for (const float share : split) {
@@ -1116,17 +1150,65 @@ TEST(even_split_falls_back_to_equal_shares_when_memory_is_unknown) {
     CHECK(std::abs(split[1] - 0.5F) < 0.001F);
 }
 
-TEST(priority_split_favours_the_order_it_is_given) {
+TEST(priority_split_fills_the_first_card_before_touching_the_next) {
     const std::vector<ComputeDevice> gpus{
         fake_gpu(0, "slow", 8 * kGb),
         fake_gpu(1, "fast", 8 * kGb),
     };
-    // Device 1 is named first, so it must take the larger share even though
-    // the two cards are identical and device 0 comes first by index.
-    const std::vector<float> split = compute_tensor_split(GpuSplitMode::Priority, gpus, {1, 0}, 0);
+    // Device 1 is named first, and a model small enough to live there alone
+    // must not be spread at all -- that is the whole point of "priority".
+    const std::vector<float> split =
+        compute_tensor_split(GpuSplitMode::Priority, gpus, {1, 0}, 0, ModelFit{4 * kGb, 0});
     CHECK_EQ(split.size(), std::size_t{2});
-    CHECK(split[1] > split[0]);
+    CHECK(std::abs(split[1] - 1.0F) < 0.001F);
+    CHECK(std::abs(split[0]) < 0.001F);
+}
+
+TEST(priority_split_spills_only_what_the_first_card_cannot_hold) {
+    // 10 GB of usable space per card after headroom, and a 14 GB model: the
+    // first card takes what it can and the second takes the remainder. The
+    // old fixed falloff gave the first card 80% of everything regardless,
+    // which is how a model that fits across the machine failed to load.
+    const std::vector<ComputeDevice> gpus{
+        fake_gpu(0, "A", 10 * kGb),
+        fake_gpu(1, "B", 10 * kGb),
+    };
+    const std::uint64_t usable = usable_memory(gpus[0]);
+    const std::vector<float> split =
+        compute_tensor_split(GpuSplitMode::Priority, gpus, {0, 1}, 0, ModelFit{14 * kGb, 0});
+
+    CHECK_EQ(split.size(), std::size_t{2});
+    const auto expected_first = static_cast<float>(usable) / static_cast<float>(14 * kGb);
+    CHECK(std::abs(split[0] - expected_first) < 0.01F);
     CHECK(std::abs(sum_of(split) - 1.0F) < 0.001F);
+    // And the first card is never asked for more than it holds.
+    CHECK(split[0] * static_cast<float>(14 * kGb) <= static_cast<float>(usable) + 1.0F);
+}
+
+TEST(no_card_is_ever_asked_for_more_than_it_can_hold) {
+    // The bug this exists for, with the real shape of it: three cards of
+    // 12/16/12 GB, the middle one ranked first, and a 32 GB model. The fixed
+    // falloff handed the 16 GB card 76% -- 24 GB of weights -- and left 13 GB
+    // untouched on the other two.
+    const std::vector<ComputeDevice> gpus{
+        fake_gpu(0, "RTX 4070",    12 * kGb),
+        fake_gpu(1, "RTX 5060 Ti", 16 * kGb),
+        fake_gpu(2, "RTX 3060",    12 * kGb),
+    };
+    const std::uint64_t model = 32 * kGb;
+    const std::vector<float> split =
+        compute_tensor_split(GpuSplitMode::Priority, gpus, {1, 2, 0}, 0, ModelFit{model, 0});
+
+    CHECK_EQ(split.size(), std::size_t{3});
+    for (const ComputeDevice& gpu : gpus) {
+        const auto share = split[static_cast<std::size_t>(gpu.index)];
+        const auto bytes = static_cast<std::uint64_t>(share * static_cast<float>(model));
+        CHECK(bytes <= usable_memory(gpu) + kGb / 64);
+    }
+    CHECK(std::abs(sum_of(split) - 1.0F) < 0.001F);
+    // Ranked first, so it carries the most.
+    CHECK(split[1] > split[2]);
+    CHECK(split[1] > split[0]);
 }
 
 TEST(priority_split_places_unranked_devices_after_ranked_ones) {
@@ -1136,18 +1218,78 @@ TEST(priority_split_places_unranked_devices_after_ranked_ones) {
         fake_gpu(2, "C", 8 * kGb),
     };
     // Only device 2 is ranked. A GPU appearing later must never outrank one
-    // that was deliberately placed.
-    const std::vector<float> split = compute_tensor_split(GpuSplitMode::Priority, gpus, {2}, 0);
+    // that was deliberately placed, so a model that fits on one card goes
+    // entirely to device 2.
+    const std::vector<float> split =
+        compute_tensor_split(GpuSplitMode::Priority, gpus, {2}, 0, ModelFit{4 * kGb, 0});
     CHECK_EQ(split.size(), std::size_t{3});
-    CHECK(split[2] > split[0]);
-    CHECK(split[2] > split[1]);
+    CHECK(std::abs(split[2] - 1.0F) < 0.001F);
+    CHECK(std::abs(split[0]) < 0.001F);
+    CHECK(std::abs(split[1]) < 0.001F);
 }
 
 TEST(priority_split_ignores_repeats_and_devices_that_are_not_there) {
     const std::vector<ComputeDevice> gpus{fake_gpu(0, "A", 8 * kGb), fake_gpu(1, "B", 8 * kGb)};
-    // A device listed twice would otherwise take two shares of the split.
+    // A device listed twice would otherwise take two shares of the split, and
+    // device 7 is not in the machine at all.
     const std::vector<float> split =
-        compute_tensor_split(GpuSplitMode::Priority, gpus, {1, 1, 7}, 0);
+        compute_tensor_split(GpuSplitMode::Priority, gpus, {1, 1, 7}, 0, ModelFit{4 * kGb, 0});
+    CHECK_EQ(split.size(), std::size_t{2});
+    CHECK(std::abs(split[1] - 1.0F) < 0.001F);
+    CHECK(std::abs(sum_of(split) - 1.0F) < 0.001F);
+}
+
+TEST(a_bigger_model_reaches_further_down_the_priority_order) {
+    // The reason the split is computed per-model rather than per-machine: the
+    // same priority order means different things for a 1B delegator and a 30B
+    // expert, and stamping one arrangement on both would either strand the
+    // small model across three cards or refuse the large one.
+    const std::vector<ComputeDevice> gpus{
+        fake_gpu(0, "A", 12 * kGb),
+        fake_gpu(1, "B", 12 * kGb),
+        fake_gpu(2, "C", 12 * kGb),
+    };
+    const std::vector<int> order{0, 1, 2};
+
+    const std::vector<float> small =
+        compute_tensor_split(GpuSplitMode::Priority, gpus, order, 0, ModelFit{2 * kGb, 0});
+    const std::vector<float> large =
+        compute_tensor_split(GpuSplitMode::Priority, gpus, order, 0, ModelFit{25 * kGb, 0});
+
+    // The small one never leaves the first card.
+    CHECK(std::abs(small[0] - 1.0F) < 0.001F);
+    CHECK(std::abs(small[2]) < 0.001F);
+    // The large one needs all three.
+    CHECK(large[0] > 0.0F);
+    CHECK(large[1] > 0.0F);
+    CHECK(large[2] > 0.0F);
+}
+
+TEST(a_model_too_large_for_the_machine_is_divided_by_capacity) {
+    // It will not load whatever is done here, and "Dedicated VRAM only" is
+    // what turns that into a message. But piling the overflow onto one card
+    // would make the failure worse than it has to be, so the split falls back
+    // to what each card can hold.
+    const std::vector<ComputeDevice> gpus{
+        fake_gpu(0, "small", 4 * kGb),
+        fake_gpu(1, "big",  12 * kGb),
+    };
+    const std::vector<float> split =
+        compute_tensor_split(GpuSplitMode::Priority, gpus, {0, 1}, 0, ModelFit{400 * kGb, 0});
+    CHECK_EQ(split.size(), std::size_t{2});
+    CHECK(split[1] > split[0]);
+    CHECK(std::abs(sum_of(split) - 1.0F) < 0.001F);
+}
+
+TEST(priority_falls_back_to_capacity_when_the_model_size_is_unknown) {
+    // An unfilled seat, or a path that no longer resolves. Dividing by
+    // capacity at least never hands a card more than its share.
+    const std::vector<ComputeDevice> gpus{
+        fake_gpu(0, "small", 4 * kGb),
+        fake_gpu(1, "big",  12 * kGb),
+    };
+    const std::vector<float> split =
+        compute_tensor_split(GpuSplitMode::Priority, gpus, {0, 1}, 0, ModelFit{});
     CHECK_EQ(split.size(), std::size_t{2});
     CHECK(split[1] > split[0]);
     CHECK(std::abs(sum_of(split) - 1.0F) < 0.001F);
@@ -1195,6 +1337,301 @@ TEST(the_gpu_policy_leaves_a_hand_written_split_alone_in_auto_mode) {
     CHECK(apply_gpu_policy(config).empty());
     CHECK_EQ(config.defaults.tensor_split.size(), std::size_t{2});
     CHECK(std::abs(config.defaults.tensor_split[0] - 0.7F) < 0.001F);
+}
+
+// ---------------------------------------------------------------------------
+// Slash-command completion
+//
+// The menu and the grey suggestion after the cursor both come from these two
+// functions, so what they refuse to offer matters as much as what they offer.
+// ---------------------------------------------------------------------------
+
+TEST(a_lone_slash_offers_every_command) {
+    const std::vector<ui::CommandInfo> matches = ui::command_matches("/");
+    CHECK(!matches.empty());
+    CHECK(matches.size() == ui::all_commands().size());
+}
+
+TEST(typing_narrows_the_list_to_what_still_matches) {
+    const std::vector<ui::CommandInfo> matches = ui::command_matches("/re");
+    CHECK(matches.size() == 2);
+    CHECK(matches[0].name == "resume");
+    CHECK(matches[1].name == "release");
+}
+
+TEST(the_experts_are_completable_too) {
+    const std::vector<ui::CommandInfo> matches = ui::command_matches("/phy");
+    CHECK(matches.size() == 1);
+    CHECK(matches[0].name == "physics");
+    // An expert takes a prompt after it, so completing one leaves the cursor
+    // ready to type rather than up against the end of the word.
+    CHECK(ui::command_completion("/phy", matches[0]) == "sics ");
+}
+
+TEST(a_command_that_is_already_complete_is_not_suggested_back) {
+    // Offering to complete "/help" to "/help" is noise, and it would put a
+    // menu over the transcript for every finished command.
+    CHECK(ui::command_matches("/help").empty());
+}
+
+TEST(nothing_is_offered_once_the_command_is_settled) {
+    // A space means the user has moved on to the argument, and the menu gets
+    // out of the way. This is over-determined -- typed_word() bails on a space
+    // and no command name contains one, so prefix matching would reject these
+    // anyway. Kept because it is the behaviour a reader wants pinned, not
+    // because either mechanism alone is in doubt.
+    CHECK(ui::command_matches("/physics why is the sky blue").empty());
+    CHECK(ui::command_matches("/help ").empty());
+    CHECK(ui::command_matches("/re sume").empty());
+}
+
+TEST(ordinary_text_is_not_a_command) {
+    CHECK(ui::command_matches("hello").empty());
+    CHECK(ui::command_matches("").empty());
+    CHECK(ui::command_matches("what about /help").empty());
+}
+
+TEST(completion_is_case_insensitive_like_the_commands_themselves) {
+    const std::vector<ui::CommandInfo> matches = ui::command_matches("/RES");
+    CHECK(matches.size() == 1);
+    CHECK(matches[0].name == "resume");
+}
+
+TEST(completion_returns_only_what_is_missing) {
+    // The caller appends it and draws it in grey, so returning the whole
+    // command would double the part already typed.
+    const ui::CommandInfo resume{"resume", "", false};
+    CHECK(ui::command_completion("/re", resume) == "sume");
+    CHECK(ui::command_completion("/", resume) == "resume");
+    // A choice that does not match what is typed completes to nothing rather
+    // than replacing the line under the user.
+    CHECK(ui::command_completion("/xyz", resume).empty());
+}
+
+TEST(every_command_the_menu_offers_has_something_to_say_about_itself) {
+    // The summary is the whole right-hand column of the menu and of /help.
+    for (const ui::CommandInfo& command : ui::all_commands()) {
+        CHECK(!command.name.empty());
+        CHECK(!command.summary.empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GPU memory policy
+//
+// "GPU-only compute" and "Dedicated VRAM only" are settings about the machine;
+// apply_gpu_policy is what turns them into the per-model flags llama.cpp is
+// actually handed.
+// ---------------------------------------------------------------------------
+
+TEST(vram_only_is_stamped_onto_every_model) {
+    Config config;
+    config.gpu.vram_only = true;
+    apply_gpu_policy(config);
+
+    // The delegator as well as the experts: it is resident for the whole
+    // session, so it is the last model that should be allowed to sit in RAM.
+    CHECK(config.router.vram_only);
+    CHECK(config.router.direct_io);
+    CHECK(config.router.no_host);
+    CHECK(config.defaults.vram_only);
+    for (const ModelParams& expert : config.experts) {
+        CHECK(expert.vram_only);
+        CHECK(expert.direct_io);
+    }
+}
+
+TEST(the_memory_policy_is_applied_even_in_auto_split_mode) {
+    // Where the computing happens is a different question from how it is
+    // divided between cards, and "auto" is an answer to the second one only.
+    Config config;
+    config.gpu.mode      = "auto";
+    config.gpu.vram_only = true;
+    apply_gpu_policy(config);
+    CHECK(config.defaults.vram_only);
+}
+
+TEST(the_memory_policy_is_off_unless_it_is_asked_for) {
+    Config config;
+    config.gpu.vram_only = false;
+    config.gpu.gpu_only  = false;
+    apply_gpu_policy(config);
+    CHECK(!config.defaults.vram_only);
+    CHECK(!config.defaults.direct_io);
+    CHECK(!config.defaults.no_host);
+}
+
+TEST(gpu_only_forces_every_layer_onto_the_card_or_does_nothing_at_all) {
+    // On a machine with no GPU the processor is the only thing there is to
+    // compute on, so overwriting the configured layer count would be a
+    // destructive gesture with nothing to show for it.
+    Config config;
+    config.gpu.gpu_only          = true;
+    config.defaults.n_gpu_layers = 12;
+    apply_gpu_policy(config);
+
+    if (gpu_devices().empty()) {
+        CHECK(config.defaults.n_gpu_layers == 12);
+        CHECK(!config.defaults.no_host);
+    } else {
+        // -1 is llama.cpp's "every layer plus the output".
+        CHECK(config.defaults.n_gpu_layers == -1);
+        CHECK(config.defaults.no_host);
+    }
+}
+
+TEST(the_memory_settings_survive_a_round_trip_through_the_config_file) {
+    TempDir dir;
+    const std::filesystem::path file = dir.path() / "config.json";
+
+    Config written;
+    written.gpu.gpu_only  = false;
+    written.gpu.vram_only = true;
+    CHECK(save_config(written, file));
+
+    std::vector<std::string> warnings;
+    const Config read = load_config(file, warnings);
+    CHECK(!read.gpu.gpu_only);
+    CHECK(read.gpu.vram_only);
+}
+
+// ---------------------------------------------------------------------------
+// Module naming
+//
+// ggml opens a backend module by an exact file name, so BatBot's idea of what
+// one is called has to agree with ggml's own down to the character.
+// ---------------------------------------------------------------------------
+
+TEST(module_names_match_the_convention_ggml_loads_by) {
+#ifdef _WIN32
+    CHECK(module_prefix() == "ggml-");
+    CHECK(module_suffix() == ".dll");
+#else
+    // macOS is not the odd one out: CMake gives a MODULE library the .so
+    // suffix there too, which is why ggml only special-cases Windows.
+    CHECK(module_prefix() == "libggml-");
+    CHECK(module_suffix() == ".so");
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Model shape
+//
+// The GPU split and the "Dedicated VRAM only" check both need to know how much
+// room a model will want before it is loaded. Both used to guess at it; these
+// pin the arithmetic that replaced the guess.
+// ---------------------------------------------------------------------------
+
+TEST(kv_cache_grows_with_the_context_it_is_asked_for) {
+    ModelShape shape;
+    shape.known        = true;
+    shape.layers       = 32;
+    shape.kv_per_token = 1024;
+
+    CHECK_EQ(shape.kv_bytes(1000), std::uint64_t{1024 * 1000});
+    // Twice the context is twice the cache, which is the whole reason the
+    // context size is the number worth suggesting when a model will not fit.
+    CHECK_EQ(shape.kv_bytes(2000), 2 * shape.kv_bytes(1000));
+    CHECK_EQ(shape.kv_bytes(0), std::uint64_t{0});
+}
+
+TEST(a_model_with_no_readable_attention_shape_claims_no_cache) {
+    // Better to under-state a cache we could not measure than to refuse a
+    // model on the strength of a number we invented.
+    ModelShape shape;
+    shape.known = true;
+    CHECK_EQ(shape.kv_bytes(8192), std::uint64_t{0});
+}
+
+TEST(the_compute_allowance_follows_the_vocabulary_and_the_batch) {
+    // The logits buffer is the large part, and it is vocabulary times batch.
+    ModelShape small;
+    small.vocab = 32000;
+    ModelShape large;
+    large.vocab = 151936;
+
+    CHECK(large.compute_bytes(512) > small.compute_bytes(512));
+    CHECK(small.compute_bytes(1024) > small.compute_bytes(512));
+    // A batch of zero is not a reason to return nothing: there is still a
+    // graph to run.
+    CHECK(small.compute_bytes(0) > 0);
+}
+
+TEST(the_total_is_the_weights_plus_the_cache_plus_the_compute) {
+    ModelShape shape;
+    shape.known        = true;
+    shape.weights      = 8ULL * 1024 * 1024 * 1024;
+    shape.layers       = 32;
+    shape.vocab        = 32000;
+    shape.kv_per_token = 2048;
+
+    CHECK_EQ(shape.resident_bytes(4096), shape.weights + shape.kv_bytes(4096));
+    CHECK_EQ(shape.total_bytes(4096, 512),
+             shape.resident_bytes(4096) + shape.compute_bytes(512));
+    // The split divides what follows the layers; the compute buffers do not.
+    CHECK(shape.total_bytes(4096, 512) > shape.resident_bytes(4096));
+}
+
+TEST(a_file_that_is_not_a_gguf_reports_its_size_and_nothing_else) {
+    TempDir dir;
+    const std::filesystem::path file = dir.path() / "not-a-model.gguf";
+    { std::ofstream out(file); out << "this is not a model"; }
+
+    const ModelShape shape = read_model_shape(file);
+    CHECK(!shape.known);
+    CHECK(shape.weights > 0);   // the caller can still fall back on the size
+    CHECK_EQ(shape.kv_per_token, std::uint64_t{0});
+}
+
+TEST(a_missing_file_has_no_shape_at_all) {
+    TempDir dir;
+    const ModelShape shape = read_model_shape(dir.path() / "gone.gguf");
+    CHECK(!shape.known);
+    CHECK_EQ(shape.weights, std::uint64_t{0});
+}
+
+TEST(a_gguf_header_is_read_for_its_attention_shape) {
+    TempDir dir;
+    const std::filesystem::path file = dir.path() / "plain.gguf";
+    write_test_gguf(file, /*layers=*/32, /*embd=*/4096, /*heads=*/32,
+                    /*kv_heads=*/{8}, /*key_len=*/128, /*vocab=*/32000);
+
+    const ModelShape shape = read_model_shape(file);
+    CHECK(shape.known);
+    CHECK_EQ(shape.layers, std::uint32_t{32});
+    CHECK_EQ(shape.vocab, std::uint32_t{32000});
+    // 32 layers x 8 KV heads x (128 + 128) x 2 bytes.
+    CHECK_EQ(shape.kv_per_token, std::uint64_t{32} * 8 * 256 * 2);
+}
+
+TEST(a_hybrid_model_is_not_charged_for_the_layers_that_keep_no_cache) {
+    // LFM2 and friends write head_count_kv as one value per layer, with a zero
+    // for every layer that has no KV cache. Reading only the first value would
+    // over-count such a model several times over -- and reading the scalar
+    // form of the key would abort, since it is an array.
+    TempDir dir;
+    const std::filesystem::path file = dir.path() / "hybrid.gguf";
+    write_test_gguf(file, /*layers=*/4, /*embd=*/2048, /*heads=*/32,
+                    /*kv_heads=*/{0, 0, 8, 0}, /*key_len=*/64, /*vocab=*/65536);
+
+    const ModelShape shape = read_model_shape(file);
+    CHECK(shape.known);
+    CHECK_EQ(shape.layers, std::uint32_t{4});
+    // Only the third layer costs anything: 8 heads x (64 + 64) x 2 bytes.
+    CHECK_EQ(shape.kv_per_token, std::uint64_t{8} * 128 * 2);
+}
+
+TEST(a_stated_head_dimension_beats_dividing_the_embedding_by_the_heads) {
+    // qwen3next states a key length of 256 against an embedding of 2048 over
+    // 16 heads, which would derive as 128 -- half the real cache.
+    TempDir dir;
+    const std::filesystem::path file = dir.path() / "stated.gguf";
+    write_test_gguf(file, /*layers=*/48, /*embd=*/2048, /*heads=*/16,
+                    /*kv_heads=*/{2}, /*key_len=*/256, /*vocab=*/151936);
+
+    const ModelShape shape = read_model_shape(file);
+    CHECK(shape.known);
+    CHECK_EQ(shape.kv_per_token, std::uint64_t{48} * 2 * 512 * 2);
 }
 
 // ---------------------------------------------------------------------------

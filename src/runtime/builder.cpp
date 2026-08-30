@@ -100,8 +100,69 @@ bool cpu_installed() {
 /// files (libggml-cpu-haswell.so and friends) rather than one.
 bool produces_module(const std::vector<BackendKind>& produces, const std::string& filename) {
     return std::any_of(produces.begin(), produces.end(), [&filename](BackendKind kind) {
-        return filename.rfind("libggml-" + std::string(backend_info(kind).id), 0) == 0;
+        return filename.rfind(std::string(module_prefix()) + std::string(backend_info(kind).id),
+                              0) == 0;
     });
+}
+
+/// Does `filename` end in this platform's loadable-module extension?
+bool is_module_file(const std::string& filename) {
+    const std::string_view suffix = module_suffix();
+    return filename.size() > suffix.size() &&
+           filename.compare(filename.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+/// Write the CMake fragment that stops llama.cpp writing versioned shared
+/// libraries, and return its path.
+///
+/// BatBot's own build does this by calling batbot_unversion_directory() after
+/// FetchContent has added llama.cpp. This build cannot: it runs cmake on
+/// llama.cpp directly, with no BatBot CMakeLists in the picture. So the
+/// fragment goes in through CMAKE_PROJECT_INCLUDE, which cmake reads at the
+/// end of each project() call -- before any target exists, hence the deferred
+/// call, which runs once the whole tree has been processed.
+///
+/// It is written into the build directory rather than installed beside the
+/// binary: it is fifteen lines, it belongs to exactly one build, and a file
+/// the install could be missing is a failure mode this does not need.
+///
+/// Why at all: llama.cpp writes libggml-cuda.so.0.9.4 with libggml-cuda.so as
+/// a symlink beside it, and neither exFAT nor NTFS can hold a symlink. That
+/// makes the build fail outright on a machine whose home directory is on one.
+/// See cmake/BatBotUnversion.cmake.
+std::filesystem::path write_unversion_hook(const std::filesystem::path& build) {
+    const std::filesystem::path hook = build / "batbot-unversion.cmake";
+    std::ofstream out(hook);
+    if (!out) {
+        return {};
+    }
+    out << R"cmake(# Written by BatBot's runtime builder. See src/runtime/builder.cpp.
+function(batbot_unversion_directory dir)
+    get_property(_targets DIRECTORY "${dir}" PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(_target IN LISTS _targets)
+        get_target_property(_type ${_target} TYPE)
+        if(_type STREQUAL "SHARED_LIBRARY" OR _type STREQUAL "MODULE_LIBRARY")
+            set_property(TARGET ${_target} PROPERTY VERSION)
+            set_property(TARGET ${_target} PROPERTY SOVERSION)
+            set_property(TARGET ${_target} PROPERTY MACHO_CURRENT_VERSION)
+            set_property(TARGET ${_target} PROPERTY MACHO_COMPATIBILITY_VERSION)
+        endif()
+    endforeach()
+    get_property(_subdirs DIRECTORY "${dir}" PROPERTY SUBDIRECTORIES)
+    foreach(_subdir IN LISTS _subdirs)
+        batbot_unversion_directory("${_subdir}")
+    endforeach()
+endfunction()
+
+# This file is included once per project() call; only the first one arranges
+# the sweep, and it is deferred so that every target exists by the time it runs.
+if(NOT DEFINED BATBOT_UNVERSION_DEFERRED)
+    set(BATBOT_UNVERSION_DEFERRED ON)
+    cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}"
+                   CALL batbot_unversion_directory "${CMAKE_SOURCE_DIR}")
+endif()
+)cmake";
+    return out ? hook : std::filesystem::path{};
 }
 
 }  // namespace
@@ -347,6 +408,8 @@ void RuntimeBuilder::run(BackendKind kind) {
     std::error_code ec;
     std::filesystem::create_directories(build, ec);
 
+    const std::filesystem::path unversion = write_unversion_hook(build);
+
     // What this build will produce. Usually just the backend that was asked
     // for -- but llama.cpp cannot load a model without the CPU backend even
     // when every layer is going to a GPU, so a first CUDA install on a machine
@@ -376,6 +439,9 @@ void RuntimeBuilder::run(BackendKind kind) {
             "-DLLAMA_BUILD_COMMON=OFF",
             "-DLLAMA_CURL=OFF",
         };
+        if (!unversion.empty()) {
+            configure.emplace_back("-DCMAKE_PROJECT_INCLUDE=" + unversion.string());
+        }
         if (kind == BackendKind::Cpu || with_cpu) {
             // One module per x86-64 feature level, scored at load time. This
             // is the only way to build the CPU backend in DL mode: GGML_NATIVE
@@ -407,6 +473,8 @@ void RuntimeBuilder::run(BackendKind kind) {
                 set_phase(BuildProgress::Phase::Configuring, "clearing a stale build directory");
                 std::filesystem::remove_all(build, retry_ec);
                 std::filesystem::create_directories(build, retry_ec);
+                // The hook went with the directory.
+                write_unversion_hook(build);
                 {
                     const std::lock_guard<std::mutex> lock(mutex_);
                     log_.clear();
@@ -464,10 +532,12 @@ void RuntimeBuilder::run(BackendKind kind) {
         if (!produces_module(produces, name)) {
             continue;
         }
-        // copy_file follows the versioned symlinks, so each alias becomes a
-        // real file. That is wasteful for a 400 MB CUDA module, so only the
-        // module itself is taken -- ggml opens it by that exact name.
-        if (entry.path().extension() != ".so") {
+        // ggml opens a module by an exact file name, so only the module
+        // itself is wanted. Anything else the build left in bin/ -- an import
+        // library, a debug file, an alias from an older llama.cpp that still
+        // versioned its libraries -- would just be a copy of it under another
+        // name, which for a 400 MB CUDA module is worth not making.
+        if (!is_module_file(name)) {
             continue;
         }
 

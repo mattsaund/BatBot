@@ -57,8 +57,24 @@ setup() {
     # The installed layout: the binary in bin/ and llama.cpp's shared
     # libraries in lib/batbot/. The binary is not the whole program any more,
     # and uninstall has to know that.
+    #
+    # These have to be the real libraries, not stand-ins. A loadable build
+    # resolves libllama.so through an RPATH of $ORIGIN/../lib/batbot, so a
+    # sandbox holding a zero-filled file of that name gives a binary that
+    # cannot start -- and every check then reads "nothing was removed", which
+    # looks exactly like an uninstaller that does nothing.
     mkdir -p "$root/lib/batbot/runtimes"
-    head -c 262144 /dev/zero > "$root/lib/batbot/libllama.so"
+    local built=0
+    for lib in "$(dirname "$BATBOT")"/lib*.so; do
+        [ -e "$lib" ] || continue
+        cp "$lib" "$root/lib/batbot/"
+        built=1
+    done
+    if [ "$built" = 0 ]; then
+        # A monolithic build has no shared libraries at all; the file only has
+        # to exist for the "libraries removed" check to mean something.
+        head -c 262144 /dev/zero > "$root/lib/batbot/libllama.so"
+    fi
     head -c 262144 /dev/zero > "$root/lib/batbot/runtimes/libggml-cpu-haswell.so"
     # A GPU runtime the user built, plus the source and build tree behind it.
     mkdir -p "$root/dat/batbot/runtimes" "$root/dat/batbot/runtime-src" \
@@ -144,7 +160,11 @@ echo "  a bare install with nothing to remove does not fail"
 ROOT="$SANDBOX/bare"
 mkdir -p "$ROOT/bin" "$ROOT/cfg" "$ROOT/dat"
 cp "$BATBOT" "$ROOT/bin/batbot"
+# XDG_CACHE_HOME as well, for the same reason as run_uninstall above: the
+# uninstaller removes the build cache, and an unsandboxed run of this test
+# would remove the real one belonging to whoever is running the suite.
 printf 'n\n' | XDG_CONFIG_HOME="$ROOT/cfg" XDG_DATA_HOME="$ROOT/dat" \
+    XDG_CACHE_HOME="$ROOT/cache" \
     "$ROOT/bin/batbot" --uninstall >/dev/null 2>&1
 check "exit code"             "$?"                                       "0"
 

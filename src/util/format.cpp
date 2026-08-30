@@ -46,3 +46,20 @@ std::string bytes(std::uintmax_t count) {
 }
 
 }  // namespace batbot::format
+
+namespace batbot::format {
+
+std::string short_path(const std::filesystem::path& path) {
+    const char* home = std::getenv("HOME");
+    if (home == nullptr || *home == '\0') {
+        return path.string();
+    }
+    const std::string text(path.string());
+    const std::string prefix(home);
+    if (text.rfind(prefix, 0) == 0 && text.size() > prefix.size()) {
+        return "~" + text.substr(prefix.size());
+    }
+    return text;
+}
+
+}  // namespace batbot::format

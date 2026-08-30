@@ -44,23 +44,6 @@ std::pair<std::string, Color> state_of(const RuntimeStatus& runtime, bool highli
     return {"not installed", meta_color(highlighted)};
 }
 
-/// A path with the home directory written as `~`.
-///
-/// The runtimes directory is four levels below $HOME, and spelling it out in
-/// full pushed the panel title off its own header on any normal terminal.
-std::string short_path(const std::filesystem::path& path) {
-    const char* home = std::getenv("HOME");
-    if (home == nullptr || *home == '\0') {
-        return path.string();
-    }
-    const std::string text(path.string());
-    const std::string prefix(home);
-    if (text.rfind(prefix, 0) == 0 && text.size() > prefix.size()) {
-        return "~" + text.substr(prefix.size());
-    }
-    return text;
-}
-
 /// Is the CPU runtime installed? Duplicated from the builder rather than
 /// shared, because here it is a question about what to tell the user and there
 /// it is a question about what to compile.
@@ -201,7 +184,7 @@ RuntimeAction RuntimeView::handle(const Event& event) {
 
     if (event == Event::Character('r')) {
         refresh();
-        status_ = "rescanned " + short_path(paths::runtimes_dir());
+        status_ = "rescanned " + format::short_path(paths::runtimes_dir());
         return RuntimeAction::Notify;
     }
 
@@ -365,7 +348,8 @@ Element RuntimeView::render() const {
             // Pinned: without a fixed width FTXUI shrinks both children when
             // the path is long, and the first thing to go is the title.
             text(" runtimes ") | bold | color(theme::kBat) | size(WIDTH, EQUAL, 10),
-            text("· " + short_path(paths::runtimes_dir())) | color(theme::kMeta),
+            text("· " + format::short_path(paths::runtimes_dir())) | color(theme::kMeta)
+                | flex_shrink,
         }),
         separator(),
     };

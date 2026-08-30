@@ -50,6 +50,10 @@ enum class GpuSplitMode {
     /// Fill the GPUs in a stated order, spilling into the next only when the
     /// previous is full. Keeps a model whole on the fastest card when it fits,
     /// and leaves the others free for something else.
+    ///
+    /// This one needs to know how big the model is: "fill the first card"
+    /// means nothing until there is something to fill it with. See
+    /// compute_tensor_split.
     Priority,
     /// Everything on one device, named by `main_gpu`.
     Single,
@@ -69,15 +73,47 @@ GpuSplitMode     gpu_split_mode_from_id(std::string_view id);
 std::vector<ComputeDevice> apply_priority_order(const std::vector<ComputeDevice>& gpus,
                                                 const std::vector<int>& order);
 
+/// What a model will want from the cards, split into the part that is divided
+/// between them and the part every one of them needs.
+///
+/// The distinction matters for filling in order. Weights and KV cache follow
+/// the layers, so they are what gets divided; the compute buffers do not --
+/// each card needs its own regardless of how little of the model it holds. A
+/// card filled to its last byte with weights has nowhere to put them and fails
+/// to allocate, which is why `per_card` is subtracted from every card's
+/// capacity before anything is placed.
+///
+/// Both come from the model's own header, so this is arithmetic rather than a
+/// margin someone guessed at. See llm/model_shape.hpp.
+struct ModelFit {
+    std::uint64_t resident = 0;  ///< weights + KV cache, divided between cards
+    std::uint64_t per_card = 0;  ///< compute buffers, needed on each card
+};
+
+/// The bytes of `gpu` a model's weights may be given, after `reserve` is set
+/// aside for that card's compute buffers.
+///
+/// Free memory rather than total: a card with a desktop compositor or another
+/// model on it has less to offer than its spec sheet says, and the whole point
+/// of filling in order is to know when a card is full.
+std::uint64_t usable_memory(const ComputeDevice& gpu, std::uint64_t reserve = 0);
+
 /// Turn a split mode into the `tensor_split` vector llama.cpp wants: one
 /// weight per device, in ggml index order, summing to 1.
 ///
 /// `order` lists device indices best-first and is only read in Priority mode.
 /// An empty result means "no opinion", which llama.cpp reads as its default.
+///
+/// `fit` describes the model this split is for, and only Priority mode reads
+/// it -- filling cards in order is not expressible as a proportion until you
+/// know how much there is to spread. A zero `resident` means "not known", and
+/// Priority then falls back to dividing by capacity, which at least never
+/// hands a card more than it can hold.
 std::vector<float> compute_tensor_split(GpuSplitMode mode,
                                         const std::vector<ComputeDevice>& gpus,
                                         const std::vector<int>& order,
-                                        int main_gpu);
+                                        int main_gpu,
+                                        ModelFit fit = {});
 
 /// A one-line explanation of what a split will actually do, for the settings
 /// screen -- "RTX 4070 62%, RTX 3060 38%".

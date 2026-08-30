@@ -18,46 +18,14 @@ set(BATBOT_FTXUI_TAG v7.0.3     CACHE STRING "FTXUI git tag to build against")
 set(BATBOT_JSON_TAG  v3.12.0    CACHE STRING "nlohmann/json git tag to build against")
 
 # ---------------------------------------------------------------------------
-# Symlink capability
+# Symlink-free shared libraries
 #
-# Shared libraries carry a version suffix (libggml-base.so.0.9.4) and are
-# reached through a symlink (libggml-base.so), so a build tree on a filesystem
-# without symlinks fails at link time with "Operation not permitted". exFAT and
-# NTFS volumes both do this, and BatBot checkouts do live on them -- an
-# external drive shared with a Windows install is an ordinary place to keep a
-# project. Detect it here and say so plainly, rather than letting the user
-# decode a linker error a thousand lines into the build log.
+# See cmake/BatBotUnversion.cmake. In short: llama.cpp's shared objects would
+# normally be written as libggml-base.so.0.9.4 plus a libggml-base.so symlink,
+# and a build tree on exFAT or NTFS cannot hold the symlink. BatBot strips the
+# versioning instead, so the build works on any filesystem on any platform.
 # ---------------------------------------------------------------------------
-function(batbot_check_symlinks out_var)
-    set(_probe "${CMAKE_CURRENT_BINARY_DIR}/batbot-symlink-probe")
-    file(WRITE "${_probe}.target" "probe")
-    file(REMOVE "${_probe}.link")
-    file(CREATE_LINK "${_probe}.target" "${_probe}.link" SYMBOLIC RESULT _status)
-    file(REMOVE "${_probe}.target" "${_probe}.link")
-    if(_status EQUAL 0)
-        set(${out_var} TRUE PARENT_SCOPE)
-    else()
-        set(${out_var} FALSE PARENT_SCOPE)
-    endif()
-endfunction()
-
-batbot_check_symlinks(BATBOT_FS_HAS_SYMLINKS)
-
-if(BATBOT_BACKEND_DL AND NOT BATBOT_FS_HAS_SYMLINKS)
-    message(FATAL_ERROR
-        "\n"
-        "  This build directory is on a filesystem without symlink support\n"
-        "  (exFAT and NTFS both behave this way):\n"
-        "      ${CMAKE_BINARY_DIR}\n"
-        "\n"
-        "  Loadable GPU runtimes are shared libraries, which need symlinks.\n"
-        "  Build somewhere else and keep the sources where they are:\n"
-        "      cmake -S ${CMAKE_SOURCE_DIR} -B ~/.cache/batbot/build\n"
-        "\n"
-        "  install.sh does this automatically. To build here anyway with the\n"
-        "  backend compiled in and no runtime switching, add:\n"
-        "      -DBATBOT_BACKEND_DL=OFF\n")
-endif()
+include(${CMAKE_CURRENT_LIST_DIR}/BatBotUnversion.cmake)
 
 # ---------------------------------------------------------------------------
 # FTXUI and nlohmann/json are always static: they are BatBot's own code as far
@@ -157,6 +125,11 @@ FetchContent_Declare(llama
     GIT_PROGRESS   TRUE)
 
 FetchContent_MakeAvailable(llama)
+
+# llama, ggml, ggml-base and every backend module, stripped of their version
+# suffixes. Safe in the monolithic build too, where all of them are static
+# archives and there is nothing to strip.
+batbot_unversion_directory("${llama_SOURCE_DIR}")
 
 # ---------------------------------------------------------------------------
 # Treat every dependency's headers as system headers, so BatBot can keep a

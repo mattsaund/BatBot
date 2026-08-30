@@ -11,20 +11,14 @@
 #include "batbot/util/format.hpp"
 
 namespace batbot {
-namespace {
 
-/// Priority mode's weights.
-///
-/// llama.cpp reads tensor_split as proportions, not as "fill this one first",
-/// so a true fill-in-order is not expressible. What is expressible is a steep
-/// enough bias that the first device takes nearly everything it can hold and
-/// the rest take the remainder -- which is the behaviour people actually want
-/// from "priority". Each subsequent device gets a quarter of the weight of the
-/// one before it, floored by its own capacity so a small card is never handed
-/// more than it can fit.
-constexpr float kPriorityFalloff = 0.25F;
-
-}  // namespace
+std::uint64_t usable_memory(const ComputeDevice& gpu, std::uint64_t reserve) {
+    // Free when the backend reports it, total when it does not. A backend that
+    // reports neither gets nothing, and the caller falls back to an equal
+    // share rather than dividing by zero.
+    const std::uint64_t bytes = gpu.memory_free > 0 ? gpu.memory_free : gpu.memory_total;
+    return bytes > reserve ? bytes - reserve : 0;
+}
 
 std::string ComputeDevice::label() const {
     std::string text = description.empty() ? name : description;
@@ -131,7 +125,8 @@ std::vector<ComputeDevice> apply_priority_order(const std::vector<ComputeDevice>
 std::vector<float> compute_tensor_split(GpuSplitMode mode,
                                         const std::vector<ComputeDevice>& gpus,
                                         const std::vector<int>& order,
-                                        int main_gpu) {
+                                        int main_gpu,
+                                        ModelFit fit) {
     // With one GPU there is nothing to divide, and an explicit split would
     // only be a way to get it wrong.
     if (gpus.size() < 2 || mode == GpuSplitMode::Auto) {
@@ -168,30 +163,47 @@ std::vector<float> compute_tensor_split(GpuSplitMode mode,
                 have_memory ? static_cast<float>(gpu.memory_total) : 1.0F;
         }
     } else {
-        // Priority: walk the stated order, giving each device a fraction of
-        // what the one before it got. Devices the user did not rank come last,
-        // in ggml order, so a new GPU appearing never silently outranks one
-        // that was deliberately placed.
-        std::vector<int> ranked;
-        for (const int index : order) {
-            const bool known = std::any_of(gpus.begin(), gpus.end(), [index](const ComputeDevice& gpu) {
-                return gpu.index == index;
-            });
-            const bool already = std::find(ranked.begin(), ranked.end(), index) != ranked.end();
-            if (known && !already) {
-                ranked.push_back(index);
-            }
-        }
-        for (const ComputeDevice& gpu : gpus) {
-            if (std::find(ranked.begin(), ranked.end(), gpu.index) == ranked.end()) {
-                ranked.push_back(gpu.index);
+        // Priority: fill each card in the stated order up to what it can
+        // actually hold, and give the next card only what is left over. That
+        // is what "priority" means, and it is the one arrangement that keeps a
+        // model whole on the fastest card when it fits there.
+        //
+        // This used to be a fixed geometric falloff -- 1, 0.25, 0.0625 -- which
+        // took no account of how large the cards were or how large the model
+        // was. On a 12/16/12 GB machine it asked the first-ranked card for 76%
+        // of every model, so a 32 GB model was handed 24 GB of weights for a
+        // 16 GB card and failed to allocate, with 13 GB left untouched on the
+        // other two. A proportion that ignores capacity is not a priority
+        // order; it is a fixed ratio wearing one as a hat.
+        // The order itself comes from apply_priority_order, which is the same
+        // rule the GPU priority screen lays its list out with -- a card the
+        // config names that is no longer plugged in is dropped, one that has
+        // appeared since lands at the end.
+        const std::vector<ComputeDevice> ranked = apply_priority_order(gpus, order);
+
+        std::uint64_t remaining = fit.resident;
+        const bool    filled    = fit.resident > 0;
+        if (filled) {
+            for (const ComputeDevice& gpu : ranked) {
+                const std::uint64_t take = std::min(usable_memory(gpu, fit.per_card), remaining);
+                split[static_cast<std::size_t>(gpu.index)] = static_cast<float>(take);
+                remaining -= take;
             }
         }
 
-        float weight = 1.0F;
-        for (const int index : ranked) {
-            split[static_cast<std::size_t>(index)] = weight;
-            weight *= kPriorityFalloff;
+        // Either the size is unknown, or the model does not fit in the cards at
+        // all. Divide by capacity: it will not load either way, but a split
+        // proportional to what each card holds is the arrangement that gets
+        // closest, and it never hands a card more than the others.
+        //
+        // When it does not fit, "Dedicated VRAM only" is what turns this into
+        // a message instead of a driver spilling into system RAM.
+        if (!filled || remaining > 0) {
+            for (const ComputeDevice& gpu : ranked) {
+                const std::uint64_t capacity = usable_memory(gpu, fit.per_card);
+                split[static_cast<std::size_t>(gpu.index)] =
+                    capacity > 0 ? static_cast<float>(capacity) : 1.0F;
+            }
         }
     }
 
