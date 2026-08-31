@@ -27,6 +27,25 @@
 
 namespace batbot {
 
+/// Which CUDA architectures a build should target, given the compute
+/// capabilities `present` in the machine and the ones `targetable` by the
+/// installed nvcc. Both are written the way CMake writes them: 8.9 is 89.
+///
+/// Real code for every card that is there, and PTX for one architecture on top
+/// -- the newest the compiler knows, so a card too new for the toolkit (a
+/// Blackwell card against CUDA 12.0, say) is compiled by the driver at first
+/// use, and so is a card added after the build. Returns an empty string when
+/// either list is empty, and the build then falls back to llama.cpp's defaults.
+///
+/// Left to itself llama.cpp targets eight architectures, five of them for cards
+/// going back to Maxwell. Each is a full pass of nvcc over 142 files: on a
+/// six-core machine with an Ampere, an Ada and a Blackwell card that is sixteen
+/// minutes and a 527 MB module. Targeting the three that matter is ten minutes
+/// and 309 MB.
+std::string cuda_architectures(const std::vector<int>& present,
+                               const std::vector<int>& targetable);
+
+
 /// Where a build has got to. Copied under a lock for each frame.
 struct BuildProgress {
     enum class Phase {

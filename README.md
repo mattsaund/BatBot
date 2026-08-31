@@ -1,17 +1,3 @@
-```
-   /\           /\
-  /  \_________/  \      BatBot
- |   ___________   |     a local roundtable of experts
- |  |           |  |
- |  |  o     o  |  |
- |  |    \_/    |  |
- |  |___________|  |
- |_________________|
-       |   |
-      /|___|\
-        | |
-```
-
 **A CLI LLM tool that delegates to an entire team of agents.**
 
 `cd` into a project, then type `batbot`. BatBot is the delegator model. It
@@ -47,17 +33,47 @@ Each seat is one GGUF file trained (or fine-tuned) on that subject alone.
 the `Fallback` model is for the rare situations that the delegator model fails to choose
 an expert. Having a `Fallback` model allows for there to never **not** be a response
 
-## Markers
+It is not a tenth subject, and the table says so: it sits at the bottom of the
+list, under the nine, where the thing that catches what the others did not
+belongs.
 
-At the table, a seat reads:
+## The table
+
+BatBot on the left with a dot of his own, the experts in a column beside him
+with a dot each, and a line joining his dot to whichever seat the delegation
+chose:
+
+```
+                                 ◇ Mathematics
+                                 ◇ Programming
+   /\           /\                ◇ Physics
+  /  \_________/  \   BatBot      ◇ Chemistry
+ |   ___________   |        ◇───┐  ◇ Biology
+ |  |  ●     ●  |  |            │  ◇ Engineering
+ |  |     ‿     |  |            └──◴ Philosophy 70%
+ |  |___________|  |              ◇ Sociology
+ |_________________|              ◇ Language
+                                  ◇ Fallback
+```
 
 | marker | meaning |
 |---|---|
 | `·` | no model assigned to this subject |
 | `✗` | a model is assigned but the file is missing |
-| `◇` | assigned, on disk, not loaded |
+| `◇` | assigned, on disk, waiting |
 | `◴` | loading right now (with a percentage) |
-| `◆` | resident and answering |
+| `◆` | this turn is being answered here |
+
+BatBot carries the same diamond the seats do, and the line meets both of them at
+a vertex rather than stopping short in the gap.
+
+**The dots say what is happening, not what is in memory.** A seat lights up when
+it is given the turn and goes dark when the answer is finished; which weights
+are still resident is a separate fact, and the status bar is where it is
+reported. BatBot's own dot is lit exactly when the delegator is loaded and
+waiting to route — which, with **Keep delegator loaded** off, is not most of the
+time, and watching it go dark as it hands over is the clearest picture of what
+that setting does.
 
 ---
 
@@ -182,10 +198,10 @@ It does mean **no model will load until you install one**. BatBot says so
 rather than failing obscurely:
 
 ```
-no runtime installed -- press ctrl-e, open Runtimes, and install one
+no runtime installed -- type /runtimes and install one
 ```
 
-Open the panel with `/runtimes`, or `ctrl-e` → **HARDWARE** → **Runtimes**:
+Open the panel with `/runtimes`, or `/settings` → **HARDWARE** → **Runtimes**:
 
 ```
  runtimes · ~/.local/share/batbot/runtimes
@@ -244,6 +260,20 @@ the exact command:
 
 That check happens before the build starts, not ten minutes into it.
 
+**A runtime is built for the cards you have.** Left to itself llama.cpp compiles
+the CUDA backend for eight architectures — five of them as PTX for cards going
+back to Maxwell — and every one is a full pass of nvcc over 142 source files.
+BatBot asks the driver which cards are actually in the machine and asks nvcc
+which of them it can target, and compiles real code for exactly those, plus PTX
+for one architecture on top so a card too new for the toolkit (or one added
+later) is compiled by the driver at first use. On a six-core machine with an
+Ampere, an Ada and a Blackwell card that is the difference between sixteen
+minutes and a 527 MB module, and ten minutes and a 309 MB one.
+
+If either question cannot be answered — no `nvidia-smi`, or an nvcc that does
+not list its architectures — the build falls back to llama.cpp's defaults. A
+slow build is a far better failure than a module the machine cannot run.
+
 ### Multiple GPUs
 
 With more than one card, **HARDWARE → Multi-GPU split** decides how one expert
@@ -261,7 +291,7 @@ an 8 GB one. Splitting evenly by count would fill the small card first and fail
 a model that would otherwise have fitted.
 
 `priority` reads **GPU priority order**, which is a screen of its own rather
-than a list of numbers to type. `ctrl-e` → **HARDWARE** → **GPU priority
+than a list of numbers to type. `/settings` → **HARDWARE** → **GPU priority
 order** lists the cards in the order they will be filled:
 
 ```
@@ -285,30 +315,43 @@ machine. On a 12/16/12 GB set of cards with the 16 GB one ranked first, a 32 GB
 model lands like this:
 
 ```
-RTX 5060 Ti   43%    13.9 GB of 13.9 GB usable
-RTX 3060      33%    10.5 GB of 10.5 GB usable
-RTX 4070      24%     7.7 GB of 10.4 GB usable
+GPU split (priority): qwen3-coder-next-56b-REAP-Q4_K_M.gguf --
+  NVIDIA GeForce RTX 4070 12/49 layers,
+  NVIDIA GeForce RTX 5060 Ti 23/49 layers,
+  NVIDIA GeForce RTX 3060 14/49 layers
 ```
+
+**Layers, because llama.cpp places layers.** `tensor_split` is a list of
+proportions, but llama.cpp turns it into cumulative fractions and sends layer
+*i* to the first card whose fraction exceeds `i / n` — so a plan expressed in
+bytes lands on whichever whole layer is nearest, and on a 48-layer 32 GB model
+that is a 680 MB step. Asking a card for 8.2 GB and having it take 8.9 is how a
+model that fits fails at the last allocation with the whole thing already
+uploaded. BatBot reads the size of every layer out of the GGUF, works out how
+many each card can hold, and then builds the `tensor_split` that produces
+exactly those counts.
 
 This is per-model, not per-machine: a 1B delegator and a 30B expert get
 different splits from the same priority order, because how far down the order a
 model reaches depends on how big it is.
 
-Each card keeps back enough for its own compute buffers before anything is
-placed on it — a card filled to its last byte with weights has nowhere to put
-them and fails to allocate. That reserve is the model's own figure, read from
-its header, not a percentage someone picked.
+Each card keeps back enough for its own compute buffers and a little headroom
+before anything is placed on it — a card filled to its last byte with weights
+has nowhere to put them and fails to allocate. Most of that reserve is the
+model's own figure, read from its header.
 
-One limit worth knowing: the split is worked out from the memory free when the
-config is applied, and the delegator loads after that. On a machine where the
-largest expert only just fits, the delegator's couple of gigabytes are not
-accounted for in the expert's arrangement. The reserve usually absorbs it; if
-it does not, `/release` frees the resident expert and the next load is
-recalculated against what is actually free.
+**The plan is made at the moment of loading**, not when the config was applied.
+Between those two points the delegator is loaded and the desktop does whatever
+it does with the display card, and a plan made from the older numbers hands a
+card memory that is no longer there. So every load re-reads the free memory and
+re-plans against it.
 
 Only backends that can address several devices are affected — CUDA and Vulkan
-can, CPU cannot. The delegator is never split: it is small, and spreading a 1B
-model across three cards costs more in transfers than it saves in memory.
+can, CPU cannot. **The delegator is never split.** It goes on one card — the
+last in the priority order, the one experts reach last — because spreading a 1B
+model across three cards costs more in transfers than it saves in memory, and
+because a delegator with a foot on every card takes a bite out of exactly the
+memory a large expert needs to be whole in.
 
 ### Keeping the work on the GPU
 
@@ -356,26 +399,31 @@ nothing on screen to say why. On, BatBot checks the free video memory before
 allocating anything and says so instead:
 
 ```
-qwen3-coder-next-56b-REAP-Q4_K_M.gguf needs about 40.1 GB of video memory but
-only 34.8 GB is free on NVIDIA GeForce RTX 4070 + NVIDIA GeForce RTX 5060 Ti +
-NVIDIA GeForce RTX 3060 -- close something using the GPU, lower the context
-size, or turn off "Dedicated VRAM only" in settings
+qwen3-coder-next-56b-REAP-Q4_K_M.gguf needs about 32.7 GB of video memory
+(31.9 GB of weights plus 192.0 MB of context at 8192 tokens) but only 24.1 GB
+is free on NVIDIA GeForce RTX 4070 + NVIDIA GeForce RTX 3060 -- the delegator is
+holding 1.2 GB of that. Lower the context size, put a smaller model in the
+delegator seat, or turn off "Dedicated VRAM only" in settings
 ```
 
 The figure is read from the model, not guessed at. GGUF keeps its metadata at
-the front of the file, so BatBot reads the layer count and attention shape —
-about 50 ms even for a 34 GB model — and works out the cache exactly:
+the front of the file — every tensor's name, shape and type — so BatBot reads
+it in about 50 ms even for a 34 GB model and works the footprint out exactly:
 
 ```
-weights      32.1 GB     the file
-kv @ 8192   768.0 MB     48 layers x 2 KV heads x 512 x 2 bytes x 8192 tokens
-compute     552.8 MB     mostly the logits: 151936 vocab x 512 batch x 4 bytes
-TOTAL        33.4 GB
+weights      31.9 GB     every tensor except the input embedding
+host        166.9 MB     the input embedding, which llama.cpp never offloads
+kv @ 8192   192.0 MB     12 attending blocks x 1024 cached values x 2 bytes x 8192
+state        75.4 MB     the recurrent state of the 36 blocks that do not attend
+compute     809.8 MB     512 MB of activations per card, plus the logits on one
+TOTAL        33.1 GB
 ```
 
-Hybrid architectures are handled properly: a model that writes `head_count_kv`
-as one value per layer, with zeros for the layers that keep no cache at all, is
-charged only for the layers that do.
+Reading the tensors rather than the hyperparameters is what makes those numbers
+right for a hybrid model. `qwen3next` states two KV heads and 48 blocks, which
+would come to 768 MB of cache — but only every fourth block carries a K and V
+projection at all, and the other 36 keep a small fixed-size recurrent state
+instead. The tensor table says which is which; the header does not.
 
 It also switches the load to direct I/O, so the weights go from disk to the card
 without passing through the operating system's page cache — which would
@@ -480,7 +528,7 @@ so moving models around never means editing paths:
 ```
 
 The folder can live anywhere — an external drive, a NAS mount, a shared
-partition. Pick it in the app with **`ctrl-e` → Models directory → Enter**, which
+partition. Pick it in the app with **`/settings` → Models directory → Enter**, which
 opens a browser showing how many GGUFs sit in each candidate folder:
 
 ```
@@ -548,11 +596,15 @@ longer exists is wrong on disk from that moment whatever you do next.
 
 ### Configure it in the app
 
-Press **`ctrl-e`** (or type `/config`). Everything in the config file is
+Type **`/settings`**. Everything in the config file is
 editable there: choose the models directory with a browser, pick a model for
 each expert seat and for the delegator from whatever is in it, and tune sampling.
-**`ctrl-s`** saves and applies it to the running session — no restart, and the
-expert reloads on the next prompt.
+
+**Changes save themselves.** Every committed edit — a toggled setting, a picked
+model, a typed value that parsed — is written to disk and handed to the running
+session before the next key is read. There is no save key to remember and no
+unsaved state to lose. It applies without a restart, and the expert reloads on
+the next prompt.
 
 ```
 ╭ Settings ──────────────────────────────────────────────────────╮
@@ -611,20 +663,81 @@ treated as having made no decision, and the prompt goes to `Fallback` instead of
 committing to a subject on a coin flip. Set it to `0` to take every answer at
 face value.
 
-How much this fires depends entirely on the delegator. LFM2-1.2B reports 0.95 on
-most prompts including the ones it gets wrong, so the floor rarely triggers for
-it — the reliable path there is the empty-seat fallback. A better-calibrated
-router would get more out of it.
+The confidence is a real number now, so the floor does real work. It is the
+delegator's own probability for the subject it picked, measured against the
+other eight. On the 54-prompt benchmark with LFM2.5-1.2B the answers it gets
+right average 0.93 and the ones it gets wrong average 0.64, and the default
+floor of 0.60 sends five of the fifty-four to `Fallback` — three of which were
+wrong.
+
+### Where the delegator lives
+
+The delegator is loaded once and stays, which is why it has to be small: its
+footprint is spent for the whole session, on the same cards the expert wants.
+
+**Keep delegator loaded** (settings → ROUTING) turns that off, and exactly one
+model is then resident at any moment:
+
+```
+prompt → delegator loads → routes → delegator freed
+       → expert loads → answers → expert freed
+       → delegator loads again, ready for the next prompt
+```
+
+The peak is the larger of the two rather than the sum, which is what makes room
+for a delegator big enough to route well. The next prompt is routed the instant
+it arrives, because the delegator was put back while nothing was happening.
+
+What it costs: a load per model per prompt, so a follow-up question reloads the
+expert. A prompt pinned with a slash command skips the delegator entirely and
+pays only for the expert. With **Dedicated VRAM only** on, models are read with
+direct I/O and so come from the disk every time rather than from the page
+cache — worth knowing before putting a large model in the delegator seat.
 
 ### The delegator
 
 The delegator never answers you; it only names a subject. It stays resident for
 the whole session, so it wants to be small — around 1B parameters.
 
-One that works well: [LFM2-1.2B](https://huggingface.co/LiquidAI/LFM2-1.2B-GGUF)
-at Q8_0 (~1.2 GB). It scores 63% on BatBot's routing benchmark against 42% for a
-0.5B model, and routes in about a second on CPU. You fetch it yourself — BatBot
-does not download models.
+One that works well:
+[LFM2.5-1.2B](https://huggingface.co/LiquidAI/LFM2.5-1.2B-GGUF) at Q8_0
+(~1.2 GB). It scores 93% on BatBot's routing benchmark and routes in about
+120 ms on a GPU. A 20B delegator scores 91% and takes 440 ms -- worth knowing
+before assuming a bigger one routes better. You fetch it yourself — BatBot does not download models.
+
+**It does not generate an answer; it scores the nine subjects.** The prompt is
+evaluated once, then each subject name is measured as a continuation of that
+same state and the best one wins. Naming a subject that does not exist is not
+unlikely, it is impossible — there is nowhere for it to come from. And because
+the nine are compared against each other, what comes back is a probability
+rather than a number the model was asked to make up.
+
+**It has to be asked where its answer would go.** Scoring a label means asking
+how likely the model is to write it *next*, and for most chat formats the
+assistant's turn begins with the answer. For a reasoning format it does not:
+harmony opens the turn with a channel marker, so `<|start|>assistant` is
+followed by `<|channel|>` and never by a word. Nine subject names compared at
+that position are nine things that all essentially cannot happen, and the
+ranking between them is tokenisation noise. gpt-oss-20b as a delegator scored
+**13%** that way -- the 11% that guessing gives -- and put 52 of 54 prompts in
+one seat. With the header completed it scores **91%**.
+
+Three more details, worth a great deal between them:
+
+* **It answers with the subject's name, not a code.** Asking for `PHIL` or
+  `PHYS` gets 48%; asking for `Philosophy` or `Physics` gets 87%. The tags are
+  not words. A delegator choosing between `PHIL` and `PHYS` is comparing two
+  spellings that share a first token, and every philosophy question in the set
+  went to physics. The tags stay in the prompt, where they help; they are just
+  not what the answer is.
+* **The scores are calibrated against nothing.** A small model reading nine
+  choices does not start from an even prior — it leans on whatever came first
+  in the list, hard enough to swallow six questions in nineteen. So BatBot asks
+  it the same question with no question in it, once at startup, and subtracts
+  half of that lean from every answer. What is left is what the question itself
+  moved. It is worth 11 points (76% to 87%), and the amount subtracted sits on
+  a broad plateau rather than a spike: anything from 0.3 to 0.6 lands within
+  two points.
 
 With no delegator configured, BatBot falls back to keyword routing, so the app
 still works — and on unambiguous prompts the keyword router is not far behind a
@@ -635,26 +748,155 @@ the right expert, and it does not follow from a model's size or its published
 benchmarks. Measure any candidate before trusting it:
 
 ```sh
-./build/bin/batbot-routebench ~/.local/share/batbot/models/LFM2-1.2B-Q8_0.gguf
+./build/bin/batbot-routebench ~/.local/share/batbot/models/LFM2.5-1.2B-Q8_0.gguf
 ```
 
 ```
-ok    Physics      (want Physics     )  980ms  why is the sky blue?
-MISS  Mathematics  (want Sociology   ) 1010ms  what causes inflation in a modern economy
+ok    Physics      (want Physics     ) conf 0.93   92ms  why is the sky blue?
+MISS  Physics      (want Sociology   ) conf 0.81   88ms  what causes inflation in a modern economy
 ...
-12/19 correct (63%), 1020ms per route
+50/54 correct (93%), 118ms per route
 ```
 
-Nineteen prompts whose subject is not in doubt, sampled greedily so the number
-is reproducible. Nine choices means chance is 11% — anything near that is a model
-that is not reading the prompt at all, which in practice means a chat template or
-prompt problem rather than a weak model.
+```
+subject        found    chosen    where the misses went
+Mathematics    6/6      7
+Programming    5/6      6         Engineering x1
+...
+Language       3/6      3         Mathematics x1, Programming x1, Engineering x1
+```
 
-`Fallback` never appears here: it is not in the grammar, so the delegator cannot
-emit it. This measures the only job the delegator has — picking a specialist.
+**Read the per-subject table, not the average.** A delegator can score 85% while
+never once choosing one of the nine, and that seat is then unreachable however
+good the model is. The `chosen` column is what tells you: a zero there is a seat
+nothing can reach. `--explain "<a prompt>"` dumps the raw score, the measured
+bias and the calibrated score for every subject, which is how a delegator that
+dislikes a subject is told apart from a calibration that is taking it away.
 
-**Routing is deterministic.** The delegator runs at temperature 0, so the same
-question always reaches the same expert.
+No worked example in the routing prompt may resemble a benchmark prompt, and a
+unit test enforces it by shared rare words -- an example that is also a test
+case measures how well the prompt was copied into the answer sheet.
+
+Fifty-four prompts whose subject is not in doubt, six per subject, scored
+deterministically so the number is reproducible. Nine choices means chance is
+11% — anything near that is a model that is not reading the prompt at all, which
+in practice means a chat template or prompt problem rather than a weak model.
+`--gpu-layers 0` measures it on the processor instead, and `--calibration N`
+sweeps the calibration for a model whose prior is shaped differently.
+
+`Fallback` never appears here: it is not one of the labels, so the delegator
+cannot pick it. This measures the only job the delegator has — picking a
+specialist.
+
+**Routing is deterministic.** Nothing is sampled, so the same question always
+reaches the same expert.
+
+---
+
+## Reasoning models
+
+A model that thinks before it answers does not emit an answer. It emits its
+working, then a marker, then the answer — and the marker is not always hidden by
+the tokenizer. llama.cpp classifies gpt-oss's channel markers as user-defined
+rather than control, so they arrive as ordinary visible text, and a question
+about boiling water comes back as
+
+```
+<|channel|>analysis<|message|>We need to answer: "What is the boiling point of
+water at sea level?" The typical answer: 100°C (212°F). But we should consider
+that the question might be...<|end|><|start|>assistant<|channel|>final<|message|>
+At standard atmospheric pressure, water boils at 100 °C.
+```
+
+when the answer is the last sentence of it.
+
+BatBot sorts the two apart as they stream. Both conventions in the wild are
+handled — OpenAI's harmony channels (gpt-oss) and the `<think>` tags used by
+DeepSeek-R1, Qwen3 and most of what followed them — and a model that uses
+neither is untouched: every byte it produces is answer.
+
+The working is shown while it happens, dimmed, which is the only sign of life
+during the seconds before an answer starts, and then replaced by the answer.
+**Show reasoning** (settings → INTERFACE) keeps it on screen for good, and
+`/thinking` toggles the same thing without leaving the prompt.
+
+**`/effort low | medium | high`** says how hard a thinking model should work.
+It becomes a `Reasoning:` line in the system prompt, which is where gpt-oss
+looks for it -- llama.cpp does not run a model's own jinja template, it
+recognises the harmony format and applies a built-in formatter that writes no
+system preamble at all, so the line has to go in the message rather than be
+passed as a template argument. Measured on gpt-oss-20b across three puzzles,
+`high` produced more working than `low` on every one that produced any. A model
+that does not know the convention reads one more line of system prompt and
+carries on.
+
+It never goes back into the model's context. The formats that produce reasoning
+say to drop it, and feeding it back teaches the model that thinking aloud is
+part of the transcript.
+
+---
+
+## Tools
+
+Everything here is off until you switch it on. BatBot is local-first, and a
+program that quietly started sending what you typed to a search engine would not
+be.
+
+### Web search
+
+**Web search** (settings → TOOLS) lets an expert look something up. When it is
+on, the expert is told the tool exists and can ask for a query; BatBot runs it,
+hands back the results, and the expert answers from them.
+
+```
+you ▸ what is the James Webb Space Telescope and when did it launch?
+⟶ Physics · 0.90 · router model · 93ms
+web searched "James Webb Space Telescope launch date" — 4 results from wikipedia
+
+The James Webb Space Telescope is a large, infrared-observing space observatory
+built as a joint project of NASA, ESA and CSA...
+*Source: https://en.wikipedia.org/wiki/James%20Webb%20Space%20Telescope*
+
+JWST was launched on **December 25, 2021** aboard an Ariane 5 rocket.
+```
+
+**The search is always in the transcript.** A local-first program that reaches
+the internet owes you a plain record of when it did and what it asked.
+
+| provider | needs | what it is |
+|---|---|---|
+| `wikipedia` | nothing | the default. An encyclopedia, not a web index — and honest about it |
+| `searxng` | the address of your own instance | real web search, and nobody learns what was asked |
+| `brave` | an API key | a real web index |
+
+`wikipedia` is the default because it is the only one of the three that needs
+neither a key nor a server of your own, and it answers the kind of question an
+expert asks. Point **Search endpoint** at a [SearXNG](https://searxng.org)
+instance you run and it becomes real web search with the same privacy property
+as everything else here.
+
+**Search rounds** bounds how many times one prompt may search before it has to
+answer. A model that reads results and searches again is being useful; one that
+does it eight times is stuck, and the last round is told it is the last.
+
+You can also search directly, which is the quickest way to check a provider
+works:
+
+```
+/search webb telescope discoveries
+```
+
+**How the expert asks.** BatBot tells it to write `SEARCH: <query>` on a line of
+its own — a text protocol, because llama.cpp applies a chat template, it does
+not negotiate a tool schema, and a convention every model can follow beats one
+that only some can. A model trained on tool use will ignore that and write a
+call in its own format instead, on a channel meant for tool calls; that is
+recognised too, or the tool would never fire for the models most able to use it.
+
+Requests go out through `curl`, which every system has and which BatBot does not
+have to link against. No API key is sent anywhere but to the provider it belongs
+to, and a key put in **Search API key** is stored in the config file in plain
+text — worth knowing before putting one there.
 
 ---
 
@@ -704,13 +946,42 @@ menu until the line changes again, and `Enter` still just sends what you typed.
 | key | |
 |---|---|
 | `Tab` | accept the suggested command |
-| `Ctrl-E` | settings: assign models, move the models directory, tune sampling |
+| `/settings` | assign models, move the models directory, tune sampling |
+| `↑` `↓` · wheel | scroll the transcript a line at a time |
 | `Ctrl-C` | cancel the current answer; again when idle to quit |
 | `Ctrl-T` | show/hide the roundtable |
-| `PgUp` / `PgDn` | scroll the transcript |
+| `PgUp` / `PgDn` | scroll the transcript a page at a time |
 
 The roundtable adapts to your terminal: the full ring above ~34 rows, a compact
 bat above ~24, and a single status strip below that.
+
+### What the machine is doing
+
+With room beside the roundtable, the top right corner carries a reading of every
+GPU and the processor: what it is, how full its memory is, how busy it is, and
+how hot.
+
+```
+ RTX 4070            vram 74%   96%   71°
+ RTX 5060 Ti         vram 12%    0%   44°
+ RTX 3060            vram 11%    0%   55°
+ 12th Gen i5-12400    ram 19%    4%   46°
+```
+
+Green until it is worth noticing, amber past 80% memory or 75°C, red past 93%
+and 87°C -- the points where the next model fails to load and where a card
+starts throttling. Anything the hardware does not report shows as a dash rather
+than a zero.
+
+It is drawn over the roundtable rather than beside it, so it cannot push BatBot
+off the centre the ring is arranged around, and it is hidden below 132 columns
+where the two would overlap.
+
+The reading is taken on a thread of its own every two and a half seconds. That
+interval is set by what it costs rather than by what would be nice: starting
+`nvidia-smi` means `fork()`, and forking a process with a model mapped into it
+copies its page tables -- measured at 0.4 ms with nothing loaded and 6.9 ms with
+an 11 GB expert resident.
 
 ### Tokens
 
@@ -726,6 +997,50 @@ down and adds the project total.
 
 The rate is measured from the first token, not from when the prompt was sent —
 otherwise a long prompt would make a fast expert look slow.
+
+**A seat is not a model.** Ten seats pointing at one GGUF are one loaded model,
+not ten: choosing a different expert whose file is already resident relabels the
+seat and generates, rather than reloading half a minute of weights to arrive at
+the file already in memory. Which matters most for the configuration everybody
+starts from — one good model in every seat — where a route change used to cost a
+full reload every time the subject moved.
+
+**Answers are drawn, not printed.** Every instruction-tuned model replies in
+markdown whether or not you ask it to, and printed as plain text that is a wall
+of asterisks and hashes. Headings, bold, italics, inline code, fenced code
+blocks, bulleted and numbered lists, quotes, rules and tables are all rendered;
+a model that writes plain prose is unaffected, and anything unrecognised passes
+through as the text it was. Code inside a fence is never re-flowed -- code that
+is re-wrapped is code that no longer runs.
+
+Tables get columns sized to their contents and the alignment the delimiter row
+asked for, which is the whole point of drawing one rather than printing it: the
+pipes a model writes do not line anything up.
+
+```
+┌─────────┬─────────────┬───────┐
+│ Name    │ Radius (km) │ Moons │
+├─────────┼─────────────┼───────┤
+│ Mercury │       2,440 │     0 │
+│ Venus   │       6,052 │     0 │
+│ Earth   │       6,371 │     1 │
+│ Mars    │       3,390 │     2 │
+└─────────┴─────────────┴───────┘
+```
+
+A line with a pipe in it is not a table -- an answer about shell pipelines is
+full of them. What makes a table is the `|---|` row under the header, which is
+what GitHub-flavoured markdown says too.
+
+**The history is not re-read every turn.** A conversation resends everything it
+has said so far, and all but the newest exchange of that is identical to what
+the expert's cache already holds, so BatBot keeps the token ids and feeds only
+the part that is new. On the 56B expert, turn five of a conversation is 985
+tokens of prompt, of which 964 are already there: 21 ms instead of 450, and the
+gap grows with the conversation. When the prefix does not match — a new expert,
+an edited history, or a recurrent architecture that cannot rewind its state —
+it falls back to reading the whole thing, which is what it used to do every
+time.
 
 Nothing here is billed. BatBot runs locally; the numbers are for knowing which
 expert is slow and how close a conversation is to filling its context.
@@ -770,7 +1085,7 @@ mkdir -p ~/.local/share/batbot/models
 batbot
 ```
 
-Press **`ctrl-e`**, assign a model to the delegator and to one or two expert
+Type **`/settings`**, assign a model to the delegator and to one or two expert
 seats, **`ctrl-s`** to save, **`esc`** to go back. Then try, in order:
 
 | type this | what you should see |
@@ -794,7 +1109,7 @@ independently, so the swap behaviour is real even when the file is the same.
 
 ### Unit tests
 
-The parts that need no model on disk — subject parsing, the router grammar,
+The parts that need no model on disk — subject parsing, the router labels,
 keyword routing, slash-command completion, config inheritance, the trust store,
 UTF-8 chunking, the backend table, GPU splitting and the GPU memory policy,
 token accounting and session history — are covered by a test suite that runs in
@@ -813,7 +1128,7 @@ Or run the binary directly to see each case:
 ```
 
 ```
-116 cases, 0 failed, 0 assertions failed
+166 cases, 0 failed, 0 assertions failed
 ```
 
 ### Routing quality
@@ -822,9 +1137,14 @@ Or run the binary directly to see each case:
 ./build/bin/batbot-routebench <a-model.gguf>
 ```
 
-Reports how often a candidate delegator picks the right subject, greedily so the
-score is reproducible. Exits non-zero below 50%. Run it whenever you change the
-delegator, the subject list, or the router prompt.
+Reports how often a candidate delegator picks the right subject, over 54 prompts
+whose subject is not in doubt. Nothing is sampled, so the score is reproducible.
+Exits non-zero below 50%. Run it whenever you change the delegator, the subject
+list, or the router prompt.
+
+`--calibration N` sweeps how much of the model's prior is subtracted, for a
+delegator whose bias is shaped differently from the one the default was tuned
+on; `--gpu-layers 0` measures it on the processor.
 
 ### Uninstall safety
 
@@ -970,7 +1290,7 @@ src/
 │   ├── usage.cpp       token counting and its readout
 │   └── store.cpp       per-project session history
 ├── routing/        deciding who answers
-│   ├── subject.cpp     the subject table; grammar and prompt come from it
+│   ├── subject.cpp     the subject table; labels and prompt come from it
 │   ├── router.cpp      KeywordRouter and ModelRouter
 │   └── completion.cpp  the slash-command list, and matching a prefix to it
 ├── llm/            everything that touches llama.cpp
@@ -978,7 +1298,18 @@ src/
 │   ├── loaded_model.cpp  the generation loop
 │   ├── sampling.cpp      building a sampler chain
 │   ├── model_catalog.cpp reading the models directory
-│   └── model_shape.cpp   what a GGUF says about itself, before it is loaded
+│   ├── model_shape.cpp   what a GGUF says about itself, before it is loaded
+│   └── response_filter.cpp  sorting a model's working from its answer
+├── tools/          what the experts can reach beyond the machine
+│   └── web_search.cpp  looking something up, off by default
+│
+├── util/           the parts with no opinions
+│   ├── markdown.cpp    reading the markdown a model wrote
+│   ├── resources.cpp   what the GPUs and the processor are doing
+│   ├── subprocess.cpp  fork/exec with a merged output pipe
+│   ├── format.cpp      bytes, durations, paths
+│   └── text.cpp        UTF-8 that arrives a fragment at a time
+│
 ├── engine/         the delegation loop            [worker thread]
 │   ├── engine.cpp        route -> JIT swap -> generate
 │   ├── route_policy.cpp  what to do with the delegator's answer
@@ -986,7 +1317,7 @@ src/
 ├── ui/                                            [UI thread]
 │   ├── app.cpp         shell, key handling, animation clock
 │   ├── commands.cpp    slash commands
-│   ├── transcript.cpp  drawing the conversation
+│   ├── transcript.cpp  drawing the conversation, markdown and all
 │   ├── session_picker.cpp  the /resume list
 │   ├── widgets/        bat sprite, roundtable
 │   └── settings/       view, runtimes panel, GPU priority panel,
@@ -1003,27 +1334,28 @@ Settings changes cross the same boundary as prompts. Saving from the settings
 screen enqueues the new config on the engine's own queue, so it is applied
 between requests and can never land in the middle of a generation.
 
-**The subject table is the single source of truth.** The routing grammar, the
-delegator's system prompt, its worked examples, and the order seats appear at
-the roundtable are all generated from one array in `routing/subject.cpp`, so
-they cannot drift apart. The one place that must be kept in step by hand -- the
-keyword table -- is checked by a `static_assert`, after a missing entry once
-silently zeroed Mathematics' score.
+**The subject table is the single source of truth.** The labels the delegator
+chooses between, its system prompt, its worked examples, and the order seats
+appear at the roundtable are all generated from one array in
+`routing/subject.cpp`, so they cannot drift apart. The one place that must be
+kept in step by hand -- the keyword table -- is checked by a `static_assert`,
+after a missing entry once silently zeroed Mathematics' score.
 
-**The delegator cannot hallucinate a subject.** Its output is constrained by a
-GBNF grammar generated from that table, so an invalid route is not merely
-unlikely, it is unrepresentable:
+**The delegator cannot hallucinate a subject.** It does not write an answer at
+all. The nine subject names are scored as continuations of the same prompt and
+the best one wins, so an invalid route is not merely unlikely -- there is
+nowhere for one to come from:
 
 ```
-root       ::= subject " " confidence
-subject    ::= "MATH" | "PROG" | "PHYS" | "CHEM" | "BIO"
-             | "ENG"  | "PHIL" | "SOC"  | "LANG"
-confidence ::= "0." [0-9] [0-9] | "1.00"
+Physics      -1.42  ->  0.93
+Chemistry    -4.10
+Engineering  -5.88
+...
 ```
 
-`Fallback` is absent from it by design: the delegator is never offered a way to
-decline. `routing/route_policy.cpp` decides when to fall back instead, and being
-a pure function it is tested without loading a model.
+`Fallback` is absent from the labels by design: the delegator is never offered a
+way to decline. `routing/route_policy.cpp` decides when to fall back instead,
+and being a pure function it is tested without loading a model.
 
 `llama.cpp`'s own logging is redirected to `~/.local/share/batbot/batbot.log`,
 since anything on stderr would draw straight over the TUI.

@@ -26,6 +26,7 @@
 #include <ggml-backend.h>
 #include <llama.h>
 
+#include "batbot/config/gpu_policy.hpp"
 #include "batbot/llm/model_shape.hpp"
 #include "batbot/llm/sampling.hpp"
 #include "batbot/runtime/devices.hpp"
@@ -106,7 +107,14 @@ llama_split_mode split_mode_from_string(const std::string& name) {
 /// the file size times a flat 1.25, which refused a 32 GB model on 34.8 GB of
 /// free video memory: the allowance invented eight gigabytes of KV cache for a
 /// model whose cache is under one. See model_shape.hpp.
-std::string vram_shortfall(const std::string& path, const ModelParams& params) {
+///
+/// `held` is what BatBot itself already has on the cards, and `holder` names
+/// it -- the delegator, almost always. It is not subtracted, because whatever
+/// is holding it is staying; it is named in the message, because on a machine
+/// where a large expert only just fits, that share is the number the user can
+/// actually act on.
+std::string vram_shortfall(const std::string& path, const ModelParams& params,
+                           std::uint64_t held, const std::string& holder) {
     const ModelShape shape = read_model_shape(path);
     if (shape.weights == 0) {
         return {};
@@ -138,6 +146,7 @@ std::string vram_shortfall(const std::string& path, const ModelParams& params) {
     const bool single = params.split_mode == "none";
 
     std::uint64_t available = 0;
+    std::uint64_t cards     = 0;
     std::string   where;
     for (const ComputeDevice& gpu : gpus) {
         if (single ? gpu.index != params.main_gpu
@@ -145,6 +154,7 @@ std::string vram_shortfall(const std::string& path, const ModelParams& params) {
             continue;
         }
         available += gpu.memory_free;
+        ++cards;
         if (!where.empty()) {
             where += " + ";
         }
@@ -157,13 +167,24 @@ std::string vram_shortfall(const std::string& path, const ModelParams& params) {
     }
 
     // Weights, plus the cache at the context actually configured, plus the
-    // compute buffers. A model whose header could not be read falls back to a
-    // tenth over the file size -- small enough not to refuse anything that
-    // would have fitted, which is the right way to be wrong when the numbers
-    // are unknown.
-    const std::uint64_t needed =
-        shape.known ? shape.total_bytes(params.n_ctx, params.n_batch)
-                    : static_cast<std::uint64_t>(static_cast<double>(shape.weights) * 1.1);
+    // compute buffers -- less the input embedding, which llama.cpp keeps in
+    // system memory whatever the offload settings say. A model whose header
+    // could not be read falls back to a tenth over the file size: small enough
+    // not to refuse anything that would have fitted, which is the right way to
+    // be wrong when the numbers are unknown.
+    std::uint64_t needed =
+        static_cast<std::uint64_t>(static_cast<double>(shape.weights) * 1.1);
+    if (shape.known) {
+        // Every card pays for its own activations, so the allowance is counted
+        // once per card rather than once per model -- the same arithmetic the
+        // split planner does. A check that counted it once would pass a model
+        // the planner then could not place, which is the one way for these two
+        // to disagree that ends in a failed load rather than a message.
+        needed = shape.resident_bytes(params.n_ctx) - shape.host_weights +
+                 (shape.compute_bytes(params.n_batch) - shape.logit_bytes(params.n_batch)) *
+                     std::max<std::uint64_t>(1, cards) +
+                 shape.logit_bytes(params.n_batch);
+    }
     if (needed <= available) {
         return {};
     }
@@ -173,15 +194,21 @@ std::string vram_shortfall(const std::string& path, const ModelParams& params) {
         // Which part is too big matters: the weights cannot be changed, but
         // the context can, and it is the one number on the settings screen
         // that would make this fit.
-        detail = " (" + format::bytes(shape.weights) + " of weights plus " +
-                 format::bytes(shape.kv_bytes(params.n_ctx)) + " of context at " +
-                 std::to_string(params.n_ctx) + " tokens)";
+        detail = " (" + format::bytes(shape.weights - shape.host_weights) +
+                 " of weights plus " + format::bytes(shape.kv_bytes(params.n_ctx)) +
+                 " of context at " + std::to_string(params.n_ctx) + " tokens)";
+    }
+
+    std::string advice = " -- close something using the GPU, lower the context size, "
+                         "or turn off \"Dedicated VRAM only\" in settings";
+    if (held > 0 && !holder.empty()) {
+        advice = " -- " + holder + " is holding " + format::bytes(held) + " of that. "
+                 "Lower the context size, use a smaller " + holder + ", or turn off "
+                 "\"Dedicated VRAM only\" in settings";
     }
 
     return "needs about " + format::bytes(needed) + " of video memory" + detail +
-           " but only " + format::bytes(available) + " is free on " + where +
-           " -- close something using the GPU, lower the context size, or turn off "
-           "\"Dedicated VRAM only\" in settings";
+           " but only " + format::bytes(available) + " is free on " + where + advice;
 }
 
 int resolve_threads(int configured) {
@@ -233,6 +260,17 @@ ModelHost::~ModelHost() {
     }
 }
 
+std::uint64_t ModelHost::resident_bytes() const {
+    std::uint64_t total = 0;
+    if (router_) {
+        total += router_->bytes();
+    }
+    if (expert_) {
+        total += expert_->bytes();
+    }
+    return total;
+}
+
 std::vector<std::string> ModelHost::devices() {
     std::vector<std::string> names;
     for (std::size_t i = 0; i < ggml_backend_dev_count(); ++i) {
@@ -246,30 +284,53 @@ std::vector<std::string> ModelHost::devices() {
     return names;
 }
 
-std::unique_ptr<LoadedModel> ModelHost::load(const ModelParams& params,
+std::unique_ptr<LoadedModel> ModelHost::load(const ModelParams& requested,
+                                             Role role,
                                              const ProgressCallback& progress,
                                              std::string& error) {
-    if (params.path.empty()) {
+    if (requested.path.empty()) {
         error = "no model file configured";
         return nullptr;
     }
-    if (!std::filesystem::exists(params.path)) {
-        error = "model file not found: " + params.path;
+    if (!std::filesystem::exists(requested.path)) {
+        error = "model file not found: " + requested.path;
         return nullptr;
     }
     // Ask before llama.cpp does. With no backend registered it throws "no CPU
     // backend found" from somewhere deep in the loader, which is a true
     // statement about ggml and a useless one about what to do next.
     if (ggml_backend_dev_count() == 0) {
-        error = "no runtime installed -- press ctrl-e, open Runtimes, and install one";
+        error = "no runtime installed -- type /runtimes and install one";
         return nullptr;
+    }
+
+    // Re-plan the split against the memory that is free at this instant.
+    //
+    // The one stamped on the config was worked out at startup, before the
+    // delegator was loaded and before the desktop had done whatever it has
+    // since done with the display card. Handing llama.cpp a plan for memory
+    // that is no longer there is not a near miss: the load runs to the very
+    // last allocation with 32 GB already uploaded and then fails on 48 MB of
+    // KV cache. See refresh_gpu_split.
+    ModelParams params = requested;
+    if (role == Role::Delegator) {
+        place_delegator(params, gpu_);
+    } else {
+        refresh_gpu_split(params, gpu_);
     }
 
     // Refuse before allocating anything, when asked to. A driver handed more
     // than the card holds does not fail -- it spills into system RAM and runs
     // on at a crawl -- so this is the only point at which saying no is cheap.
     if (params.vram_only) {
-        if (const std::string shortfall = vram_shortfall(params.path, params);
+        // What is already on the cards, and what it is. Loading an expert
+        // releases the previous one first, so the only thing resident then is
+        // the delegator -- and loading the delegator after a settings change is
+        // the mirror image of that.
+        const std::uint64_t held = resident_bytes();
+        const std::string   holder =
+            role == Role::Expert ? "the delegator" : "the resident expert";
+        if (const std::string shortfall = vram_shortfall(params.path, params, held, holder);
             !shortfall.empty()) {
             error = std::filesystem::path(params.path).filename().string() + " " + shortfall;
             return nullptr;
@@ -340,8 +401,48 @@ LoadedModel* ModelHost::acquire_router(const ModelParams& params,
     if (router_ && router_->path() == params.path) {
         return router_.get();
     }
-    router_ = load(params, progress, error);
+
+    // Make room, if the delegator needs it.
+    //
+    // Only reached with "keep delegator loaded" off, where an expert from the
+    // previous prompt is still resident when the delegator comes back for the
+    // next one. Asking first rather than loading and hoping matters because a
+    // driver handed more than the card holds does not fail -- it spills into
+    // system RAM, and a delegator running from there takes seconds per
+    // decision with nothing on screen to say why.
+    if (expert_) {
+        ModelParams planned = params;
+        place_delegator(planned, gpu_);
+        if (!vram_shortfall(planned.path, planned, 0, {}).empty()) {
+            release_expert();
+        }
+    }
+
+    router_ = load(params, Role::Delegator, progress, error);
     return router_.get();
+}
+
+void ModelHost::release_router() {
+    router_.reset();
+}
+
+/// Would these two be the same loaded model?
+///
+/// Only the fields that are baked into the model and its context at load time.
+/// Sampling is not among them -- temperature and the rest are handed to
+/// generate() per call, so two seats that differ only in how they sample can
+/// share one loaded model.
+bool same_load(const ModelParams& a, const ModelParams& b) {
+    return a.path         == b.path
+        && a.n_ctx        == b.n_ctx
+        && a.n_batch      == b.n_batch
+        && a.n_gpu_layers == b.n_gpu_layers
+        && a.main_gpu     == b.main_gpu
+        && a.split_mode   == b.split_mode
+        && a.flash_attn   == b.flash_attn
+        && a.tensor_split == b.tensor_split
+        && a.no_host      == b.no_host
+        && a.direct_io    == b.direct_io;
 }
 
 LoadedModel* ModelHost::acquire_expert(Subject subject,
@@ -352,13 +453,28 @@ LoadedModel* ModelHost::acquire_expert(Subject subject,
         return expert_.get();
     }
 
+    // A different seat, but the same weights loaded the same way.
+    //
+    // Nothing needs to happen: the seats are BatBot's idea, not llama.cpp's,
+    // and the model behind two of them is one model. Reloading it would cost
+    // half a minute for a large expert to arrive at the file already in memory
+    // -- which is what happened on every route change for anyone who has not
+    // yet found nine different models to fill the table with.
+    if (expert_ && expert_params_ && same_load(*expert_params_, params)) {
+        loaded_expert_ = subject;
+        return expert_.get();
+    }
+
     // Free first, then load. Holding both at once would double the peak memory
     // and defeat the entire point of loading experts just in time.
     release_expert();
 
-    expert_ = load(params, progress, error);
+    expert_ = load(params, Role::Expert, progress, error);
     if (expert_) {
         loaded_expert_ = subject;
+        expert_params_ = params;
+    } else {
+        expert_params_.reset();
     }
     return expert_.get();
 }
@@ -366,6 +482,7 @@ LoadedModel* ModelHost::acquire_expert(Subject subject,
 void ModelHost::release_expert() {
     expert_.reset();
     loaded_expert_.reset();
+    expert_params_.reset();
 }
 
 }  // namespace batbot

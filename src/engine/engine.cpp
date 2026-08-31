@@ -18,6 +18,8 @@
 #include "batbot/config/gpu_policy.hpp"
 #include "batbot/config/paths.hpp"
 #include "batbot/engine/route_policy.hpp"
+#include "batbot/llm/response_filter.hpp"
+#include "batbot/tools/web_search.hpp"
 #include "batbot/runtime/registry.hpp"
 
 namespace batbot {
@@ -132,9 +134,9 @@ void Engine::run() {
     if (devices.empty()) {
         state_.add_notice(RuntimeRegistry::any_installed()
                               ? "a runtime is installed but found no hardware it can drive "
-                                "-- press ctrl-e and open Runtimes"
-                              : "no runtime installed -- press ctrl-e, open Runtimes, "
-                                "and install one before assigning models");
+                                "-- type /runtimes"
+                              : "no runtime installed -- type /runtimes and install one "
+                                "before assigning models");
     }
 
     {
@@ -142,9 +144,12 @@ void Engine::run() {
         if (const std::string split = apply_gpu_policy(config_); !split.empty()) {
             state_.add_notice("GPU split (" + config_.gpu.mode + "): " + split);
         }
+        // Every load re-plans its own split from live memory, and the host is
+        // where that happens. See refresh_gpu_split.
+        host_->set_gpu_config(config_.gpu);
     }
 
-    load_router();
+    load_router_if_resident();
     state_.configure_seats(config_);
     state_.set_mood(Mood::Idle);
     if (wake_) {
@@ -181,9 +186,10 @@ void Engine::run() {
                 if (const std::string split = apply_gpu_policy(config_); !split.empty()) {
                     state_.add_notice("GPU split (" + config_.gpu.mode + "): " + split);
                 }
+                host_->set_gpu_config(config_.gpu);
             }
 
-            load_router();
+            load_router_if_resident();
             state_.set_mood(Mood::Idle, "runtime changed");
             if (wake_) {
                 wake_();
@@ -247,6 +253,7 @@ void Engine::load_router() {
     if (config_.router.model.empty()) {
         router_ = std::make_unique<KeywordRouter>();
         state_.add_notice("no delegator model assigned");
+        state_.set_delegator_ready(true);  // keywords need nothing loaded
         return;
     }
 
@@ -271,10 +278,53 @@ void Engine::load_router() {
     if (model == nullptr) {
         router_ = std::make_unique<KeywordRouter>();
         state_.add_notice("router: " + error + " -- falling back to keyword routing");
+        state_.set_delegator_ready(true);
         return;
     }
 
-    router_ = std::make_unique<ModelRouter>(*model, config_.router);
+    auto routed = std::make_unique<ModelRouter>(*model, config_.router);
+    if (router_bias_for_ == config_.router.path) {
+        routed->set_bias(router_bias_);
+    }
+    router_ = std::move(routed);
+    state_.set_delegator_ready(true);
+}
+
+void Engine::ensure_router() {
+    if (router_ && host_->router() != nullptr) {
+        return;  // already there
+    }
+    if (config_.router.model.empty()) {
+        if (!router_) {
+            router_ = std::make_unique<KeywordRouter>();
+        }
+        return;
+    }
+    load_router();
+}
+
+/// Load the delegator now, unless it is set to load on demand -- in which case
+/// putting it in memory before the first prompt is exactly what this mode
+/// exists to avoid, and Engine::resolve will fetch it when a decision is
+/// actually needed.
+void Engine::load_router_if_resident() {
+    if (config_.routing.keep_delegator_loaded || config_.router.model.empty()) {
+        load_router();
+        return;
+    }
+    state_.add_notice("delegator loads on demand -- it is freed after each decision");
+}
+
+void Engine::release_router() {
+    // The wrapper holds a reference to the loaded model, so it goes first --
+    // and its calibration is kept, because the next load is the same file.
+    if (const auto* routed = dynamic_cast<const ModelRouter*>(router_.get())) {
+        router_bias_     = routed->bias();
+        router_bias_for_ = config_.router.path;
+    }
+    router_.reset();
+    host_->release_router();
+    state_.set_delegator_ready(false);
 }
 
 void Engine::do_apply_config(Config config) {
@@ -291,6 +341,7 @@ void Engine::do_apply_config(Config config) {
             previous_expert = config_.experts[static_cast<std::size_t>(*resident)].path;
         }
         config_ = std::move(config);
+        host_->set_gpu_config(config_.gpu);
     }
 
     const Config current = this->config();
@@ -308,8 +359,10 @@ void Engine::do_apply_config(Config config) {
     // The router is resident for the whole session, so a change to it has to be
     // acted on here or it would never take effect.
     if (current.router.path != previous_router) {
-        router_.reset();
-        load_router();
+        release_router();
+        router_bias_.clear();
+        router_bias_for_.clear();
+        load_router_if_resident();
     }
 
     state_.configure_seats(current);
@@ -320,15 +373,25 @@ void Engine::do_apply_config(Config config) {
 RouteDecision Engine::resolve(const Request& request) {
     const CancelCallback cancel = [this] { return cancel_.load(std::memory_order_relaxed); };
 
-    // Ask the delegator -- or skip it entirely for a pinned route.
+    // A pinned route needs no delegator at all, which is worth saying twice:
+    // with "keep delegator loaded" off, a slash command costs nothing to route.
     RouteDecision decision;
     if (request.pinned) {
         decision.subject    = *request.pinned;
         decision.confidence = 1.0F;
         decision.source     = RouteSource::Forced;
         decision.detail     = "pinned by slash command";
-    } else if (router_) {
+        return apply_route_policy(decision, config_);
+    }
+
+    ensure_router();
+    if (router_) {
         decision = router_->route(request.prompt, cancel);
+    }
+    if (!config_.routing.keep_delegator_loaded) {
+        // Its work for this prompt is done, and the expert is about to want
+        // every byte it was holding.
+        release_router();
     }
 
     // Then decide what to do about it.
@@ -348,12 +411,15 @@ void Engine::handle(const Request& request) {
 
     const RouteDecision decision = resolve(request);
     state_.set_route(turn, decision);
+    // From here the roundtable draws a line from BatBot to this seat.
+    state_.set_linked(decision.subject);
     if (wake_) {
         wake_();
     }
 
     if (cancel_.load(std::memory_order_relaxed)) {
         state_.fail_turn(turn, "cancelled before routing finished");
+        state_.set_linked(std::nullopt);
         state_.set_mood(Mood::Idle);
         return;
     }
@@ -362,6 +428,7 @@ void Engine::handle(const Request& request) {
         state_.fail_turn(turn,
             "No expert model is configured yet. Edit " + paths::config_file().string()
             + " and point at least one expert at a GGUF file.");
+        state_.set_linked(std::nullopt);
         state_.set_mood(Mood::Error, "no experts configured");
         return;
     }
@@ -396,6 +463,7 @@ void Engine::handle(const Request& request) {
 
     if (expert == nullptr) {
         state_.set_seat(decision.subject, SeatPhase::Dormant);
+        state_.set_linked(std::nullopt);
         state_.fail_turn(turn, error);
         state_.set_mood(Mood::Error, error);
         return;
@@ -415,6 +483,15 @@ void Engine::handle(const Request& request) {
 
     std::vector<ChatMessage> messages;
     messages.push_back({"system", config_.system_prompt});
+    if (!config_.reasoning_effort.empty()) {
+        // Where a reasoning model looks for it. See Config::reasoning_effort.
+        messages.front().content += "\n\nReasoning: " + config_.reasoning_effort;
+    }
+    if (config_.tools.web_search) {
+        // Only when the tool is switched on. An expert told it can search when
+        // it cannot will offer to, which is worse than not having the tool.
+        messages.front().content += tools::tool_instructions();
+    }
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         const std::size_t keep = kHistoryTurns * 2;
@@ -431,48 +508,234 @@ void Engine::handle(const Request& request) {
     std::chrono::steady_clock::time_point first_token_at;
     int streamed_chunks = 0;
 
-    const GenerationStats stats = expert->generate(
-        expert->format_chat(messages, true), params,
-        [&](std::string_view chunk) {
-            if (first_token) {
-                first_token    = false;
-                first_token_at = std::chrono::steady_clock::now();
-                state_.set_mood(Mood::Talking,
-                                std::string(subject_name(decision.subject)) + " is answering");
-            }
-            state_.append_reply(turn, chunk);
+    GenerationStats stats;
 
-            // Recomputing the rate on every token would be noise on screen and
-            // work in the hot path; a few times a second is what a person can
-            // actually read.
-            if (++streamed_chunks % 8 == 0) {
-                const double elapsed_s =
-                    std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                  first_token_at).count();
-                if (elapsed_s > 0.05) {
-                    state_.set_live_rate(static_cast<double>(streamed_chunks) / elapsed_s);
+    // One pass per round. Ordinarily there is exactly one: the expert answers
+    // and that is the end of it. A round only repeats when the expert asked to
+    // look something up, and the number of times it may do that is bounded --
+    // an expert that reads results and searches again is being useful, one that
+    // does it eight times is stuck. See tools/web_search.hpp.
+    const int rounds = config_.tools.web_search
+                           ? std::max(1, config_.tools.search_rounds + 1)
+                           : 1;
+    std::vector<std::string> already_searched;
+    for (int round = 0; round < rounds; ++round) {
+        bool        first_answer = true;
+        std::string answer;
+        std::string reasoning;
+        ResponseFilter filter;
+
+        const GenerationStats pass = expert->generate(
+            expert->format_chat(messages, true), params,
+            [&](std::string_view raw) {
+                if (first_token) {
+                    first_token    = false;
+                    first_token_at = std::chrono::steady_clock::now();
+                    state_.set_mood(Mood::Thinking,
+                                    std::string(subject_name(decision.subject)) + " is thinking");
                 }
-            }
+                // A reasoning model writes its working before its answer, and
+                // on some of them the markers between the two are ordinary
+                // visible text. See llm/response_filter.hpp.
+                const ResponseFilter::Piece chunk = filter.feed(raw);
+                if (!chunk.reasoning.empty()) {
+                    reasoning += chunk.reasoning;
+                    state_.append_reasoning(turn, chunk.reasoning);
+                }
+                if (!chunk.answer.empty()) {
+                    if (first_answer) {
+                        first_answer = false;
+                        state_.set_mood(Mood::Talking,
+                                        std::string(subject_name(decision.subject))
+                                            + " is answering");
+                    }
+                    answer += chunk.answer;
+                    state_.append_reply(turn, chunk.answer);
+                }
 
-            if (wake_) {
-                wake_();
-            }
-        },
-        cancel);
+                // Recomputing the rate on every token would be noise on screen
+                // and work in the hot path; a few times a second is what a
+                // person can actually read.
+                if (++streamed_chunks % 8 == 0) {
+                    const double elapsed_s =
+                        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                                      first_token_at).count();
+                    if (elapsed_s > 0.05) {
+                        state_.set_live_rate(static_cast<double>(streamed_chunks) / elapsed_s);
+                    }
+                }
+
+                if (wake_) {
+                    wake_();
+                }
+            },
+            cancel);
+
+        // Whatever was still held back, waiting to see if it was a marker.
+        if (const ResponseFilter::Piece last = filter.flush();
+            !last.answer.empty() || !last.reasoning.empty()) {
+            state_.append_reasoning(turn, last.reasoning);
+            state_.append_reply(turn, last.answer);
+            reasoning += last.reasoning;
+            answer    += last.answer;
+        }
+
+        stats.prompt_tokens += pass.prompt_tokens;
+        stats.prompt_reused += pass.prompt_reused;
+        stats.output_tokens += pass.output_tokens;
+        stats.prompt_ms     += pass.prompt_ms;
+        stats.output_ms     += pass.output_ms;
+        stats.cancelled      = pass.cancelled;
+        stats.hit_limit      = pass.hit_limit;
+
+        if (pass.cancelled || round + 1 >= rounds) {
+            break;
+        }
+        const std::string query = tools::search_request(answer, reasoning);
+        if (query.empty()) {
+            break;  // it answered, which is the ordinary case
+        }
+
+        // --- the expert asked to look something up -------------------------
+        //
+        // Asking twice for the same thing is a model that has read the results
+        // and not known what to do with them. Running the search again would
+        // hand back the same page and invite it to do the same, so it is told
+        // instead -- and this becomes its last round.
+        const bool repeat = std::find(already_searched.begin(), already_searched.end(), query)
+                            != already_searched.end();
+        already_searched.push_back(query);
+
+        state_.set_mood(Mood::Thinking,
+                        repeat ? "already searched for \"" + query + "\""
+                               : "searching for \"" + query + "\"");
+        if (wake_) {
+            wake_();
+        }
+
+        tools::SearchSettings settings;
+        settings.enabled         = config_.tools.web_search;
+        settings.provider        = config_.tools.search_provider;
+        settings.endpoint        = config_.tools.search_endpoint;
+        settings.api_key         = config_.tools.search_api_key;
+        settings.max_results     = config_.tools.search_results;
+        settings.timeout_seconds = config_.tools.search_timeout;
+
+        std::string search_error;
+        const std::vector<tools::SearchResult> results =
+            repeat ? std::vector<tools::SearchResult>{}
+                   : tools::search(query, settings, search_error);
+
+        if (!repeat) {
+            state_.add_search(turn, results.empty()
+                                        ? "searched \"" + query + "\" -- " + search_error
+                                        : "searched \"" + query + "\" -- "
+                                              + std::to_string(results.size()) + " result"
+                                              + (results.size() == 1 ? "" : "s") + " from "
+                                              + settings.provider);
+        }
+        // That round produced a request, not an answer. The next round writes
+        // the answer, and the request should not be sitting above it.
+        state_.set_reply(turn, {});
+
+        // Only the answer goes back, never the reasoning: the formats that
+        // produce reasoning say to drop it from the context, and feeding it
+        // back teaches the model that thinking aloud is part of the transcript.
+        messages.push_back({"assistant", answer});
+        std::string handback =
+            repeat ? "You have already searched for \"" + query + "\" and been given the "
+                     "results above."
+                   : tools::format_for_model(query, results);
+        if (repeat || round + 2 >= rounds) {
+            // The last search it is allowed. Saying so is the difference
+            // between an answer and a model that asks to search again and ends
+            // the turn with nothing in it.
+            handback += "\n\nThis was the last search available. Answer now from what you "
+                        "have, and say plainly if it is not enough.";
+        }
+        messages.push_back({"user", std::move(handback)});
+        if (wake_) {
+            wake_();
+        }
+    }
 
     state_.finish_turn(turn, stats, load_ms);
 
-    // Only remember exchanges that actually produced something, so a cancelled
-    // turn does not poison the context of the next one.
+    // Only remember exchanges that actually produced an answer, so a cancelled
+    // turn -- or one that spent its whole budget thinking -- does not poison
+    // the context of the next one. Read before the placeholder below is put in
+    // its place: what goes into history has to be what the model said, not what
+    // BatBot said about it.
     if (!stats.cancelled && stats.output_tokens > 0) {
         const Snapshot current = state_.snapshot();
-        const std::lock_guard<std::mutex> lock(mutex_);
-        history_.push_back({"user", request.prompt});
-        history_.push_back({"assistant", turn < current.turns.size()
-                                             ? current.turns[turn].reply
-                                             : std::string{}});
+        if (turn < current.turns.size() && !current.turns[turn].reply.empty()) {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            history_.push_back({"user", request.prompt});
+            history_.push_back({"assistant", current.turns[turn].reply});
+        }
     }
 
+    // A turn that ends without an answer in it.
+    //
+    // Three ways to get here, and they want different things said. A reasoning
+    // model can spend its whole token budget in the channel the user does not
+    // see and never reach the one they do; an expert with the search tool can
+    // spend its last round asking to search again rather than answering; and a
+    // raw "SEARCH: ..." line is the one thing that must never be shown as an
+    // answer. Naming the wrong one sends the reader to the wrong setting.
+    if (!stats.cancelled && stats.output_tokens > 0) {
+        const Snapshot current = state_.snapshot();
+        if (turn < current.turns.size()) {
+            const Turn&        finished = current.turns[turn];
+            const std::string& shown    = finished.reply;
+            const bool asked_to_search  = !tools::search_request(shown, {}).empty();
+            if (shown.empty() || asked_to_search) {
+                std::string why;
+                if (asked_to_search || !finished.searches.empty()) {
+                    why = "the expert kept asking to search instead of answering -- raise "
+                          "\"Search rounds\" in settings, or ask again more narrowly";
+                } else if (stats.hit_limit) {
+                    why = "the expert used its whole token budget thinking and never got to "
+                          "an answer -- raise \"Max tokens\" in settings, or lower "
+                          "\"Reasoning effort\" with /effort";
+                } else {
+                    why = "the expert stopped without writing an answer";
+                }
+                state_.set_reply(turn, "(" + why + ")");
+            }
+        }
+    }
+
+    // --- put the table back ------------------------------------------------
+    //
+    // With the delegator set to load on demand, the expert's turn is over the
+    // moment it has answered, and holding it while nothing is happening is
+    // holding memory the next decision needs. So the expert goes, the delegator
+    // comes back, and the next prompt is routed the instant it arrives rather
+    // than after a load.
+    //
+    // The cost is that a follow-up question reloads the expert. That is the
+    // trade this mode is: one model resident at a time, so either of them may
+    // be as large as the whole card.
+    if (!config_.routing.keep_delegator_loaded) {
+        if (host_->loaded_expert()) {
+            host_->release_expert();
+            state_.set_seat(decision.subject, SeatPhase::Dormant);
+            state_.set_resident(std::nullopt);
+        }
+        if (host_->router() == nullptr && !config_.router.model.empty()) {
+            state_.set_mood(Mood::Loading, "readying the delegator");
+            if (wake_) {
+                wake_();
+            }
+            ensure_router();
+        }
+    }
+
+    // The work has stopped, so the line goes and the seat goes dark. Whether
+    // the weights are still in memory is a separate question, and the status
+    // bar is where it is answered.
+    state_.set_linked(std::nullopt);
     state_.set_mood(Mood::Idle, stats.cancelled ? "cancelled" : "");
 }
 

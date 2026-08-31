@@ -5,7 +5,10 @@
 #include "batbot/llm/model_shape.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <vector>
 
@@ -19,11 +22,22 @@ namespace {
 /// every caller here.
 constexpr std::uint64_t kKvElementBytes = 2;
 
-/// Room for the activations and workspace that are not the logits. A flat
-/// figure because it depends on the graph rather than on anything in the
-/// header, and it is small next to the weights of any model big enough for
-/// this to matter.
-constexpr std::uint64_t kActivationAllowance = 256ULL * 1024 * 1024;
+/// Four bytes per element of recurrent state: llama.cpp allocates both the
+/// convolution window and the SSM state as f32.
+constexpr std::uint64_t kStateElementBytes = 4;
+
+/// What one card needs beyond the weights and the cache, before the logits.
+///
+/// Two things, and the second is the larger. The compute buffer llama.cpp
+/// reserves and reports is 130 MiB for a 48-block model with a 2048-wide
+/// embedding at a batch of 512. What it does not report is what CUDA itself
+/// takes once the graph runs -- cuBLAS workspaces, graph capture, the driver's
+/// own bookkeeping -- which on the same model measured between 150 and 450 MB
+/// per card, most on the card doing the most work.
+///
+/// So this is 512 MiB: enough for both, on the evidence. It is the only
+/// allowance in this file; everything else is read from the header.
+constexpr std::uint64_t kActivationAllowance = 512ULL * 1024 * 1024;
 
 std::string string_value(gguf_context* gguf, const char* key) {
     const std::int64_t id = gguf_find_key(gguf, key);
@@ -38,8 +52,7 @@ std::string string_value(gguf_context* gguf, const char* key) {
 /// Both spellings are in the wild for the same key: a plain model writes
 /// `attention.head_count_kv` as a number, while a hybrid one -- LFM2, and
 /// anything else that alternates attention with something cheaper -- writes an
-/// array with a zero for every layer that has no KV cache at all. Reading only
-/// the scalar form would over-count those models by a wide margin.
+/// array with a zero for every layer that has no KV cache at all.
 ///
 /// gguf_get_val_* aborts the process on a type mismatch, so every read here is
 /// behind a type check.
@@ -80,6 +93,48 @@ std::uint64_t first_or(const std::vector<std::uint64_t>& values, std::uint64_t f
     return values.empty() ? fallback : values.front();
 }
 
+/// The block a tensor belongs to, or -1 for one that belongs to none.
+///
+/// Every architecture names its repeating tensors `blk.<n>.<what>`, which is
+/// the only naming convention this file relies on -- and the one llama.cpp
+/// itself builds every model from, so a file that broke it would not load.
+std::int64_t block_of(std::string_view name, std::string_view& suffix) {
+    constexpr std::string_view kPrefix = "blk.";
+    if (name.substr(0, kPrefix.size()) != kPrefix) {
+        return -1;
+    }
+    const std::size_t dot = name.find('.', kPrefix.size());
+    if (dot == std::string_view::npos) {
+        return -1;
+    }
+    const std::string digits(name.substr(kPrefix.size(), dot - kPrefix.size()));
+    if (digits.empty() ||
+        !std::all_of(digits.begin(), digits.end(),
+                     [](unsigned char c) { return std::isdigit(c) != 0; })) {
+        return -1;
+    }
+    suffix = name.substr(dot + 1);
+    return std::strtoll(digits.c_str(), nullptr, 10);
+}
+
+/// What one block of the model looks like, gathered from its tensors.
+struct BlockTensors {
+    std::uint64_t weights = 0;
+
+    // The width of the K and V projections, which is exactly the number of
+    // cached elements per token: n_head_kv * head_dim, without having to know
+    // either factor. Zero when the block has no separate K/V projection, which
+    // is the case for a linear-attention block and for a fused QKV.
+    std::uint64_t k_width = 0;
+    std::uint64_t v_width = 0;
+
+    bool has_projection = false;  ///< a Q/K/V projection: this block attends
+    bool has_recurrent  = false;  ///< an ssm_* tensor: a state rather than a cache
+
+    std::uint64_t conv_channels = 0;  ///< ssm_conv1d.weight's row count
+    std::uint64_t conv_width    = 0;  ///< ssm_conv1d.weight's kernel size
+};
+
 }  // namespace
 
 std::uint64_t ModelShape::kv_bytes(int n_ctx) const {
@@ -89,17 +144,37 @@ std::uint64_t ModelShape::kv_bytes(int n_ctx) const {
     return static_cast<std::uint64_t>(n_ctx) * kv_per_token;
 }
 
-std::uint64_t ModelShape::compute_bytes(int n_batch) const {
-    // The logits are the big one: a 65k vocabulary at a batch of 512 is 134 MB
-    // on its own, which is most of what a small model's compute buffers come
-    // to in practice.
+std::uint64_t ModelShape::state_bytes() const {
+    std::uint64_t total = 0;
+    for (const ModelUnit& unit : units) {
+        total += unit.state;
+    }
+    return total;
+}
+
+std::uint64_t ModelShape::unit_bytes(std::size_t index, int n_ctx) const {
+    if (index >= units.size()) {
+        return 0;
+    }
+    const ModelUnit& unit = units[index];
+    return unit.weights + unit.state +
+           unit.kv_per_token * static_cast<std::uint64_t>(std::max(0, n_ctx));
+}
+
+std::uint64_t ModelShape::logit_bytes(int n_batch) const {
     const auto batch = static_cast<std::uint64_t>(std::max(1, n_batch));
-    const std::uint64_t logits = static_cast<std::uint64_t>(vocab) * batch * sizeof(float);
-    return logits + kActivationAllowance;
+    return static_cast<std::uint64_t>(vocab) * batch * sizeof(float);
+}
+
+std::uint64_t ModelShape::compute_bytes(int n_batch) const {
+    return kActivationAllowance + logit_bytes(n_batch);
 }
 
 std::uint64_t ModelShape::resident_bytes(int n_ctx) const {
-    return weights + kv_bytes(n_ctx);
+    // The input embedding is deliberately left in: this is what the model
+    // costs, and the caller that cares which side of the bus it lands on
+    // subtracts host_weights itself.
+    return weights + kv_bytes(n_ctx) + state_bytes();
 }
 
 std::uint64_t ModelShape::total_bytes(int n_ctx, int n_batch) const {
@@ -147,6 +222,8 @@ ModelShape read_model_shape(const std::filesystem::path& file) {
                  heads > 0 ? embd / heads : 0);
     const std::uint64_t value_len =
         first_or(unsigned_values(gguf, key("attention.value_length")), key_len);
+    const std::uint64_t ssm_inner = first_or(unsigned_values(gguf, key("ssm.inner_size")), 0);
+    const std::uint64_t ssm_state = first_or(unsigned_values(gguf, key("ssm.state_size")), 0);
 
     shape.layers    = static_cast<std::uint32_t>(layers);
     shape.train_ctx = static_cast<std::uint32_t>(
@@ -162,18 +239,117 @@ ModelShape read_model_shape(const std::filesystem::path& file) {
             first_or(unsigned_values(gguf, key("vocab_size")), 0));
     }
 
-    if (layers > 0 && key_len > 0 && !kv_heads.empty()) {
-        // Per token of context: every layer's K and V together. A hybrid model
-        // lists a zero for each layer that keeps no cache, and those cost
-        // nothing, which is the whole reason for reading the array.
-        std::uint64_t per_token = 0;
-        for (std::uint64_t layer = 0; layer < layers; ++layer) {
-            const std::uint64_t count =
-                kv_heads.size() == 1 ? kv_heads.front()
-                                     : (layer < kv_heads.size() ? kv_heads[layer] : 0);
-            per_token += count * (key_len + value_len) * kKvElementBytes;
+    // --- walk the tensor table ---------------------------------------------
+    //
+    // Every tensor is named, shaped and typed in the header, so what each
+    // block weighs and whether it caches anything are both readable facts
+    // rather than things to work out from the architecture. That matters most
+    // for the hybrid models this would otherwise get badly wrong: a qwen3next
+    // caches on one block in four, and charging it for all 48 invents 600 MB
+    // of cache that is never allocated.
+    std::vector<BlockTensors> blocks(layers);
+    std::uint64_t output_weights = 0;
+
+    for (std::int64_t i = 0; i < gguf_get_n_tensors(gguf); ++i) {
+        const char* raw = gguf_get_tensor_name(gguf, i);
+        if (raw == nullptr) {
+            continue;
         }
-        shape.kv_per_token = per_token;
+        const std::string_view name(raw);
+        const std::uint64_t    size = gguf_get_tensor_size(gguf, i);
+        const std::int64_t*    ne   = gguf_get_tensor_ne(gguf, i);
+
+        std::string_view suffix;
+        const std::int64_t block = block_of(name, suffix);
+        if (block < 0 || block >= static_cast<std::int64_t>(layers)) {
+            if (name == "token_embd.weight") {
+                // Never offloaded, whatever n_gpu_layers says. See
+                // ModelShape::host_weights.
+                shape.host_weights += size;
+            } else {
+                output_weights += size;
+            }
+            continue;
+        }
+
+        BlockTensors& into = blocks[static_cast<std::size_t>(block)];
+        into.weights += size;
+
+        // Only a projection counts as attention. A normalisation weight is
+        // named attn_norm on blocks that never attend at all -- LFM2 puts one
+        // on every short-convolution block -- and treating that as attention
+        // would invent a cache for two blocks in three.
+        if (suffix == "attn_k.weight" || suffix == "attn_v.weight" ||
+            suffix == "attn_q.weight" || suffix == "attn_qkv.weight") {
+            into.has_projection = true;
+            // ne[1] of the K projection is n_head_kv * head_dim -- the cached
+            // width per token, read without needing either factor.
+            if (suffix == "attn_k.weight" && ne != nullptr) {
+                into.k_width = static_cast<std::uint64_t>(ne[1]);
+            } else if (suffix == "attn_v.weight" && ne != nullptr) {
+                into.v_width = static_cast<std::uint64_t>(ne[1]);
+            }
+        }
+        if (suffix.substr(0, 4) == "ssm_") {
+            into.has_recurrent = true;
+            if (suffix == "ssm_conv1d.weight" && ne != nullptr) {
+                into.conv_width    = static_cast<std::uint64_t>(ne[0]);
+                into.conv_channels = static_cast<std::uint64_t>(ne[1]);
+            }
+        }
+    }
+
+    // --- turn that into placeable units ------------------------------------
+    //
+    // The cache per layer stated by the header, for a block whose own tensors
+    // did not say. Zero for a layer a hybrid model lists as having no cache.
+    const auto stated_kv = [&](std::uint64_t index) {
+        const std::uint64_t count =
+            kv_heads.size() == 1
+                ? kv_heads.front()
+                : (index < kv_heads.size() ? kv_heads[static_cast<std::size_t>(index)] : 0);
+        return count * (key_len + value_len) * kKvElementBytes;
+    };
+
+    const bool have_tensors =
+        std::any_of(blocks.begin(), blocks.end(),
+                    [](const BlockTensors& block) { return block.weights > 0; });
+
+    if (have_tensors) {
+        shape.units.reserve(layers + 1);
+        for (std::uint64_t index = 0; index < layers; ++index) {
+            const BlockTensors& block = blocks[static_cast<std::size_t>(index)];
+            ModelUnit unit;
+            unit.weights = block.weights;
+
+            if (block.k_width > 0) {
+                unit.kv_per_token = (block.k_width + block.v_width) * kKvElementBytes;
+            } else if (block.has_projection && !block.has_recurrent) {
+                // A fused QKV projection: the widths are not separable from the
+                // tensor, so fall back to what the header states.
+                unit.kv_per_token = stated_kv(index);
+            }
+
+            if (block.has_recurrent) {
+                // The convolution window, plus the SSM state itself. Both are
+                // f32 and both are per sequence, of which BatBot runs one.
+                const std::uint64_t conv =
+                    block.conv_width > 1 ? (block.conv_width - 1) * block.conv_channels : 0;
+                unit.state = (conv + ssm_inner * ssm_state) * kStateElementBytes;
+            }
+
+            shape.kv_per_token += unit.kv_per_token;
+            shape.units.push_back(unit);
+        }
+        shape.units.push_back(ModelUnit{output_weights, 0, 0});
+    } else {
+        // A file with metadata but no tensor table. Nothing here can be placed
+        // layer by layer, so `units` stays empty and the split falls back to
+        // dividing proportionally -- but the cache is still worth knowing, and
+        // the header alone is enough for that.
+        for (std::uint64_t index = 0; index < layers; ++index) {
+            shape.kv_per_token += stated_kv(index);
+        }
     }
 
     shape.known = layers > 0;

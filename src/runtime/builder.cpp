@@ -5,8 +5,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <fstream>
+#include <string_view>
 
 #include <nlohmann/json.hpp>
 
@@ -105,6 +108,65 @@ bool produces_module(const std::vector<BackendKind>& produces, const std::string
     });
 }
 
+/// Every line a program writes, or nothing if it could not be run.
+///
+/// For asking short questions of the toolchain -- what does this driver see,
+/// what can this compiler target -- rather than for driving a build, which is
+/// what run_command is for.
+std::vector<std::string> ask(const std::vector<std::string>& argv) {
+    if (!util::on_path(argv.front())) {
+        return {};
+    }
+    util::Subprocess child;
+    std::string      error;
+    if (!child.start(argv, {}, /*extra_env=*/{}, error)) {
+        return {};
+    }
+    std::vector<std::string> lines;
+    std::string              line;
+    while (child.read_line(line)) {
+        lines.push_back(line);
+    }
+    return child.wait() == 0 ? lines : std::vector<std::string>{};
+}
+
+/// A compute capability as CMake writes it: "8.9" becomes 89.
+int capability_from(std::string_view text) {
+    int major = 0;
+    int minor = 0;
+    if (std::sscanf(std::string(text).c_str(), "%d.%d", &major, &minor) != 2) {
+        return 0;
+    }
+    return major * 10 + minor;
+}
+
+/// What this machine's cards and compiler can do, for cuda_architectures.
+///
+/// Two questions of the toolchain, both cheap, both asked at configure time so
+/// the answer is about the machine the build is happening on. Either one coming
+/// back empty means the arithmetic cannot be trusted, and the caller falls back
+/// to llama.cpp's defaults -- a slow build is a far better failure than a
+/// module this machine cannot run.
+std::string detected_cuda_architectures() {
+    std::vector<int> present;
+    for (const std::string& line :
+         ask({"nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"})) {
+        if (const int capability = capability_from(line); capability > 0) {
+            present.push_back(capability);
+        }
+    }
+
+    // "compute_50", "compute_52", ... one per line.
+    std::vector<int> targetable;
+    for (const std::string& line : ask({"nvcc", "--list-gpu-arch"})) {
+        constexpr std::string_view kPrefix = "compute_";
+        if (line.rfind(kPrefix, 0) == 0) {
+            targetable.push_back(std::atoi(line.c_str() + kPrefix.size()));
+        }
+    }
+    return cuda_architectures(present, targetable);
+}
+
 /// Does `filename` end in this platform's loadable-module extension?
 bool is_module_file(const std::string& filename) {
     const std::string_view suffix = module_suffix();
@@ -166,6 +228,45 @@ endif()
 }
 
 }  // namespace
+
+std::string cuda_architectures(const std::vector<int>& present,
+                               const std::vector<int>& targetable) {
+    if (present.empty() || targetable.empty()) {
+        return {};
+    }
+
+    std::vector<int> cards = present;
+    std::sort(cards.begin(), cards.end());
+    cards.erase(std::unique(cards.begin(), cards.end()), cards.end());
+
+    const int highest_targetable = *std::max_element(targetable.begin(), targetable.end());
+
+    std::string architectures;
+    int         newest = 0;
+    for (const int capability : cards) {
+        if (std::find(targetable.begin(), targetable.end(), capability) != targetable.end()) {
+            if (!architectures.empty()) {
+                architectures += ";";
+            }
+            architectures += std::to_string(capability) + "-real";
+            newest = std::max(newest, capability);
+        } else if (capability > highest_targetable) {
+            // Newer than this toolkit knows about, so there is no real code to
+            // emit. PTX for the newest thing it does know is what the driver
+            // will compile from.
+            newest = std::max(newest, highest_targetable);
+        }
+        // A card older than the toolkit supports is left out: there is nothing
+        // to emit for it, and llama.cpp's defaults would not have helped either.
+    }
+    if (newest == 0) {
+        return {};
+    }
+    if (!architectures.empty()) {
+        architectures += ";";
+    }
+    return architectures + std::to_string(newest) + "-virtual";
+}
 
 std::string BuildProgress::label() const {
     switch (phase) {
@@ -441,6 +542,14 @@ void RuntimeBuilder::run(BackendKind kind) {
         };
         if (!unversion.empty()) {
             configure.emplace_back("-DCMAKE_PROJECT_INCLUDE=" + unversion.string());
+        }
+        if (kind == BackendKind::Cuda) {
+            // The single biggest thing this build spends time on. See
+            // cuda_architectures.
+            if (const std::string architectures = detected_cuda_architectures();
+                !architectures.empty()) {
+                configure.emplace_back("-DCMAKE_CUDA_ARCHITECTURES=" + architectures);
+            }
         }
         if (kind == BackendKind::Cpu || with_cpu) {
             // One module per x86-64 feature level, scored at load time. This

@@ -19,42 +19,12 @@
 #include "batbot/config/config.hpp"
 #include "batbot/llm/model_host.hpp"
 #include "batbot/config/paths.hpp"
+#include "batbot/routing/benchmark.hpp"
 #include "batbot/routing/router.hpp"
+#include <array>
+#include <cstdlib>
 
 using namespace batbot;
-
-namespace {
-
-struct Case {
-    Subject     expect;
-    const char* prompt;
-};
-
-/// Prompts whose subject a knowledgeable person would not argue about. Keep it
-/// that way: a benchmark full of genuinely ambiguous questions measures nothing.
-const std::vector<Case> kCases{
-    {Subject::Mathematics, "compute the derivative of x^3 sin(x)"},
-    {Subject::Mathematics, "prove there are infinitely many prime numbers"},
-    {Subject::Programming, "why does my C++ program segfault when I dereference this pointer"},
-    {Subject::Programming, "write a binary search function in Python"},
-    {Subject::Physics,     "why is the sky blue?"},
-    {Subject::Physics,     "what is the Lagrangian of a simple pendulum"},
-    {Subject::Physics,     "explain time dilation in special relativity"},
-    {Subject::Chemistry,   "balance the combustion reaction for propane"},
-    {Subject::Chemistry,   "what is the pH of a 0.1 molar HCl solution"},
-    {Subject::Biology,     "how does DNA replication work in eukaryotic cells"},
-    {Subject::Biology,     "what role do mitochondria play in the cell"},
-    {Subject::Engineering, "what torque should I use on an M8 steel bolt"},
-    {Subject::Engineering, "how do I size a steel beam for a 3 metre span"},
-    {Subject::Philosophy,  "is free will compatible with determinism?"},
-    {Subject::Philosophy,  "explain Kant's categorical imperative"},
-    {Subject::Sociology,   "how does urbanisation affect social mobility"},
-    {Subject::Sociology,   "what causes inflation in a modern economy"},
-    {Subject::Language,    "proofread this paragraph and improve its tone"},
-    {Subject::Language,    "translate 'good morning' into French"},
-};
-
-}  // namespace
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -62,17 +32,32 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    float       calibration = ModelRouter::kCalibration;
+    std::string explain;
+
     ModelParams params;
     params.path        = paths::expand_user(argv[1]).string();
     params.model       = params.path;
     params.n_ctx       = 4096;
-    params.n_gpu_layers = 0;
+    // Every layer on the GPU by default, which is what the app does. --gpu-layers 0
+    // forces the processor, for measuring a machine with no GPU at all.
+    params.n_gpu_layers = -1;
     params.temperature = 0.0F;  // greedy, so the number is reproducible
     params.max_tokens  = 16;
 
+    bool quiet = false;
+    for (int i = 2; i < argc; ++i) {
+        if (std::string(argv[i]) == "--quiet") { quiet = true; }
+    }
     for (int i = 2; i + 1 < argc; ++i) {
         if (std::string(argv[i]) == "--gpu-layers") {
             params.n_gpu_layers = std::atoi(argv[i + 1]);
+        }
+        if (std::string(argv[i]) == "--calibration") {
+            calibration = static_cast<float>(std::atof(argv[i + 1]));
+        }
+        if (std::string(argv[i]) == "--explain") {
+            explain = argv[i + 1];
         }
     }
 
@@ -91,29 +76,88 @@ int main(int argc, char** argv) {
     // Fallback is not in the grammar, so it can never appear here. This
     // measures the delegator's job -- picking a specialist -- and nothing else.
     ModelRouter router(*model, params);
+    router.set_calibration(calibration);
+
+    // --explain dumps the arithmetic behind one decision, which is the only way
+    // to tell a delegator that dislikes a subject from a calibration that is
+    // taking it away.
+    if (!explain.empty()) {
+        router.route("warm up so the bias is measured", {});
+        const std::vector<float> raw  = router.raw_scores(explain);
+        const std::vector<float> bias = router.bias();
+        const std::vector<Subject> subjects = routable_subjects();
+        std::printf("%-14s %9s %9s %9s\n", "subject", "raw", "bias", "calibrated");
+        for (std::size_t i = 0; i < subjects.size() && i < raw.size(); ++i) {
+            const double adjusted =
+                static_cast<double>(raw[i]) -
+                static_cast<double>(calibration) *
+                    (i < bias.size() ? static_cast<double>(bias[i]) : 0.0);
+            std::printf("%-14s %9.2f %9.2f %9.2f\n",
+                        std::string(subject_name(subjects[i])).c_str(),
+                        static_cast<double>(raw[i]),
+                        i < bias.size() ? static_cast<double>(bias[i]) : 0.0, adjusted);
+        }
+        std::printf("\nprompt: %s\n", explain.c_str());
+        return 0;
+    }
+    std::printf("calibration %.2f\n\n", static_cast<double>(calibration));
     int    correct  = 0;
     double total_ms = 0.0;
 
-    for (const Case& test : kCases) {
+    // [wanted][got], plus the margins, for the breakdown below.
+    std::array<std::array<int, kSubjectCount>, kSubjectCount> confusion{};
+    std::array<int, kSubjectCount> expected{};
+    std::array<int, kSubjectCount> chosen{};
+
+    for (const RouteCase& test : benchmark_cases()) {
         const auto start = std::chrono::steady_clock::now();
-        const RouteDecision decision = router.route(test.prompt, {});
+        const RouteDecision decision = router.route(std::string(test.prompt), {});
         const double ms = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - start).count();
         total_ms += ms;
 
         const bool ok = decision.subject == test.expect;
         correct += ok ? 1 : 0;
-        std::printf("%s  %-12s (want %-12s) conf %.2f  %4.0fms  %.44s\n",
-                    ok ? "ok  " : "MISS",
-                    std::string(subject_name(decision.subject)).c_str(),
-                    std::string(subject_name(test.expect)).c_str(),
-                    static_cast<double>(decision.confidence), ms, test.prompt);
+        ++expected[static_cast<std::size_t>(test.expect)];
+        ++chosen[static_cast<std::size_t>(decision.subject)];
+        ++confusion[static_cast<std::size_t>(test.expect)][static_cast<std::size_t>(decision.subject)];
+        if (!quiet) {
+            std::printf("%s  %-12s (want %-12s) conf %.2f  %4.0fms  %.44s\n",
+                        ok ? "ok  " : "MISS",
+                        std::string(subject_name(decision.subject)).c_str(),
+                        std::string(subject_name(test.expect)).c_str(),
+                        static_cast<double>(decision.confidence), ms, std::string(test.prompt).c_str());
+        }
     }
 
-    std::printf("\n%d/%zu correct (%.0f%%), %.0fms per route\n", correct, kCases.size(),
-                100.0 * static_cast<double>(correct) / static_cast<double>(kCases.size()),
-                total_ms / static_cast<double>(kCases.size()));
+    // Per subject, because an average hides the failure that matters. A
+    // delegator can score 85% while never once choosing one of the nine, and
+    // that seat is then unreachable however good the model is.
+    std::printf("\n%-14s %-8s %-8s  where the misses went\n", "subject", "found", "chosen");
+    for (const Subject subject : routable_subjects()) {
+        const auto index = static_cast<std::size_t>(subject);
+        std::string went;
+        for (const Subject other : routable_subjects()) {
+            const auto to = static_cast<std::size_t>(other);
+            if (other != subject && confusion[index][to] > 0) {
+                if (!went.empty()) {
+                    went += ", ";
+                }
+                went += std::string(subject_name(other)) + " x"
+                      + std::to_string(confusion[index][to]);
+            }
+        }
+        // "chosen" counts how often the delegator picked this subject for
+        // anything at all. A zero there is a seat nothing can reach.
+        std::printf("%-14s %d/%-6d %-8d  %s\n",
+                    std::string(subject_name(subject)).c_str(),
+                    confusion[index][index], expected[index], chosen[index], went.c_str());
+    }
+
+    std::printf("\n%d/%zu correct (%.0f%%), %.0fms per route\n", correct, benchmark_cases().size(),
+                100.0 * static_cast<double>(correct) / static_cast<double>(benchmark_cases().size()),
+                total_ms / static_cast<double>(benchmark_cases().size()));
     // Nine subjects, so anything near 11% is a model that is not reading the
     // prompt at all -- usually a chat template or prompt problem, not the model.
-    return correct * 2 >= static_cast<int>(kCases.size()) ? 0 : 1;
+    return correct * 2 >= static_cast<int>(benchmark_cases().size()) ? 0 : 1;
 }

@@ -15,6 +15,8 @@
 #include "batbot/config/paths.hpp"
 #include "batbot/llm/model_catalog.hpp"
 #include "batbot/ui/theme.hpp"
+#include "batbot/ui/widgets/markdown_view.hpp"
+#include "batbot/ui/widgets/scroll.hpp"
 #include "batbot/util/format.hpp"
 
 using namespace ftxui;  // NOLINT(google-build-using-namespace)
@@ -46,10 +48,41 @@ Element App::render_turn(const Turn& turn) const {
         block.push_back(text(line) | color(theme::kRoute));
     }
 
+    // What this turn sent off the machine, and what came back. Always shown,
+    // never folded away: a local-first program that reaches the internet owes
+    // the user a plain record of when it did.
+    for (const std::string& line : turn.searches) {
+        block.push_back(hbox({
+            text("web ") | color(theme::kRoute) | bold,
+            paragraph(line) | color(theme::kRoute) | flex,
+        }));
+    }
+
+    // A reasoning model's working, when there is any.
+    //
+    // Shown while it happens, because watching an expert think is the only
+    // sign of life during the seconds before the answer starts -- and then put
+    // away, because it is not the answer and reading it back is rarely what
+    // anybody wants. "Show reasoning" in settings keeps it on screen for good.
+    if (!turn.reasoning.empty() && (config_.ui.show_reasoning || turn.reply.empty())) {
+        block.push_back(text("thinking") | color(theme::kMeta) | dim | bold);
+        for (Element& line : render_markdown(turn.reasoning, /*dim_all=*/true)) {
+            block.push_back(std::move(line));
+        }
+    }
+
     if (!turn.reply.empty()) {
-        Element body = paragraph(turn.reply);
-        block.push_back(turn.failed ? body | color(theme::kError) : body);
-    } else if (turn.streaming) {
+        // Models answer in markdown whether or not they are asked to, so it is
+        // drawn rather than printed. A failed turn is an error message, not a
+        // document, and is left alone.
+        if (turn.failed) {
+            block.push_back(paragraph(turn.reply) | color(theme::kError));
+        } else {
+            for (Element& line : render_markdown(turn.reply)) {
+                block.push_back(std::move(line));
+            }
+        }
+    } else if (turn.streaming && turn.reasoning.empty()) {
         block.push_back(text("…") | color(theme::kMeta) | dim);
     }
 
@@ -88,7 +121,7 @@ Element App::render_welcome() const {
     // needed, and saying it twice only made the first screen a wall of text.
     return vbox({
         text("No expert models are assigned yet.") | color(theme::kNotice) | bold,
-        text("Press ctrl-e to open settings and assign one.") | color(theme::kMeta) | dim,
+        text("Type /settings to assign one.") | color(theme::kMeta) | dim,
         text(" "),
     });
 }
@@ -114,16 +147,24 @@ Element App::render_transcript(const Snapshot& snapshot) const {
         rows.push_back(render_welcome());
     }
 
-    for (std::size_t i = 0; i < snapshot.turns.size(); ++i) {
-        Element block = render_turn(snapshot.turns[i]);
-        // Focus drives the scroll position: either the newest turn (follow
-        // mode) or whichever turn the user paged to.
-        const bool focused = follow_ ? (i + 1 == snapshot.turns.size())
-                                     : (static_cast<int>(i) == focus_turn_);
-        rows.push_back(focused ? block | ftxui::focus : block);
+    for (const Turn& turn : snapshot.turns) {
+        rows.push_back(render_turn(turn));
     }
 
-    return vbox(std::move(rows)) | yframe;
+    // Scrolling by exact lines. `focusPosition` puts the frame's focus at an
+    // absolute line and the frame centres it, so the line that ends up at the
+    // bottom of the window is the one asked for. Both heights come from the
+    // previous frame -- see widgets/scroll.hpp for why that is enough.
+    const int overflow = std::max(0, content_height_ - viewport_height_);
+    const int scroll   = follow_ ? 0 : std::clamp(scroll_, 0, overflow);
+    const int anchor   = overflow - scroll + viewport_height_ / 2;
+
+    return measure_height(vbox(std::move(rows)), &content_height_)
+         | focusPosition(0, anchor)
+         | yframe
+         | Decorator([this](Element child) {
+               return measure_height(std::move(child), &viewport_height_);
+           });
 }
 
 }  // namespace batbot::ui

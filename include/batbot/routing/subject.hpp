@@ -43,7 +43,20 @@ struct SubjectInfo {
     std::string_view name;     ///< human-facing name ("Mathematics")
     std::string_view tag;      ///< 4-char roundtable chip label ("MATH")
     std::string_view blurb;    ///< compact remit, shown in settings and fed to the router
-    std::string_view example;  ///< a question this expert should obviously take
+    /// Two questions this expert should obviously take.
+    ///
+    /// Two rather than one, and the same number for every subject so none is
+    /// favoured by having more. Measured on the 54-prompt benchmark with
+    /// LFM2.5-1.2B: one example each scores 89% and never once chooses
+    /// Language; two scores 96% and reaches every seat. A small delegator is
+    /// working almost entirely from these, and one example of a subject as
+    /// broad as "writing, editing, translation and grammar" does not describe
+    /// it.
+    ///
+    /// Neither may resemble anything in tools/routebench.cpp, or the benchmark
+    /// is measuring how well the prompt was copied into it.
+    std::string_view example;
+    std::string_view example2;
 
     /// Whether the delegator may name this subject.
     ///
@@ -69,10 +82,10 @@ inline std::string_view subject_tag(Subject s)  { return subject_info(s).tag; }
 /// Case-insensitive. Returns nullopt if nothing matches.
 std::optional<Subject> subject_from_string(std::string_view text);
 
-/// The GBNF grammar that constrains the router's output to a valid decision.
-/// Generated from the subject table so the two can never drift apart. Covers
-/// the routable subjects only.
-std::string router_grammar();
+/// The tags the delegator chooses between, in table order and parallel to
+/// routable_subjects(). Trimmed: `subject_tag` pads to a fixed width for the
+/// roundtable chips, and that padding would change how the tag tokenises.
+std::vector<std::string> router_labels();
 
 /// Subjects the delegator is allowed to choose.
 std::vector<Subject> routable_subjects();

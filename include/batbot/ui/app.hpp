@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -23,6 +24,7 @@
 #include "batbot/ui/settings/gpu_order_view.hpp"
 #include "batbot/ui/settings/model_manager_view.hpp"
 #include "batbot/ui/settings/settings_view.hpp"
+#include "batbot/util/resources.hpp"
 
 namespace batbot::ui {
 
@@ -42,7 +44,18 @@ private:
 
     ftxui::Element render();
     void open_settings();
-    void save_settings();
+    /// Write the settings screen's config and hand it to the engine.
+    /// `announce` puts "saved" on the status line, which is wanted for an
+    /// explicit ctrl-s and only noise for an automatic one.
+    void save_settings(bool announce = true);
+
+    /// Save if the settings screen has an uncommitted change. Called after
+    /// every key the settings screens see.
+    void autosave();
+
+    /// Change one thing in the configuration, then write and apply it. The way
+    /// a slash command edits a setting.
+    void update_config(const std::function<void(Config&)>& change);
 
     /// Write the conversation to the project's history. Called after every
     /// completed turn, so a crash costs at most the turn in flight.
@@ -115,10 +128,27 @@ private:
     std::atomic<bool> ticking_{false};
     std::atomic<std::size_t> tick_{0};
 
+    /// Read on its own thread and drawn in the corner of the roundtable.
+    util::ResourceMonitor resources_;
+
     bool show_roundtable_ = true;
-    bool follow_          = true;   ///< pin the transcript to the newest turn
-    int  focus_turn_      = 0;
+
+    /// Pin the transcript to its newest line. Any scroll up releases it; coming
+    /// back to the bottom, or sending a prompt, takes it again -- so a reply
+    /// arriving while you are reading history does not yank you away from it.
+    bool follow_          = true;
+
+    /// Lines scrolled up from the bottom, when not following.
+    int  scroll_          = 0;
+
+    /// Measured during layout and read on the next frame. See widgets/scroll.hpp.
+    mutable int content_height_  = 0;
+    mutable int viewport_height_ = 0;
+
     bool should_exit_     = false;
+
+    /// Move the transcript by `lines` (negative scrolls up towards the start).
+    void scroll_by(int lines);
 };
 
 }  // namespace batbot::ui

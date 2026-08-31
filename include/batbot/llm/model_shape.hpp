@@ -13,15 +13,35 @@
 // free VRAM because a 25% allowance invented eight gigabytes of overhead that
 // were never going to be used.
 //
-// The real numbers are in the file. GGUF puts its metadata at the front, ggml
-// can read it without touching a tensor, and it costs about 50 ms even for a
-// 34 GB model -- so there is no reason to estimate what can simply be read.
+// The real numbers are in the file. GGUF puts its metadata at the front --
+// including the name, shape and type of every tensor -- ggml can read it
+// without touching tensor data, and it costs about 50 ms even for a 34 GB
+// model. So nothing here is estimated that can be read, and the two figures
+// that genuinely cannot be (the compute buffers) are named as allowances.
 #pragma once
 
 #include <cstdint>
 #include <filesystem>
+#include <vector>
 
 namespace batbot {
+
+/// One piece of a model as llama.cpp places it: a whole block, or the output.
+///
+/// llama.cpp divides a model by layer, never by byte. `tensor_split` is turned
+/// into cumulative fractions and block `i` goes to the first device whose
+/// fraction exceeds `i / (n_block + 1)`, so a plan expressed in bytes only ever
+/// lands on the nearest whole block -- a 680 MB step on a 48-block model, which
+/// is enough to overfill a card that the arithmetic said had room. Planning in
+/// these units instead removes the rounding altogether.
+///
+/// The list runs in llama.cpp's own placement order: block 0 first, the output
+/// last. See ModelShape::units.
+struct ModelUnit {
+    std::uint64_t weights      = 0;  ///< the tensors in this unit
+    std::uint64_t kv_per_token = 0;  ///< 0 for a block that keeps no KV cache
+    std::uint64_t state        = 0;  ///< recurrent (SSM) state, fixed size
+};
 
 /// The parts of a model's memory footprint that are knowable before loading.
 struct ModelShape {
@@ -34,6 +54,13 @@ struct ModelShape {
     std::uint32_t layers  = 0;
     std::uint32_t vocab   = 0;
 
+    /// The input embedding, which llama.cpp keeps in system memory whatever
+    /// the offload settings say -- "there is very little benefit to offloading
+    /// the input layer", llama-model.cpp. It is part of `weights` but never
+    /// part of what a card is asked to hold, so it is named separately rather
+    /// than counted against video memory.
+    std::uint64_t host_weights = 0;
+
     /// Bytes of KV cache one token of context costs, summed over every layer.
     /// Zero for an architecture whose attention shape could not be read.
     std::uint64_t kv_per_token = 0;
@@ -42,20 +69,38 @@ struct ModelShape {
     /// arithmetic here.
     std::uint32_t train_ctx = 0;
 
+    /// Every placeable unit, in llama.cpp's order: `layers` blocks then the
+    /// output. Empty when the tensor table could not be read, which is the
+    /// signal to fall back to proportional splitting.
+    std::vector<ModelUnit> units;
+
     /// KV cache at `n_ctx` tokens.
     std::uint64_t kv_bytes(int n_ctx) const;
 
-    /// Roughly what the compute buffers and logits will want, over and above
-    /// the weights and the cache. Scales with the batch and the vocabulary,
-    /// which is where the large one -- the logits buffer -- comes from.
+    /// The recurrent state a hybrid model keeps: fixed-size, independent of
+    /// the context length, and zero for an ordinary transformer.
+    std::uint64_t state_bytes() const;
+
+    /// What one unit costs on the card that holds it, cache included.
+    std::uint64_t unit_bytes(std::size_t index, int n_ctx) const;
+
+    /// The logits buffer. Large -- a 152k vocabulary at a batch of 512 is
+    /// 300 MB -- and it lives only on the card holding the output unit, which
+    /// is why it is not part of the per-card allowance.
+    std::uint64_t logit_bytes(int n_batch) const;
+
+    /// The activations and workspace one card needs to run its share of the
+    /// graph, over and above the weights and the cache. This is the one figure
+    /// here that is an allowance rather than a reading: it depends on the shape
+    /// of the compute graph, which is not in the header.
     std::uint64_t compute_bytes(int n_batch) const;
 
     /// Everything: weights, cache and compute.
     std::uint64_t total_bytes(int n_ctx, int n_batch) const;
 
-    /// Weights plus cache -- the part that is divided between cards, since
-    /// both follow the layers. The compute buffers do not, and are covered by
-    /// the per-card headroom in devices.hpp instead.
+    /// Weights plus cache and state -- the part that is divided between cards,
+    /// since all of it follows the layers. The compute buffers do not, and are
+    /// covered by the per-card headroom in devices.hpp instead.
     std::uint64_t resident_bytes(int n_ctx) const;
 };
 

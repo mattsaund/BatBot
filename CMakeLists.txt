@@ -62,6 +62,8 @@ add_library(batbot_core STATIC
     # util: small standalone helpers with no BatBot dependencies
     src/util/text.cpp
     src/util/format.cpp
+    src/util/markdown.cpp
+    src/util/resources.cpp
     src/util/subprocess.cpp
 
     # config: what is on disk -- settings, paths, folder trust
@@ -84,11 +86,14 @@ add_library(batbot_core STATIC
     # routing: the subject table, the two routers, and the command list
     src/routing/subject.cpp
     src/routing/router.cpp
+    src/routing/benchmark.cpp
     src/routing/completion.cpp
 
     # llm: everything that touches llama.cpp
     src/llm/model_catalog.cpp
     src/llm/model_shape.cpp
+    src/llm/response_filter.cpp
+    src/tools/web_search.cpp
     src/llm/sampling.cpp
     src/llm/loaded_model.cpp
     src/llm/model_host.cpp
@@ -129,6 +134,9 @@ add_executable(batbot
     src/ui/transcript.cpp
     src/ui/widgets/bat_sprite.cpp
     src/ui/widgets/roundtable.cpp
+    src/ui/widgets/markdown_view.cpp
+    src/ui/widgets/scroll.cpp
+    src/ui/widgets/resource_meter.cpp
     src/ui/settings/settings_view.cpp
     src/ui/settings/line_editor.cpp
     src/ui/settings/model_picker.cpp

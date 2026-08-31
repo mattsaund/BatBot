@@ -100,6 +100,9 @@ void SettingsView::build_rows() {
     rows_.push_back({Kind::Float, "Min confidence",
                      "below this the delegator is treated as undecided",
                      nullptr, nullptr, &config_.routing.min_confidence, nullptr, 0, {}});
+    rows_.push_back({Kind::Bool, "Keep delegator loaded",
+                     "off frees it after each decision, leaving the expert the whole card",
+                     nullptr, nullptr, nullptr, &config_.routing.keep_delegator_loaded, 0, {}});
     rows_.push_back({Kind::Bool, "Use fallback expert",
                      "empty seats send work to Fallback rather than elsewhere",
                      nullptr, nullptr, nullptr, &config_.routing.use_fallback_expert, 0, {}});
@@ -159,12 +162,33 @@ void SettingsView::build_rows() {
     header("BEHAVIOUR");
     rows_.push_back({Kind::Text, "System prompt", "sent to every expert",
                      &config_.system_prompt, nullptr, nullptr, nullptr, 0, {}});
+    rows_.push_back({Kind::Enum, "Reasoning effort", "how hard a thinking model works",
+                     &config_.reasoning_effort, nullptr, nullptr, nullptr, 0,
+                     {"low", "medium", "high"}});
+
+    header("TOOLS");
+    rows_.push_back({Kind::Bool, "Web search",
+                     "let experts look things up -- the only thing BatBot sends off the machine",
+                     nullptr, nullptr, nullptr, &config_.tools.web_search, 0, {}});
+    rows_.push_back({Kind::Enum, "Search provider", "where the looking up happens",
+                     &config_.tools.search_provider, nullptr, nullptr, nullptr, 0,
+                     {"wikipedia", "searxng", "brave"}});
+    rows_.push_back({Kind::Text, "Search endpoint", "the address of your own searxng instance",
+                     &config_.tools.search_endpoint, nullptr, nullptr, nullptr, 0, {}});
+    rows_.push_back({Kind::Text, "Search API key", "for brave; stored in the config in plain text",
+                     &config_.tools.search_api_key, nullptr, nullptr, nullptr, 0, {}});
+    rows_.push_back({Kind::Int,  "Search results", "how many to hand the expert",
+                     nullptr, &config_.tools.search_results, nullptr, nullptr, 0, {}});
+    rows_.push_back({Kind::Int,  "Search rounds", "how many times one prompt may search",
+                     nullptr, &config_.tools.search_rounds, nullptr, nullptr, 0, {}});
 
     header("INTERFACE");
     rows_.push_back({Kind::Int,  "Animation ms", "frame interval while busy",
                      nullptr, &config_.ui.animation_ms, nullptr, nullptr, 0, {}});
     rows_.push_back({Kind::Bool, "Show roundtable", "draw the ring of experts",
                      nullptr, nullptr, nullptr, &config_.ui.show_roundtable, 0, {}});
+    rows_.push_back({Kind::Bool, "Show reasoning", "keep a thinking model's working on screen",
+                     nullptr, nullptr, nullptr, &config_.ui.show_reasoning, 0, {}});
     rows_.push_back({Kind::Bool, "Unicode glyphs", "off uses a pure-ASCII bat",
                      nullptr, nullptr, nullptr, &config_.ui.unicode, 0, {}});
 }
@@ -585,18 +609,18 @@ Element SettingsView::footer_hint() const {
     if (!rows_.empty() && selected_ < rows_.size()) {
         switch (rows_[selected_].kind) {
             case Kind::Directory:
-                return text(" enter browse folders   e type a path   ctrl-s save   esc back ");
+                return text(" enter browse folders   e type a path   esc back ");
             case Kind::ModelRef:
-                return text(" enter choose a model   r rescan   ctrl-s save   esc back ");
+                return text(" enter choose a model   r rescan   esc back ");
             case Kind::Panel:
-                return text(" enter open   ↑↓ move   ctrl-s save   esc back ");
+                return text(" enter open   ↑↓ move   esc back ");
             case Kind::Action:
-                return text(" enter reset to the default   ↑↓ move   ctrl-s save   esc back ");
+                return text(" enter reset to the default   ↑↓ move   esc back ");
             default:
                 break;
         }
     }
-    return text(" ↑↓ move   enter edit   e type   r rescan   ctrl-s save   esc back ");
+    return text(" ↑↓ move   enter edit   e type   r rescan   esc back ");
 }
 
 Element SettingsView::render() const {
@@ -611,9 +635,12 @@ Element SettingsView::render() const {
                             + (models_.size() == 1 ? "" : "s") + " found";
 
     Elements footer{footer_hint() | color(theme::kMeta) | dim};
-    if (dirty_) {
+    // No "unsaved changes" marker, because there is no such state: every
+    // committed edit is written before the next key is read. Saying so once,
+    // quietly, is what stops anyone hunting for the save key.
+    if (status_.empty()) {
         footer.push_back(filler());
-        footer.push_back(text("unsaved changes  ") | color(theme::kNotice) | bold);
+        footer.push_back(text("changes save automatically  ") | color(theme::kMeta) | dim);
     }
     if (!status_.empty()) {
         footer.push_back(filler());

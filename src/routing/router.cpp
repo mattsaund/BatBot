@@ -3,8 +3,9 @@
 // The two routers.
 //
 // KeywordRouter needs no model at all and keeps BatBot usable with nothing
-// installed. ModelRouter runs the delegator under a GBNF grammar, so its answer
-// is structurally incapable of naming a subject that does not exist.
+// installed. ModelRouter asks the delegator, and does it by scoring every
+// subject rather than by generating one: an invalid answer is not merely
+// unlikely, there is nowhere for it to come from.
 //
 // The keyword table below matches whole words only. Substring matching sounds
 // harmless until "ion" fires inside "function" and sends every programming
@@ -14,7 +15,8 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
-#include <sstream>
+#include <chrono>
+#include <cmath>
 
 namespace batbot {
 namespace {
@@ -139,6 +141,19 @@ RouteSource route_source_from_name(std::string_view name) {
     return RouteSource::Fallback;
 }
 
+std::string answer_prefix(std::string_view rendered) {
+    // Harmony, as llama.cpp's built-in formatter writes it: the assistant turn
+    // is opened and left there. The channel has to be named before a message
+    // can begin, and `final` is the channel an answer goes on.
+    constexpr std::string_view kHarmonyOpen = "<|start|>assistant";
+    if (rendered.size() >= kHarmonyOpen.size() &&
+        rendered.compare(rendered.size() - kHarmonyOpen.size(), kHarmonyOpen.size(),
+                         kHarmonyOpen) == 0) {
+        return "<|channel|>final<|message|>";
+    }
+    return {};
+}
+
 // ---------------------------------------------------------------------------
 // KeywordRouter
 // ---------------------------------------------------------------------------
@@ -195,16 +210,14 @@ ModelRouter::ModelRouter(LoadedModel& model, ModelParams params,
                          std::string system_prompt_override)
     : model_(model),
       params_(std::move(params)),
-      grammar_(router_grammar()),
       system_prompt_(system_prompt_override.empty() ? router_system_prompt()
                                                     : std::move(system_prompt_override)),
       examples_(router_examples()) {
-    // The router emits "TAG 0.87" and nothing else, so a handful of tokens is
-    // plenty; a larger budget would only buy latency on every single prompt.
-    params_.max_tokens = 16;
+    subjects_ = routable_subjects();
+    labels_   = router_labels();
 }
 
-RouteDecision ModelRouter::route(const std::string& prompt, const CancelCallback& cancel) {
+std::string ModelRouter::conversation(const std::string& question) const {
     // The worked examples go in as real user/assistant turns. Pasting the same
     // examples into the system prompt instead measured 42% against 74% on the
     // 1.2B delegator, so the shape of the conversation matters more here than
@@ -212,48 +225,97 @@ RouteDecision ModelRouter::route(const std::string& prompt, const CancelCallback
     std::vector<ChatMessage> messages;
     messages.reserve(examples_.size() * 2 + 2);
     messages.push_back({"system", system_prompt_});
-    for (const auto& [question, answer] : examples_) {
-        messages.push_back({"user", question});
+    for (const auto& [example, answer] : examples_) {
+        messages.push_back({"user", example});
         messages.push_back({"assistant", answer});
     }
-    messages.push_back({"user", prompt});
+    messages.push_back({"user", question});
 
-    std::string output;
-    const GenerationStats stats = model_.generate(
-        model_.format_chat(messages, true), params_,
-        [&output](std::string_view chunk) { output += chunk; },
-        cancel, grammar_);
+    // The label is scored as the very next token, so the prompt has to end
+    // where the answer would begin. See answer_prefix.
+    std::string rendered = model_.format_chat(messages, true);
+    rendered += answer_prefix(rendered);
+    return rendered;
+}
 
-    if (stats.cancelled) {
+void ModelRouter::calibrate() {
+    calibrated_ = true;
+    bias_.assign(labels_.size(), 0.0F);
+
+    // Content-free questions: whatever the delegator answers to these is not
+    // about the question, because there is no question. Several of them, so the
+    // measurement is of the model's prior rather than of one odd string.
+    const std::array<const char*, 3> nothing{{"N/A", "", "..."}};
+
+    int measured = 0;
+    for (const char* question : nothing) {
+        const std::vector<float> scores =
+            model_.score_labels(conversation(question), labels_, {});
+        if (scores.size() != bias_.size() || scores.front() <= kUnscored) {
+            continue;
+        }
+        for (std::size_t i = 0; i < scores.size(); ++i) {
+            bias_[i] += scores[i];
+        }
+        ++measured;
+    }
+    if (measured == 0) {
+        bias_.assign(labels_.size(), 0.0F);  // uncalibrated is better than wrong
+        return;
+    }
+    for (float& value : bias_) {
+        value /= static_cast<float>(measured);
+    }
+}
+
+std::vector<float> ModelRouter::raw_scores(const std::string& prompt) {
+    return model_.score_labels(conversation(prompt), labels_, {});
+}
+
+RouteDecision ModelRouter::route(const std::string& prompt, const CancelCallback& cancel) {
+    if (!calibrated_) {
+        calibrate();
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    std::vector<float> scores = model_.score_labels(conversation(prompt), labels_, cancel);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+
+    if (cancel && cancel()) {
         RouteDecision decision;
         decision.source = RouteSource::Fallback;
         decision.detail = "routing cancelled";
         return decision;
     }
-
-    // The grammar guarantees the shape, but a model can still be stopped early
-    // or a future grammar change could loosen it, so parse defensively and fall
-    // back to keywords rather than trusting a half-formed answer.
-    std::istringstream stream(output);
-    std::string tag;
-    float confidence = 0.0F;
-    if (stream >> tag) {
-        if (const std::optional<Subject> subject = subject_from_string(tag)) {
-            if (!(stream >> confidence)) {
-                confidence = 0.5F;
-            }
-            RouteDecision decision;
-            decision.subject    = *subject;
-            decision.confidence = std::clamp(confidence, 0.0F, 1.0F);
-            decision.source     = RouteSource::Model;
-            decision.detail     = std::to_string(static_cast<int>(stats.prompt_ms
-                                                                + stats.output_ms)) + "ms";
-            return decision;
-        }
+    if (scores.size() != labels_.size() || scores.front() <= kUnscored) {
+        // The model could not be scored at all -- a decode failure, or a
+        // context too small for the prompt. Keywords still work.
+        RouteDecision decision = fallback_.route(prompt, cancel);
+        decision.detail = "delegator could not be scored, used keywords";
+        return decision;
     }
 
-    RouteDecision decision = fallback_.route(prompt, cancel);
-    decision.detail = "router output unparseable (\"" + output + "\"), used keywords";
+    // Take out what the delegator would have said to no question at all, then
+    // read the rest as a distribution. See ModelRouter::bias_.
+    for (std::size_t i = 0; i < scores.size(); ++i) {
+        scores[i] -= calibration_ * bias_[i];
+    }
+
+    const auto best = static_cast<std::size_t>(
+        std::distance(scores.begin(), std::max_element(scores.begin(), scores.end())));
+
+    const float highest = scores[best];
+    float       sum     = 0.0F;
+    for (const float score : scores) {
+        sum += std::exp(score - highest);
+    }
+
+    RouteDecision decision;
+    decision.subject    = subjects_[best];
+    decision.confidence = sum > 0.0F ? std::clamp(1.0F / sum, 0.0F, 1.0F) : 0.0F;
+    decision.source     = RouteSource::Model;
+    decision.detail     = std::to_string(elapsed.count()) + "ms";
     return decision;
 }
 

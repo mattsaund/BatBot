@@ -7,20 +7,31 @@
 #include <filesystem>
 #include <fstream>
 
+#include <random>
+#include <map>
+#include <set>
+
+#include <ggml.h>
 #include <gguf.h>
 #include <nlohmann/json.hpp>
 
 #include "batbot/config/config.hpp"
 #include "batbot/config/gpu_policy.hpp"
+#include "batbot/routing/benchmark.hpp"
 #include "batbot/routing/completion.hpp"
 #include "batbot/engine/route_policy.hpp"
 #include "batbot/llm/model_catalog.hpp"
 #include "batbot/llm/model_shape.hpp"
+#include "batbot/llm/response_filter.hpp"
+#include "batbot/tools/web_search.hpp"
+#include "batbot/util/markdown.hpp"
+#include "batbot/util/resources.hpp"
 #include "batbot/config/paths.hpp"
 #include "batbot/routing/router.hpp"
 #include "batbot/engine/state.hpp"
 #include "batbot/routing/subject.hpp"
 #include "batbot/runtime/backend.hpp"
+#include "batbot/runtime/builder.hpp"
 #include "batbot/runtime/devices.hpp"
 #include "batbot/runtime/registry.hpp"
 #include "batbot/session/store.hpp"
@@ -136,24 +147,580 @@ TEST(every_subject_round_trips_through_its_own_strings) {
 }
 
 // ---------------------------------------------------------------------------
-// Router grammar
+// Resource monitor
 // ---------------------------------------------------------------------------
 
-TEST(router_grammar_names_every_subject) {
-    const std::string grammar = router_grammar();
+TEST(a_gpu_line_becomes_a_reading) {
+    util::ResourceSample sample;
+    CHECK(util::parse_gpu_line("NVIDIA GeForce RTX 4070, 2749, 12282, 55, 47", sample));
+    CHECK_EQ(sample.name, "NVIDIA GeForce RTX 4070");
+    CHECK_EQ(sample.used,  std::uint64_t{2749} * 1024 * 1024);
+    CHECK_EQ(sample.total, std::uint64_t{12282} * 1024 * 1024);
+    CHECK_EQ(sample.temperature_c, 55);
+    CHECK_EQ(sample.busy_percent, 47);
+    CHECK_EQ(sample.memory_percent(), 22);
+}
 
-    CHECK(grammar.find("root ::=") != std::string::npos);
-    CHECK(grammar.find("subject ::=") != std::string::npos);
-    CHECK(grammar.find("confidence ::=") != std::string::npos);
+TEST(a_card_that_reports_no_sensor_is_not_a_parse_failure) {
+    // Plenty of cards report no temperature, and some report no utilisation.
+    // That is a fact about the card, and the memory figures are still wanted.
+    util::ResourceSample sample;
+    CHECK(util::parse_gpu_line("Quadro K600, 100, 1024, [N/A], [N/A]", sample));
+    CHECK_EQ(sample.temperature_c, -1);
+    CHECK_EQ(sample.busy_percent, -1);
+    CHECK_EQ(sample.memory_percent(), 10);
 
-    // If a routable subject were missing from the grammar the delegator could
-    // never choose it, and the seat would be silently unreachable.
-    for (const Subject subject : routable_subjects()) {
-        std::string tag(subject_tag(subject));
-        while (!tag.empty() && tag.back() == ' ') {
-            tag.pop_back();
+    // But a line with no memory in it is not a reading at all.
+    CHECK(!util::parse_gpu_line("something went wrong", sample));
+    CHECK(!util::parse_gpu_line("", sample));
+}
+
+TEST(memory_is_measured_as_available_not_free) {
+    // The distinction that matters on a machine running BatBot: after reading a
+    // 30 GB model, nearly all of "free" memory is page cache. Reporting 98%
+    // used would be true of nothing anybody cares about.
+    const std::string meminfo =
+        "MemTotal:       49000000 kB\n"
+        "MemFree:          800000 kB\n"
+        "MemAvailable:   40000000 kB\n"
+        "Buffers:          100000 kB\n";
+    std::uint64_t used  = 0;
+    std::uint64_t total = 0;
+    CHECK(util::parse_meminfo(meminfo, used, total));
+    CHECK_EQ(total, std::uint64_t{49000000} * 1024);
+    CHECK_EQ(used,  std::uint64_t{9000000} * 1024);
+
+    CHECK(!util::parse_meminfo("nothing useful here\n", used, total));
+}
+
+TEST(processor_time_is_split_into_busy_and_total) {
+    // Fields: user nice system idle iowait irq softirq steal. Idle and iowait
+    // are the two that are not work.
+    std::uint64_t busy  = 0;
+    std::uint64_t total = 0;
+    CHECK(util::parse_stat("cpu  100 20 30 700 50 0 0 0\ncpu0 1 2 3 4\n", busy, total));
+    CHECK_EQ(total, std::uint64_t{900});
+    CHECK_EQ(busy,  std::uint64_t{150});
+
+    // The per-core lines are not the aggregate, and must not be read as one.
+    CHECK(!util::parse_stat("cpu0 1 2 3 4\n", busy, total));
+}
+
+TEST(a_processor_name_is_a_name_not_a_legal_notice) {
+    CHECK_EQ(util::parse_cpu_name("model name\t: 12th Gen Intel(R) Core(TM) i5-12400\n"),
+             "12th Gen Intel Core i5-12400");
+    CHECK_EQ(util::parse_cpu_name("model name : AMD Ryzen 9 7950X 16-Core Processor\n"),
+             "AMD Ryzen 9 7950X 16-Core");
+    // The clock is not part of the name, and on a modern part it is not the
+    // clock either.
+    CHECK_EQ(util::parse_cpu_name("model name : Intel(R) Xeon(R) CPU E5-2670 @ 2.60GHz\n"),
+             "Intel Xeon E5-2670");
+    CHECK(util::parse_cpu_name("flags : fpu vme\n").empty());
+}
+
+// ---------------------------------------------------------------------------
+// Markdown
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// The plain text of a run of spans, with the styling thrown away.
+std::string flat_spans(const std::vector<markdown::Span>& spans) {
+    std::string text;
+    for (const markdown::Span& span : spans) {
+        text += span.text;
+    }
+    return text;
+}
+
+std::string flat(const markdown::Block& block) {
+    return flat_spans(block.spans);
+}
+
+}  // namespace
+
+TEST(headings_lists_and_rules_are_recognised) {
+    const std::vector<markdown::Block> blocks = markdown::parse(
+        "## What a pointer is\n"
+        "\n"
+        "- a memory address\n"
+        "- a reference tool\n"
+        "\n"
+        "1. first\n"
+        "2) second\n"
+        "\n"
+        "> quoted\n"
+        "---\n"
+        "ordinary prose\n");
+
+    std::vector<markdown::BlockKind> kinds;
+    for (const markdown::Block& block : blocks) {
+        if (block.kind != markdown::BlockKind::Blank) {
+            kinds.push_back(block.kind);
         }
-        CHECK(grammar.find("\"" + tag + "\"") != std::string::npos);
+    }
+    const std::vector<markdown::BlockKind> expected{
+        markdown::BlockKind::Heading,  markdown::BlockKind::Bullet,
+        markdown::BlockKind::Bullet,   markdown::BlockKind::Numbered,
+        markdown::BlockKind::Numbered, markdown::BlockKind::Quote,
+        markdown::BlockKind::Rule,     markdown::BlockKind::Paragraph};
+    CHECK_EQ(kinds.size(), expected.size());
+    for (std::size_t i = 0; i < kinds.size() && i < expected.size(); ++i) {
+        CHECK(kinds[i] == expected[i]);
+    }
+    CHECK_EQ(blocks.front().level, 2);
+    CHECK_EQ(flat(blocks.front()), "What a pointer is");
+}
+
+TEST(a_table_is_recognised_by_the_row_under_its_header) {
+    const std::vector<markdown::Block> blocks = markdown::parse(
+        "| Planet | Radius (km) | Moons |\n"
+        "|--------|------------:|:-----:|\n"
+        "| Mercury | 2,440 | 0 |\n"
+        "| Mars | 3,390 | 2 |\n");
+
+    CHECK_EQ(blocks.size(), std::size_t{4});  // header, rule, two rows
+    CHECK(blocks[0].kind == markdown::BlockKind::TableRow);
+    CHECK(blocks[1].kind == markdown::BlockKind::TableRule);
+    CHECK(blocks[2].kind == markdown::BlockKind::TableRow);
+
+    // Three columns, and the alignment the delimiter row asked for.
+    CHECK_EQ(blocks[0].cells.size(), std::size_t{3});
+    CHECK_EQ(blocks[1].marker, "lrc");
+
+    // Cell text survives intact -- a thousands separator is not markup.
+    CHECK_EQ(flat_spans(blocks[2].cells.at(1)), "2,440");
+    CHECK_EQ(flat_spans(blocks[0].cells.at(0)), "Planet");
+    CHECK_EQ(flat_spans(blocks[3].cells.at(2)), "2");
+}
+
+TEST(a_line_with_a_pipe_in_it_is_not_a_table) {
+    // The failure this guards: an answer about shell pipelines is full of
+    // pipes, and turning one into a one-row table would be worse than leaving
+    // the pipes alone. What makes a table is the delimiter row under it.
+    for (const std::string_view prose : {"run `ls | grep foo` to filter",
+                                         "the options are a | b | c",
+                                         "| not | a | table |"}) {
+        for (const markdown::Block& block : markdown::parse(prose)) {
+            CHECK(block.kind != markdown::BlockKind::TableRow);
+        }
+    }
+}
+
+TEST(a_table_without_outer_pipes_is_still_a_table) {
+    // GitHub-flavoured markdown allows them to be left off, and models do.
+    const std::vector<markdown::Block> blocks =
+        markdown::parse("a | b\n--- | ---\n1 | 2\n");
+    CHECK(blocks.at(0).kind == markdown::BlockKind::TableRow);
+    CHECK(blocks.at(1).kind == markdown::BlockKind::TableRule);
+    CHECK_EQ(blocks.at(2).cells.size(), std::size_t{2});
+    CHECK_EQ(flat_spans(blocks.at(2).cells.at(1)), "2");
+}
+
+TEST(a_table_ends_where_its_rows_do) {
+    const std::vector<markdown::Block> blocks =
+        markdown::parse("| a | b |\n|---|---|\n| 1 | 2 |\nback to prose\n");
+    CHECK(blocks.back().kind == markdown::BlockKind::Paragraph);
+    CHECK_EQ(flat_spans(blocks.back().spans), "back to prose");
+}
+
+TEST(a_fenced_block_is_code_all_the_way_to_its_close) {
+    const std::vector<markdown::Block> blocks = markdown::parse(
+        "Here:\n```python\n# not a heading\n- not a bullet\n**not bold**\n```\ndone\n");
+
+    int code = 0;
+    for (const markdown::Block& block : blocks) {
+        if (block.kind == markdown::BlockKind::Code) {
+            ++code;
+            // Nothing inside a fence is markup, which is the point of a fence.
+            CHECK(block.spans.size() == 1);
+            CHECK(block.spans.front().code);
+            CHECK_EQ(block.marker, "python");
+        }
+    }
+    CHECK_EQ(code, 3);
+    CHECK(blocks.front().kind == markdown::BlockKind::Paragraph);
+    CHECK(blocks.back().kind == markdown::BlockKind::Paragraph);
+}
+
+TEST(code_keeps_its_indentation) {
+    // Re-flowed code is code that no longer runs.
+    const std::vector<markdown::Block> blocks =
+        markdown::parse("```\ndef f():\n    return 1\n```\n");
+    CHECK_EQ(blocks.at(1).spans.front().text, "    return 1");
+}
+
+TEST(inline_styling_is_split_into_runs) {
+    const std::vector<markdown::Span> spans =
+        markdown::parse_inline("plain **bold** and `code` and *italic*");
+    std::string bold;
+    std::string code;
+    std::string italic;
+    for (const markdown::Span& span : spans) {
+        if (span.bold)   { bold   += span.text; }
+        if (span.code)   { code   += span.text; }
+        if (span.italic) { italic += span.text; }
+    }
+    CHECK_EQ(bold, "bold");
+    CHECK_EQ(code, "code");
+    CHECK_EQ(italic, "italic");
+
+    // And the markers themselves are gone.
+    std::string all;
+    for (const markdown::Span& span : spans) {
+        all += span.text;
+    }
+    CHECK_EQ(all, "plain bold and code and italic");
+}
+
+TEST(a_lone_asterisk_is_not_the_start_of_anything) {
+    // An expert writing "3 * 4" or a footnote marker must not turn the rest of
+    // the line italic and lose the character while doing it.
+    for (const std::string_view line : {"3 * 4 = 12", "see note *", "a_b_c and snake_case"}) {
+        std::string all;
+        for (const markdown::Span& span : markdown::parse_inline(line)) {
+            all += span.text;
+            CHECK(!span.italic);
+        }
+        CHECK_EQ(all, std::string(line));
+    }
+}
+
+TEST(inline_code_is_not_searched_for_markup) {
+    const std::vector<markdown::Span> spans = markdown::parse_inline("use `a ** b` for powers");
+    for (const markdown::Span& span : spans) {
+        CHECK(!span.bold);
+    }
+    std::string all;
+    for (const markdown::Span& span : spans) {
+        all += span.text;
+    }
+    CHECK_EQ(all, "use a ** b for powers");
+}
+
+TEST(text_with_no_markdown_in_it_survives_unchanged) {
+    // The regression that matters: a model that writes plain prose must come
+    // out exactly as it went in.
+    const std::string plain = "Water boils at 100 C. That is 212 F, at sea level.";
+    const std::vector<markdown::Block> blocks = markdown::parse(plain);
+    CHECK_EQ(blocks.size(), std::size_t{1});
+    CHECK(blocks.front().kind == markdown::BlockKind::Paragraph);
+    CHECK_EQ(flat(blocks.front()), plain);
+}
+
+// ---------------------------------------------------------------------------
+// Web search
+// ---------------------------------------------------------------------------
+
+TEST(a_query_is_encoded_before_it_becomes_a_url) {
+    // The query is whatever the model wrote. An unencoded '&' turns one
+    // parameter into two, and an unencoded newline splits the request.
+    tools::SearchSettings settings;
+    settings.provider = "wikipedia";
+
+    const std::string url = tools::request_url("a&b c=d\ne", settings);
+    CHECK(url.find("a%26b%20c%3Dd%0Ae") != std::string::npos);
+    CHECK(url.find('\n') == std::string::npos);
+    // And what is safe is left alone, so a URL stays readable.
+    CHECK(tools::request_url("linux-kernel_v6.1~rc", settings).find(
+              "linux-kernel_v6.1~rc") != std::string::npos);
+}
+
+TEST(each_provider_builds_the_url_it_needs) {
+    tools::SearchSettings settings;
+
+    settings.provider = "wikipedia";
+    CHECK(tools::request_url("cats", settings).rfind("https://en.wikipedia.org/w/api.php", 0) == 0);
+
+    // searxng is somebody's own instance, so without its address there is
+    // nothing to ask -- and returning a half-built URL would send the query to
+    // whatever happened to answer.
+    settings.provider = "searxng";
+    CHECK(tools::request_url("cats", settings).empty());
+    settings.endpoint = "http://localhost:8888/";
+    const std::string searx = tools::request_url("cats", settings);
+    CHECK_EQ(searx, "http://localhost:8888/search?format=json&q=cats");  // no doubled slash
+
+    settings.provider = "brave";
+    CHECK(tools::request_url("cats", settings).rfind("https://api.search.brave.com", 0) == 0);
+
+    // An unknown provider asks nobody.
+    settings.provider = "altavista";
+    CHECK(tools::request_url("cats", settings).empty());
+
+    // And an empty query is not a search.
+    settings.provider = "wikipedia";
+    CHECK(tools::request_url("", settings).empty());
+}
+
+TEST(a_wikipedia_response_becomes_results) {
+    // Trimmed from a real response. The snippet arrives with the matched words
+    // wrapped in markup, which an expert should not have to read around.
+    const std::string body = R"({"query":{"search":[
+        {"title":"List of capitals of France","snippet":"The <span class=\"searchmatch\">capital</span>\n  of France has been Paris"},
+        {"title":"Paris","snippet":"Paris is the capital of France"}]}})";
+
+    const std::vector<tools::SearchResult> results = tools::parse_results("wikipedia", body, 5);
+    CHECK_EQ(results.size(), std::size_t{2});
+    CHECK_EQ(results[0].title, "List of capitals of France");
+    CHECK_EQ(results[0].snippet, "The capital of France has been Paris");
+    CHECK_EQ(results[0].url, "https://en.wikipedia.org/wiki/List%20of%20capitals%20of%20France");
+    CHECK_EQ(results[1].title, "Paris");
+}
+
+TEST(the_result_limit_is_honoured_whatever_the_provider_sent) {
+    const std::string body =
+        R"({"results":[{"url":"a","title":"A"},{"url":"b","title":"B"},{"url":"c","title":"C"}]})";
+    CHECK_EQ(tools::parse_results("searxng", body, 2).size(), std::size_t{2});
+    CHECK_EQ(tools::parse_results("searxng", body, 99).size(), std::size_t{3});
+}
+
+TEST(a_response_that_is_not_what_was_expected_yields_nothing) {
+    // A rate-limit page, an error object, a truncated body. Every one of these
+    // has to come back empty rather than throw out of the engine thread.
+    CHECK(tools::parse_results("wikipedia", "<html>rate limited</html>", 5).empty());
+    CHECK(tools::parse_results("wikipedia", R"({"error":{"code":"badvalue"}})", 5).empty());
+    CHECK(tools::parse_results("searxng",   R"({"results":"not an array"})", 5).empty());
+    CHECK(tools::parse_results("brave",     R"({"web":{}})", 5).empty());
+    CHECK(tools::parse_results("wikipedia", "", 5).empty());
+    CHECK(tools::parse_results("nobody",    R"({"query":{"search":[]}})", 5).empty());
+}
+
+TEST(an_expert_asks_to_search_on_a_line_of_its_own) {
+    CHECK_EQ(tools::search_request("SEARCH: rust 1.90 release date", ""),
+             "rust 1.90 release date");
+    CHECK_EQ(tools::search_request("Let me look that up.\nSEARCH: tallest building 2026", ""),
+             "tallest building 2026");
+    // Models dress it up; the query is still the query.
+    CHECK_EQ(tools::search_request("**SEARCH:** who won the 2025 world cup**", ""),
+             "who won the 2025 world cup");
+    CHECK_EQ(tools::search_request("  SEARCH:   spaced out  ", ""), "spaced out");
+}
+
+TEST(an_expert_talking_about_searching_is_not_searching) {
+    // The failure that matters: an expert explaining the tool, or quoting the
+    // instructions back, must not be taken as using it.
+    CHECK(tools::search_request("You can write SEARCH: followed by a query.", "").empty());
+    CHECK(tools::search_request("The answer is 42.", "").empty());
+    CHECK(tools::search_request("", "").empty());
+    // A marker with nothing after it is not a query either.
+    CHECK(tools::search_request("SEARCH:", "").empty());
+}
+
+TEST(a_models_own_tool_call_is_recognised_as_a_search) {
+    // What gpt-oss actually does when told it can search: it ignores the
+    // convention it was given and writes a call in its own format, on the
+    // channel meant for tool calls -- which arrives here as reasoning, with
+    // nothing at all on the channel the user reads.
+    CHECK_EQ(tools::search_request(
+                 "", R"(We need to search.{"query": "JWST launch date", "topn": 5})"),
+             "JWST launch date");
+
+    // Nested objects must not end the scan early.
+    CHECK_EQ(tools::search_request("", R"({"args": {"depth": 2}, "query": "nested"})"),
+             "nested");
+}
+
+TEST(a_model_that_answered_is_not_also_asking_to_search) {
+    // The reasoning is only read when nothing was said to the user. Otherwise a
+    // programming expert showing you a JSON object with a "query" field would
+    // send that field to a search engine.
+    CHECK(tools::search_request(R"(Here is the payload: {"query": "select 1"})",
+                                R"(I should show them {"query": "select 1"})")
+              .empty());
+    // Whitespace is not an answer, though.
+    CHECK_EQ(tools::search_request("  \n ", R"({"query": "still asking"})"), "still asking");
+}
+
+TEST(search_results_are_handed_to_the_expert_as_readable_text) {
+    const std::vector<tools::SearchResult> results{
+        {"Paris", "https://example.org/paris", "The capital of France."}};
+    const std::string text = tools::format_for_model("capital of france", results);
+    CHECK(text.find("capital of france") != std::string::npos);
+    CHECK(text.find("https://example.org/paris") != std::string::npos);
+    CHECK(text.find("The capital of France.") != std::string::npos);
+
+    // Nothing found is said plainly rather than as an empty list, so the expert
+    // answers from what it knows instead of inventing a citation.
+    const std::string nothing = tools::format_for_model("obscure thing", {});
+    CHECK(nothing.find("returned nothing") != std::string::npos);
+}
+
+TEST(search_does_nothing_at_all_until_it_is_switched_on) {
+    // The whole reason the setting exists: no request leaves the machine while
+    // it is off, whatever a model asks for.
+    tools::SearchSettings settings;
+    CHECK(!settings.enabled);
+    std::string error;
+    CHECK(tools::search("anything", settings, error).empty());
+    CHECK(error.find("off") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// Reasoning and answer
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Feed `text` through a filter one `chunk` bytes at a time, so a test can ask
+/// what happens when a marker is split across the boundary -- which is the
+/// ordinary case, since a marker is several tokens long.
+ResponseFilter::Piece filter_in_chunks(std::string_view text, std::size_t chunk) {
+    ResponseFilter filter;
+    ResponseFilter::Piece total;
+    for (std::size_t at = 0; at < text.size(); at += chunk) {
+        const ResponseFilter::Piece piece = filter.feed(text.substr(at, chunk));
+        total.reasoning += piece.reasoning;
+        total.answer    += piece.answer;
+    }
+    const ResponseFilter::Piece last = filter.flush();
+    total.reasoning += last.reasoning;
+    total.answer    += last.answer;
+    return total;
+}
+
+}  // namespace
+
+TEST(a_model_that_marks_nothing_is_left_alone) {
+    // The common case, and the one that must not regress: a model with no
+    // reasoning convention at all produces exactly what it produced before.
+    const std::string plain = "Water boils at 100 C at sea level.";
+    for (const std::size_t chunk : {1U, 3U, 7U, 999U}) {
+        const ResponseFilter::Piece out = filter_in_chunks(plain, chunk);
+        CHECK_EQ(out.answer, plain);
+        CHECK(out.reasoning.empty());
+    }
+}
+
+TEST(harmony_channels_are_split_into_working_and_answer) {
+    // What gpt-oss actually emits. llama.cpp classifies these markers as
+    // user-defined rather than control, so they arrive as visible text and the
+    // whole analysis channel lands in the transcript unless something sorts it.
+    const std::string raw =
+        "<|channel|>analysis<|message|>We need the boiling point. It is 100 C."
+        "<|end|><|start|>assistant<|channel|>final<|message|>"
+        "Water boils at 100 °C at sea level.";
+
+    for (const std::size_t chunk : {1U, 2U, 5U, 11U, 999U}) {
+        const ResponseFilter::Piece out = filter_in_chunks(raw, chunk);
+        CHECK_EQ(out.answer, "Water boils at 100 °C at sea level.");
+        CHECK_EQ(out.reasoning, "We need the boiling point. It is 100 C.");
+    }
+}
+
+TEST(the_role_between_harmony_messages_is_not_part_of_either) {
+    // "assistant" appears between <|end|> and <|channel|>. It is a header, and
+    // putting it at the front of the answer is exactly the kind of stray text
+    // that makes a reply look broken.
+    const ResponseFilter::Piece out = filter_in_chunks(
+        "<|channel|>analysis<|message|>x<|end|><|start|>assistant"
+        "<|channel|>final<|message|>y", 1);
+    CHECK_EQ(out.answer, "y");
+    CHECK_EQ(out.reasoning, "x");
+}
+
+TEST(think_tags_are_split_the_same_way) {
+    // DeepSeek-R1, Qwen3 and most of what followed them.
+    for (const std::size_t chunk : {1U, 4U, 999U}) {
+        const ResponseFilter::Piece out =
+            filter_in_chunks("<think>Let me work this out.</think>The answer is 42.", chunk);
+        CHECK_EQ(out.answer, "The answer is 42.");
+        CHECK_EQ(out.reasoning, "Let me work this out.");
+    }
+}
+
+TEST(a_less_than_sign_in_an_answer_is_still_a_less_than_sign) {
+    // The filter holds text back when it might be the start of a marker, and
+    // the risk is that it holds back something that never was one -- or worse,
+    // silently eats it.
+    const std::string code = "if (a < b) { x<y; } // <not a marker> <|nope|>";
+    for (const std::size_t chunk : {1U, 3U, 999U}) {
+        CHECK_EQ(filter_in_chunks(code, chunk).answer, code);
+    }
+}
+
+TEST(a_reply_cut_off_mid_marker_does_not_lose_its_last_characters) {
+    // Hitting the token limit part way through "<|chan" leaves bytes held back
+    // that nothing else will ever resolve. flush() is what releases them.
+    ResponseFilter filter;
+    ResponseFilter::Piece out = filter.feed("done <|chan");
+    CHECK_EQ(out.answer, "done ");
+    out = filter.flush();
+    CHECK_EQ(out.answer, "<|chan");
+}
+
+TEST(the_filter_knows_when_the_answer_has_started) {
+    // What the status line reads to say "thinking" rather than "answering".
+    ResponseFilter filter;
+    CHECK(filter.answering());  // a model with no markers is answering at once
+    filter.feed("<|channel|>analysis<|message|>working");
+    CHECK(!filter.answering());
+    filter.feed("<|end|><|start|>assistant<|channel|>final<|message|>hello");
+    CHECK(filter.answering());
+}
+
+// ---------------------------------------------------------------------------
+// Router labels
+// ---------------------------------------------------------------------------
+
+TEST(a_reasoning_format_is_asked_where_its_answer_actually_goes) {
+    // The failure this exists for, and it is not a subtle one: a delegator
+    // whose chat format opens the assistant turn with a channel marker was
+    // being asked how likely each subject was as the very next token, at a
+    // position where no word can occur at all. gpt-oss-20b scored 13% -- the
+    // 11% that guessing gives -- and put 52 of 54 prompts in one seat.
+    CHECK_EQ(answer_prefix("<|start|>user<|message|>hi<|end|><|start|>assistant"),
+             "<|channel|>final<|message|>");
+
+    // Formats whose assistant turn begins with the answer need nothing, which
+    // is most of them.
+    CHECK(answer_prefix("<|im_start|>assistant\n").empty());
+    CHECK(answer_prefix("### Assistant:").empty());
+    CHECK(answer_prefix("").empty());
+
+    // And the header has to be at the end. One earlier in the conversation is a
+    // turn that already happened.
+    CHECK(answer_prefix("<|start|>assistant<|message|>hello<|return|>").empty());
+}
+
+TEST(router_labels_name_every_routable_subject_and_nothing_else) {
+    const std::vector<Subject>     subjects = routable_subjects();
+    const std::vector<std::string> labels   = router_labels();
+
+    // The two are read in lockstep by ModelRouter: labels[i] is the tag it
+    // scores for subjects[i]. A mismatch in length or order would route every
+    // prompt to the wrong seat while looking entirely healthy.
+    CHECK_EQ(labels.size(), subjects.size());
+    for (std::size_t i = 0; i < labels.size(); ++i) {
+        CHECK(subject_from_string(labels[i]) == subjects[i]);
+    }
+}
+
+TEST(router_labels_carry_no_padding) {
+    // subject_tag pads to a fixed width for the roundtable chips ("BIO "), and
+    // a trailing space changes how the tag tokenises -- which would be scored
+    // against a label the model was never shown.
+    for (const std::string& label : router_labels()) {
+        CHECK(!label.empty());
+        CHECK(label.front() != ' ');
+        CHECK(label.back() != ' ');
+    }
+}
+
+TEST(the_delegator_is_never_offered_the_fallback_seat) {
+    // Unrepresentable, not merely unlikely: Fallback is not among the labels,
+    // so no score can name it.
+    for (const std::string& label : router_labels()) {
+        CHECK(subject_from_string(label) != Subject::Fallback);
+    }
+    CHECK_EQ(router_labels().size(), kSubjectCount - 1);
+
+    // And the worked examples answer with exactly those tags -- an example
+    // that answered anything else would teach the model to produce a string
+    // the scorer never asks about.
+    const std::vector<std::string> labels = router_labels();
+    for (const auto& [question, answer] : router_examples()) {
+        CHECK(std::find(labels.begin(), labels.end(), answer) != labels.end());
     }
 }
 
@@ -196,51 +763,84 @@ TEST(fallback_is_the_tenth_seat_and_is_not_routable) {
     CHECK(subject_from_string("FALL")     == Subject::Fallback);
 }
 
-TEST(the_grammar_cannot_name_the_fallback_seat) {
-    const std::string grammar = router_grammar();
-    // Unrepresentable, not merely unlikely: the sampler cannot emit it.
-    CHECK(grammar.find("\"FALL\"") == std::string::npos);
+TEST(every_subject_gets_the_same_number_of_worked_examples) {
+    const std::vector<std::pair<std::string, std::string>> examples = router_examples();
+    const std::vector<Subject> routable = routable_subjects();
 
-    // The subject rule must list exactly the routable subjects, no more. Count
-    // only within that line: the root and confidence rules carry quoted
-    // literals of their own (" ", "0.", "1.00").
-    const std::size_t rule_at = grammar.find("subject ::=");
-    CHECK(rule_at != std::string::npos);
-    const std::string rule = grammar.substr(rule_at, grammar.find('\n', rule_at) - rule_at);
+    // The same number each, because a subject with more examples than its
+    // neighbours is a subject the delegator is being nudged towards -- and the
+    // nudge is invisible in the score until one seat stops being reachable.
+    CHECK_EQ(examples.size(), routable.size() * 2);
 
-    std::size_t quoted = 0;
-    for (std::size_t at = rule.find('"'); at != std::string::npos;
-         at = rule.find('"', at + 1)) {
-        ++quoted;
-    }
-    CHECK_EQ(quoted / 2, routable_subjects().size());
-
-    // And every routable tag is actually one of them.
-    for (const Subject subject : routable_subjects()) {
-        std::string tag(subject_tag(subject));
-        while (!tag.empty() && tag.back() == ' ') {
-            tag.pop_back();
+    std::map<Subject, int> seen;
+    const std::vector<std::string> labels = router_labels();
+    for (const auto& [question, answer] : examples) {
+        CHECK(!question.empty());
+        // The answer is exactly the label that gets scored, and nothing else:
+        // an example demonstrating a longer answer would teach the delegator to
+        // continue past the string the scorer measures.
+        CHECK(answer.find(' ') == std::string::npos ||
+              std::find(labels.begin(), labels.end(), answer) != labels.end());
+        const auto subject = subject_from_string(answer);
+        CHECK(subject.has_value());
+        if (subject) {
+            ++seen[*subject];
         }
-        CHECK(rule.find('"' + tag + '"') != std::string::npos);
+    }
+    for (const Subject subject : routable) {
+        CHECK_EQ(seen[subject], 2);
     }
 }
 
-TEST(router_examples_demonstrate_every_subject_once) {
-    const auto examples = router_examples();
-    CHECK_EQ(examples.size(), routable_subjects().size());
-
-    for (std::size_t i = 0; i < examples.size(); ++i) {
-        const auto& [question, answer] = examples[i];
-        CHECK(!question.empty());
-        // The answer must be exactly what the grammar permits, or the examples
-        // would demonstrate a format the model is then forbidden to produce.
-        const std::string tag = answer.substr(0, answer.find(' '));
-        const auto subject = subject_from_string(tag);
-        CHECK(subject.has_value());
-        if (subject) {
-            CHECK(static_cast<std::size_t>(*subject) == i);
+TEST(no_worked_example_is_a_benchmark_prompt) {
+    // The examples go into the delegator's prompt and the benchmark measures
+    // it. An example that is also a test case measures how well the prompt was
+    // copied into the answer sheet, which is how a routing change can look like
+    // an improvement while making nothing better.
+    //
+    // Paraphrases count, so this is not string equality. It is shared *rare*
+    // words: two questions that both say "semicolon" and "comma" are the same
+    // question, while two that both say "what is the difference between" merely
+    // have the same shape. Rarity is measured against the benchmark itself, so
+    // there is no list of stop words to keep up to date.
+    std::map<std::string, int> appearances;
+    const auto words = [](std::string_view text) {
+        std::set<std::string> out;
+        std::string word;
+        for (const char c : text) {
+            if (std::isalnum(static_cast<unsigned char>(c)) != 0) {
+                word += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            } else if (!word.empty()) {
+                out.insert(std::exchange(word, {}));
+            }
         }
-        CHECK(answer.find(' ') != std::string::npos);
+        if (!word.empty()) {
+            out.insert(word);
+        }
+        return out;
+    };
+
+    for (const RouteCase& test : benchmark_cases()) {
+        for (const std::string& word : words(test.prompt)) {
+            ++appearances[word];
+        }
+    }
+
+    for (const auto& [question, answer] : router_examples()) {
+        const std::set<std::string> example = words(question);
+        for (const RouteCase& test : benchmark_cases()) {
+            std::vector<std::string> rare;
+            for (const std::string& word : words(test.prompt)) {
+                if (appearances[word] <= 1 && example.count(word) > 0) {
+                    rare.push_back(word);
+                }
+            }
+            if (rare.size() >= 2) {
+                std::printf("      example \"%s\"\n      reuses %s of benchmark \"%s\"\n",
+                            question.c_str(), rare[0].c_str(), std::string(test.prompt).c_str());
+            }
+            CHECK(rare.size() < 2);
+        }
     }
 }
 
@@ -336,6 +936,18 @@ RouteDecision proposal(Subject subject, float confidence, RouteSource source) {
 }
 
 }  // namespace
+
+TEST(a_decision_nobody_made_names_the_fallback_seat) {
+    // A default-constructed decision is what the engine gets when the delegator
+    // could not run -- no model assigned, or a load that failed. It has to name
+    // the seat that means "undecided", because whatever it names is where the
+    // prompt goes: defaulting to a real subject sent every such prompt to that
+    // subject's expert as though something had chosen it.
+    const RouteDecision nothing;
+    CHECK(nothing.subject == Subject::Fallback);
+    CHECK(nothing.source == RouteSource::Fallback);
+    CHECK(nothing.confidence == 0.0F);
+}
 
 TEST(a_confident_route_to_a_filled_seat_stands) {
     const Config config = config_with({Subject::Physics, Subject::Fallback});
@@ -1106,6 +1718,83 @@ void write_test_gguf(const std::filesystem::path& file, std::uint32_t layers,
     gguf_free(gguf);
 }
 
+/// Write a GGUF with a real tensor table: a small hybrid model, one block in
+/// `attention_every` carrying a K/V projection and the rest a recurrent state.
+///
+/// The metadata-only fixture above exercises the fallback path, where there is
+/// nothing to read but hparams. This one exercises the path that matters for a
+/// real model: what each block weighs, and which of them actually cache.
+void write_test_gguf_with_tensors(const std::filesystem::path& file, std::uint32_t layers,
+                                  std::uint32_t attention_every, std::uint32_t embd,
+                                  std::uint32_t kv_width, std::uint32_t vocab) {
+    ggml_init_params init{};
+    init.mem_size   = static_cast<std::size_t>(layers + 8) * 4 * ggml_tensor_overhead();
+    init.mem_buffer = nullptr;
+    init.no_alloc   = true;  // shapes only; no tensor data is written
+    ggml_context* ctx = ggml_init(init);
+
+    gguf_context* gguf = gguf_init_empty();
+    gguf_set_val_str(gguf, "general.architecture", "testarch");
+    gguf_set_val_u32(gguf, "testarch.block_count", layers);
+    gguf_set_val_u32(gguf, "testarch.embedding_length", embd);
+    gguf_set_val_u32(gguf, "testarch.ssm.inner_size", 8);
+    gguf_set_val_u32(gguf, "testarch.ssm.state_size", 4);
+
+    const auto add = [&](const std::string& name, std::int64_t rows, std::int64_t columns) {
+        ggml_tensor* tensor = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, rows, columns);
+        ggml_set_name(tensor, name.c_str());
+        gguf_add_tensor(gguf, tensor);
+    };
+
+    add("token_embd.weight", embd, vocab);
+    add("output.weight", embd, vocab);
+    add("output_norm.weight", embd, 1);
+    for (std::uint32_t layer = 0; layer < layers; ++layer) {
+        const std::string prefix = "blk." + std::to_string(layer) + ".";
+        add(prefix + "attn_norm.weight", embd, 1);
+        if (attention_every > 0 && (layer + 1) % attention_every == 0) {
+            add(prefix + "attn_q.weight", embd, embd);
+            add(prefix + "attn_k.weight", embd, kv_width);
+            add(prefix + "attn_v.weight", embd, kv_width);
+        } else {
+            add(prefix + "ssm_conv1d.weight", 4, 8);
+            add(prefix + "ssm_out.weight", embd, embd);
+        }
+    }
+
+    gguf_write_to_file(gguf, file.string().c_str(), /*only_meta=*/true);
+    gguf_free(gguf);
+    ggml_free(ctx);
+}
+
+/// Replay llama.cpp's own layer assignment for a `tensor_split`.
+///
+/// Copied from llama-model.cpp: the split is made cumulative, normalised, and
+/// unit `i` goes to the first device whose share exceeds `i / total`. Anything
+/// this file claims about layer counts is only true if it survives this.
+std::vector<int> llama_cpp_assignment(const std::vector<float>& split, int units) {
+    std::vector<float> cumulative(split.size(), 0.0F);
+    float running = 0.0F;
+    for (std::size_t i = 0; i < split.size(); ++i) {
+        running      += split[i];
+        cumulative[i] = running;
+    }
+    for (float& value : cumulative) {
+        value /= running;
+    }
+
+    std::vector<int> counts(split.size(), 0);
+    for (int unit = 0; unit < units; ++unit) {
+        const auto share = static_cast<float>(unit) / static_cast<float>(units);
+        const auto found = std::upper_bound(cumulative.begin(), cumulative.end(), share);
+        const auto device = static_cast<std::size_t>(std::distance(cumulative.begin(), found));
+        if (device < counts.size()) {
+            ++counts[device];
+        }
+    }
+    return counts;
+}
+
 float sum_of(const std::vector<float>& split) {
     float total = 0.0F;
     for (const float share : split) {
@@ -1138,8 +1827,14 @@ TEST(even_split_is_proportional_to_memory_not_to_device_count) {
 
     CHECK_EQ(split.size(), std::size_t{2});
     CHECK(std::abs(sum_of(split) - 1.0F) < 0.001F);
-    CHECK(std::abs(split[0] - (2.0F / 3.0F)) < 0.001F);
-    CHECK(std::abs(split[1] - (1.0F / 3.0F)) < 0.001F);
+    // Proportional to what each card can *offer*, which is its memory less the
+    // headroom every card keeps back -- so a little over two thirds rather than
+    // exactly two thirds, and the smaller card gives up proportionally more.
+    const auto big   = static_cast<float>(usable_memory(gpus[0], kCardHeadroom));
+    const auto small = static_cast<float>(usable_memory(gpus[1], kCardHeadroom));
+    CHECK(std::abs(split[0] - big / (big + small)) < 0.001F);
+    CHECK(std::abs(split[1] - small / (big + small)) < 0.001F);
+    CHECK(split[0] > 2.0F / 3.0F);
 }
 
 TEST(even_split_falls_back_to_equal_shares_when_memory_is_unknown) {
@@ -1158,7 +1853,7 @@ TEST(priority_split_fills_the_first_card_before_touching_the_next) {
     // Device 1 is named first, and a model small enough to live there alone
     // must not be spread at all -- that is the whole point of "priority".
     const std::vector<float> split =
-        compute_tensor_split(GpuSplitMode::Priority, gpus, {1, 0}, 0, ModelFit{4 * kGb, 0});
+        compute_tensor_split(GpuSplitMode::Priority, gpus, {1, 0}, 0, ModelFit{4 * kGb, 0, 0, {}});
     CHECK_EQ(split.size(), std::size_t{2});
     CHECK(std::abs(split[1] - 1.0F) < 0.001F);
     CHECK(std::abs(split[0]) < 0.001F);
@@ -1173,9 +1868,9 @@ TEST(priority_split_spills_only_what_the_first_card_cannot_hold) {
         fake_gpu(0, "A", 10 * kGb),
         fake_gpu(1, "B", 10 * kGb),
     };
-    const std::uint64_t usable = usable_memory(gpus[0]);
+    const std::uint64_t usable = usable_memory(gpus[0], kCardHeadroom);
     const std::vector<float> split =
-        compute_tensor_split(GpuSplitMode::Priority, gpus, {0, 1}, 0, ModelFit{14 * kGb, 0});
+        compute_tensor_split(GpuSplitMode::Priority, gpus, {0, 1}, 0, ModelFit{14 * kGb, 0, 0, {}});
 
     CHECK_EQ(split.size(), std::size_t{2});
     const auto expected_first = static_cast<float>(usable) / static_cast<float>(14 * kGb);
@@ -1197,13 +1892,13 @@ TEST(no_card_is_ever_asked_for_more_than_it_can_hold) {
     };
     const std::uint64_t model = 32 * kGb;
     const std::vector<float> split =
-        compute_tensor_split(GpuSplitMode::Priority, gpus, {1, 2, 0}, 0, ModelFit{model, 0});
+        compute_tensor_split(GpuSplitMode::Priority, gpus, {1, 2, 0}, 0, ModelFit{model, 0, 0, {}});
 
     CHECK_EQ(split.size(), std::size_t{3});
     for (const ComputeDevice& gpu : gpus) {
         const auto share = split[static_cast<std::size_t>(gpu.index)];
         const auto bytes = static_cast<std::uint64_t>(share * static_cast<float>(model));
-        CHECK(bytes <= usable_memory(gpu) + kGb / 64);
+        CHECK(bytes <= usable_memory(gpu, kCardHeadroom) + kGb / 64);
     }
     CHECK(std::abs(sum_of(split) - 1.0F) < 0.001F);
     // Ranked first, so it carries the most.
@@ -1221,7 +1916,7 @@ TEST(priority_split_places_unranked_devices_after_ranked_ones) {
     // that was deliberately placed, so a model that fits on one card goes
     // entirely to device 2.
     const std::vector<float> split =
-        compute_tensor_split(GpuSplitMode::Priority, gpus, {2}, 0, ModelFit{4 * kGb, 0});
+        compute_tensor_split(GpuSplitMode::Priority, gpus, {2}, 0, ModelFit{4 * kGb, 0, 0, {}});
     CHECK_EQ(split.size(), std::size_t{3});
     CHECK(std::abs(split[2] - 1.0F) < 0.001F);
     CHECK(std::abs(split[0]) < 0.001F);
@@ -1233,7 +1928,7 @@ TEST(priority_split_ignores_repeats_and_devices_that_are_not_there) {
     // A device listed twice would otherwise take two shares of the split, and
     // device 7 is not in the machine at all.
     const std::vector<float> split =
-        compute_tensor_split(GpuSplitMode::Priority, gpus, {1, 1, 7}, 0, ModelFit{4 * kGb, 0});
+        compute_tensor_split(GpuSplitMode::Priority, gpus, {1, 1, 7}, 0, ModelFit{4 * kGb, 0, 0, {}});
     CHECK_EQ(split.size(), std::size_t{2});
     CHECK(std::abs(split[1] - 1.0F) < 0.001F);
     CHECK(std::abs(sum_of(split) - 1.0F) < 0.001F);
@@ -1252,9 +1947,9 @@ TEST(a_bigger_model_reaches_further_down_the_priority_order) {
     const std::vector<int> order{0, 1, 2};
 
     const std::vector<float> small =
-        compute_tensor_split(GpuSplitMode::Priority, gpus, order, 0, ModelFit{2 * kGb, 0});
+        compute_tensor_split(GpuSplitMode::Priority, gpus, order, 0, ModelFit{2 * kGb, 0, 0, {}});
     const std::vector<float> large =
-        compute_tensor_split(GpuSplitMode::Priority, gpus, order, 0, ModelFit{25 * kGb, 0});
+        compute_tensor_split(GpuSplitMode::Priority, gpus, order, 0, ModelFit{25 * kGb, 0, 0, {}});
 
     // The small one never leaves the first card.
     CHECK(std::abs(small[0] - 1.0F) < 0.001F);
@@ -1275,7 +1970,7 @@ TEST(a_model_too_large_for_the_machine_is_divided_by_capacity) {
         fake_gpu(1, "big",  12 * kGb),
     };
     const std::vector<float> split =
-        compute_tensor_split(GpuSplitMode::Priority, gpus, {0, 1}, 0, ModelFit{400 * kGb, 0});
+        compute_tensor_split(GpuSplitMode::Priority, gpus, {0, 1}, 0, ModelFit{400 * kGb, 0, 0, {}});
     CHECK_EQ(split.size(), std::size_t{2});
     CHECK(split[1] > split[0]);
     CHECK(std::abs(sum_of(split) - 1.0F) < 0.001F);
@@ -1316,6 +2011,156 @@ TEST(the_split_vector_is_indexed_by_ggml_device_index_not_by_position) {
     CHECK(std::abs(split[2]) < 0.001F);
     CHECK(split[1] > 0.0F);
     CHECK(split[3] > 0.0F);
+}
+
+TEST(a_plan_lands_on_the_layer_counts_it_asked_for) {
+    // The whole reason the split is built from unit counts rather than from a
+    // proportion. llama.cpp places whole layers, so the only way to know a card
+    // will hold what the arithmetic promised is to aim at a boundary -- and the
+    // only way to know that worked is to replay llama.cpp's own rule.
+    const std::vector<ComputeDevice> gpus{
+        fake_gpu(0, "A", 10 * kGb),
+        fake_gpu(1, "B", 20 * kGb),
+        fake_gpu(2, "C", 10 * kGb),
+    };
+    ModelFit fit;
+    fit.units.assign(48, kGb / 2);          // 48 half-gigabyte layers
+    fit.units.push_back(kGb / 4);           // plus a smaller output unit
+    for (const std::uint64_t unit : fit.units) {
+        fit.resident += unit;
+    }
+
+    const GpuPlan plan = plan_gpu_split(GpuSplitMode::Priority, gpus, {1, 0, 2}, 0, fit);
+    CHECK(!plan.split.empty());
+    CHECK_EQ(plan.units.size(), std::size_t{3});
+
+    const std::vector<int> actual =
+        llama_cpp_assignment(plan.split, static_cast<int>(fit.units.size()));
+    CHECK_EQ(actual.size(), plan.units.size());
+    for (std::size_t i = 0; i < actual.size(); ++i) {
+        CHECK_EQ(actual[i], plan.units[i]);
+    }
+}
+
+TEST(a_plan_lands_where_it_aimed_across_a_thousand_machines) {
+    // The strong form of the test above, because one worked example is not
+    // enough to trust arithmetic that has to land exactly on a boundary
+    // llama.cpp computes in single precision from numbers of its own. A
+    // thousand shapes of machine and model, and every one of them has to place
+    // the layers this file said it would.
+    std::mt19937 random(20240607);
+    std::uniform_int_distribution<int> card_count(2, 5);
+    std::uniform_int_distribution<int> card_gb(2, 32);
+    std::uniform_int_distribution<int> unit_count(4, 120);
+    std::uniform_int_distribution<int> unit_mb(40, 1200);
+
+    for (int trial = 0; trial < 1000; ++trial) {
+        std::vector<ComputeDevice> gpus;
+        const int cards = card_count(random);
+        for (int i = 0; i < cards; ++i) {
+            gpus.push_back(fake_gpu(i, "card" + std::to_string(i),
+                                    static_cast<std::uint64_t>(card_gb(random)) * kGb));
+        }
+        std::vector<int> order;
+        for (int i = 0; i < cards; ++i) {
+            order.push_back(i);
+        }
+        std::shuffle(order.begin(), order.end(), random);
+
+        ModelFit fit;
+        const int units = unit_count(random);
+        for (int i = 0; i < units; ++i) {
+            fit.units.push_back(static_cast<std::uint64_t>(unit_mb(random)) * 1024 * 1024);
+            fit.resident += fit.units.back();
+        }
+        fit.per_card = static_cast<std::uint64_t>(unit_mb(random)) * 1024 * 1024 / 4;
+
+        const GpuPlan plan = plan_gpu_split(GpuSplitMode::Priority, gpus, order, 0, fit);
+        if (plan.units.empty()) {
+            continue;  // no memory to plan against; nothing is claimed
+        }
+
+        const std::vector<int> actual = llama_cpp_assignment(plan.split, units);
+        for (std::size_t i = 0; i < plan.units.size(); ++i) {
+            if (actual[i] != plan.units[i]) {
+                CHECK_EQ(actual[i], plan.units[i]);
+                return;  // one report is enough; a thousand would bury it
+            }
+        }
+    }
+}
+
+TEST(a_card_the_priority_order_held_back_is_used_when_the_last_one_overflows) {
+    // The greedy pass fills each card to its target and hands the leftovers to
+    // whichever card is last in *index* order -- which is not the card the
+    // priority order put last. So a card the order deliberately held short can
+    // be sitting on spare capacity while another is handed more than it holds.
+    //
+    // Card 1 is ranked last, so priority gives it only what is left over; card 2
+    // is last by index, so it receives the rounding slack. Without the
+    // rebalance card 2 is overfilled and card 1 keeps room it was never asked
+    // to give up.
+    const std::vector<ComputeDevice> gpus{
+        fake_gpu(0, "first",  4 * kGb),
+        fake_gpu(1, "held",  16 * kGb),
+        fake_gpu(2, "last",   4 * kGb),
+    };
+    ModelFit fit;
+    fit.per_card = 0;
+    for (int i = 0; i < 20; ++i) {
+        fit.units.push_back(kGb);   // 20 GB in one-gigabyte layers
+        fit.resident += kGb;
+    }
+
+    const GpuPlan plan = plan_gpu_split(GpuSplitMode::Priority, gpus, {0, 2, 1}, 0, fit);
+    CHECK_EQ(plan.units.size(), std::size_t{3});
+
+    for (const ComputeDevice& gpu : gpus) {
+        const auto index = static_cast<std::size_t>(gpu.index);
+        const auto held  = static_cast<std::uint64_t>(plan.units[index]) * kGb;
+        CHECK(held <= usable_memory(gpu, kCardHeadroom));
+    }
+    int placed = 0;
+    for (const int count : plan.units) {
+        placed += count;
+    }
+    CHECK_EQ(placed, 20);
+}
+
+TEST(the_priority_card_takes_the_most_layers) {
+    // Equal cards, so the only thing that can decide which carries more is the
+    // order the user put them in.
+    const std::vector<ComputeDevice> gpus{
+        fake_gpu(0, "A", 12 * kGb),
+        fake_gpu(1, "B", 12 * kGb),
+        fake_gpu(2, "C", 12 * kGb),
+    };
+    ModelFit fit;
+    fit.units.assign(30, kGb);
+    fit.resident = 30 * kGb;
+
+    const GpuPlan plan = plan_gpu_split(GpuSplitMode::Priority, gpus, {2, 0, 1}, 0, fit);
+    CHECK_EQ(plan.units.size(), std::size_t{3});
+    CHECK(plan.units[2] >= plan.units[0]);
+    CHECK(plan.units[2] >= plan.units[1]);
+}
+
+TEST(a_model_that_fits_on_the_first_card_never_leaves_it) {
+    const std::vector<ComputeDevice> gpus{
+        fake_gpu(0, "A", 12 * kGb),
+        fake_gpu(1, "B", 12 * kGb),
+    };
+    ModelFit fit;
+    fit.units.assign(8, kGb / 4);
+    fit.resident = 2 * kGb;
+
+    const GpuPlan plan = plan_gpu_split(GpuSplitMode::Priority, gpus, {1, 0}, 0, fit);
+    CHECK_EQ(plan.units[0], 0);
+    CHECK_EQ(plan.units[1], 8);
+    // And llama.cpp agrees.
+    const std::vector<int> actual = llama_cpp_assignment(plan.split, 8);
+    CHECK_EQ(actual[0], 0);
+    CHECK_EQ(actual[1], 8);
 }
 
 TEST(split_modes_round_trip_through_their_ids) {
@@ -1502,6 +2347,71 @@ TEST(the_memory_settings_survive_a_round_trip_through_the_config_file) {
 // one is called has to agree with ggml's own down to the character.
 // ---------------------------------------------------------------------------
 
+TEST(a_conversation_only_re_reads_what_actually_changed) {
+    using detail::reusable_prefix;
+
+    // The ordinary case: the cache holds a prompt and the reply that followed
+    // it, and the next turn is all of that plus a new question. Everything up
+    // to the new question is already there.
+    const std::vector<llama_token> after_turn_one{1, 2, 3, 4, 5};
+    const std::vector<llama_token> turn_two{1, 2, 3, 4, 5, 6, 7};
+    CHECK_EQ(reusable_prefix(after_turn_one, turn_two), std::size_t{5});
+
+    // A different expert, or an edited history: nothing in common, so nothing
+    // is kept.
+    CHECK_EQ(reusable_prefix({1, 2, 3}, {9, 8, 7}), std::size_t{0});
+    CHECK_EQ(reusable_prefix({}, {1, 2, 3}), std::size_t{0});
+
+    // Diverging part way through keeps only what matched.
+    CHECK_EQ(reusable_prefix({1, 2, 3, 4}, {1, 2, 9, 4}), std::size_t{2});
+
+    // The cache holding more than the prompt asks for -- the reply is still in
+    // there -- keeps the part that matches and no more.
+    CHECK_EQ(reusable_prefix({1, 2, 3, 4, 5}, {1, 2, 3}), std::size_t{2});
+}
+
+TEST(a_prompt_is_never_reused_in_its_entirety) {
+    using detail::reusable_prefix;
+
+    // Sending the same prompt again is what pressing enter on an unchanged
+    // line does. Reusing every token of it would leave llama_decode nothing to
+    // decode and the sampler no logits to read, so one token is always held
+    // back to be read again.
+    CHECK_EQ(reusable_prefix({1, 2, 3}, {1, 2, 3}), std::size_t{2});
+    CHECK_EQ(reusable_prefix({1}, {1}), std::size_t{0});
+    CHECK_EQ(reusable_prefix({1, 2, 3, 4}, {1, 2, 3}), std::size_t{2});
+}
+
+TEST(cuda_targets_the_cards_that_are_there_and_nothing_else) {
+    // This machine: an Ampere, an Ada and a Blackwell card, against a CUDA 12.0
+    // toolkit that stops at Hopper. Real code for the two it can compile for,
+    // and Hopper PTX for the Blackwell card to be compiled by the driver.
+    const std::vector<int> toolkit_12_0{50, 52, 60, 61, 70, 75, 80, 86, 87, 89, 90};
+    CHECK_EQ(cuda_architectures({89, 120, 86}, toolkit_12_0), "86-real;89-real;90-virtual");
+
+    // One card, and a toolkit that knows it: one real architecture, and PTX at
+    // the same level so a card added later still runs.
+    CHECK_EQ(cuda_architectures({86}, toolkit_12_0), "86-real;86-virtual");
+
+    // Duplicates are the ordinary case -- two identical cards -- and must not
+    // produce the architecture twice.
+    CHECK_EQ(cuda_architectures({86, 86, 89}, toolkit_12_0), "86-real;89-real;89-virtual");
+}
+
+TEST(cuda_architectures_declines_rather_than_guessing) {
+    const std::vector<int> toolkit{75, 80, 86, 89, 90};
+
+    // No driver, or no compiler: an empty answer means "use llama.cpp's
+    // defaults", which is slow but always correct. Anything else here would be
+    // a module the machine cannot run.
+    CHECK(cuda_architectures({}, toolkit).empty());
+    CHECK(cuda_architectures({86}, {}).empty());
+
+    // A card older than the toolkit supports has nothing that can be emitted
+    // for it, and inventing an architecture would not help.
+    CHECK(cuda_architectures({61}, toolkit).empty());
+}
+
 TEST(module_names_match_the_convention_ggml_loads_by) {
 #ifdef _WIN32
     CHECK(module_prefix() == "ggml-");
@@ -1619,6 +2529,77 @@ TEST(a_hybrid_model_is_not_charged_for_the_layers_that_keep_no_cache) {
     CHECK_EQ(shape.layers, std::uint32_t{4});
     // Only the third layer costs anything: 8 heads x (64 + 64) x 2 bytes.
     CHECK_EQ(shape.kv_per_token, std::uint64_t{8} * 128 * 2);
+}
+
+TEST(a_tensor_table_says_which_blocks_actually_cache) {
+    TempDir dir;
+    const std::filesystem::path file = dir.path() / "hybrid-tensors.gguf";
+    // 12 blocks, every fourth one attending -- the shape of a qwen3next, whose
+    // header states one KV head count for all 48 blocks when only 12 have a
+    // cache at all. Reading the tensors is what tells them apart.
+    write_test_gguf_with_tensors(file, /*layers=*/12, /*attention_every=*/4,
+                                 /*embd=*/64, /*kv_width=*/16, /*vocab=*/128);
+
+    const ModelShape shape = read_model_shape(file);
+    CHECK(shape.known);
+    CHECK_EQ(shape.layers, std::uint32_t{12});
+    // 12 blocks plus the output.
+    CHECK_EQ(shape.units.size(), std::size_t{13});
+
+    int caching = 0;
+    for (std::size_t i = 0; i < 12; ++i) {
+        if (shape.units[i].kv_per_token > 0) {
+            ++caching;
+            // K and V are 16 wide each, two bytes an element.
+            CHECK_EQ(shape.units[i].kv_per_token, std::uint64_t{(16 + 16) * 2});
+            CHECK_EQ(shape.units[i].state, std::uint64_t{0});
+        } else {
+            CHECK(shape.units[i].state > 0);  // recurrent instead
+        }
+    }
+    CHECK_EQ(caching, 3);
+    CHECK_EQ(shape.kv_per_token, std::uint64_t{3 * (16 + 16) * 2});
+    // The output unit holds output.weight, and caches nothing.
+    CHECK(shape.units.back().weights > 0);
+    CHECK_EQ(shape.units.back().kv_per_token, std::uint64_t{0});
+}
+
+TEST(the_input_embedding_is_not_charged_to_a_card) {
+    TempDir dir;
+    const std::filesystem::path file = dir.path() / "embedding.gguf";
+    write_test_gguf_with_tensors(file, /*layers=*/4, /*attention_every=*/1,
+                                 /*embd=*/64, /*kv_width=*/16, /*vocab=*/1024);
+
+    const ModelShape shape = read_model_shape(file);
+    // llama.cpp keeps the input layer in system memory whatever the offload
+    // settings say, so counting it against video memory refuses models that fit.
+    CHECK_EQ(shape.host_weights, std::uint64_t{64} * 1024 * sizeof(float));
+
+    // And it is not also counted among the units, which is what a card is
+    // asked to divide. The output projection is the same size and *is* placed,
+    // so the two are only distinguishable by name.
+    std::uint64_t placed = 0;
+    for (const ModelUnit& unit : shape.units) {
+        placed += unit.weights;
+    }
+    CHECK_EQ(shape.units.back().weights,
+             shape.host_weights + std::uint64_t{64} * sizeof(float));  // output + its norm
+    CHECK(placed > shape.host_weights);
+}
+
+TEST(a_header_without_a_tensor_table_still_reports_its_cache) {
+    // The metadata-only fixture: nothing to place layer by layer, so `units`
+    // stays empty and the split falls back to dividing proportionally -- but
+    // the cache is still worth knowing, and the header alone gives it.
+    TempDir dir;
+    const std::filesystem::path file = dir.path() / "bare.gguf";
+    write_test_gguf(file, /*layers=*/4, /*embd=*/64, /*heads=*/4,
+                    /*kv_heads=*/{2}, /*key_len=*/16, /*vocab=*/128);
+
+    const ModelShape shape = read_model_shape(file);
+    CHECK(shape.known);
+    CHECK(shape.units.empty());
+    CHECK_EQ(shape.kv_per_token, std::uint64_t{4} * 2 * (16 + 16) * 2);
 }
 
 TEST(a_stated_head_dimension_beats_dividing_the_embedding_by_the_heads) {

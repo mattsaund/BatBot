@@ -25,6 +25,7 @@
 #include "batbot/ui/widgets/roundtable.hpp"
 #include "batbot/ui/settings/settings_view.hpp"
 #include "batbot/ui/theme.hpp"
+#include "batbot/ui/widgets/resource_meter.hpp"
 #include "batbot/util/format.hpp"
 
 using namespace ftxui;  // NOLINT(google-build-using-namespace)
@@ -75,6 +76,7 @@ App::~App() {
     // and so dies first, and a build thread still calling PostEvent to report
     // progress would be reaching into freed memory.
     stop_ticker();
+    resources_.stop();
     runtimes_.shutdown();
     if (engine_) {
         engine_->stop();
@@ -140,8 +142,8 @@ Element App::render_status(const Snapshot& snapshot) const {
     }
 
     const std::string right = snapshot.busy
-        ? "ctrl-c cancel  ·  ctrl-e settings  ·  /help"
-        : "ctrl-c quit  ·  ctrl-e settings  ·  /resume  ·  /help";
+        ? "ctrl-c cancel  ·  /settings  ·  /help"
+        : "ctrl-c quit  ·  /settings  ·  /resume  ·  /help";
 
     return hbox({
         text(left) | color(mood_color(snapshot.mood)),
@@ -190,13 +192,28 @@ Element App::render() {
 
     Elements rows;
 
+    // Overlaid on the roundtable rather than given a column: a panel beside the
+    // ring would push BatBot off the centre it is arranged around, and the
+    // space to the right of the table is empty anyway.
+    // Only where there is room beside the table. Narrower than that and the two
+    // would be drawn on top of each other, which is worse than not having it.
+    constexpr int kMeterNeeds = 104;
+    const auto with_meter = [this](Element table) {
+        if (screen_.dimx() < kMeterNeeds) {
+            return table;
+        }
+        Element meter = resource_meter(resources_.snapshot());
+        return dbox({std::move(table),
+                     vbox({hbox({filler(), std::move(meter), text(" ")}), filler()})});
+    };
+
     switch (table_view()) {
         case TableView::Full:
-            rows.push_back(roundtable(snapshot, bat_, tick, /*compact=*/false));
+            rows.push_back(with_meter(roundtable(snapshot, bat_, tick, /*compact=*/false)));
             rows.push_back(separator());
             break;
         case TableView::Compact:
-            rows.push_back(roundtable(snapshot, bat_, tick, /*compact=*/true));
+            rows.push_back(with_meter(roundtable(snapshot, bat_, tick, /*compact=*/true)));
             rows.push_back(separator());
             break;
         case TableView::Strip:
@@ -366,17 +383,56 @@ void App::open_settings() {
     in_settings_ = true;
 }
 
-void App::save_settings() {
+void App::update_config(const std::function<void(Config&)>& change) {
+    // A slash command changing a setting goes through the settings screen's
+    // copy, so the two can never disagree about what is configured -- and so it
+    // is written and handed to the engine by the same path a typed change is.
+    Config edited = settings_.config();
+    change(edited);
+    settings_.set_config(std::move(edited));
+    save_settings(/*announce=*/false);
+}
+
+void App::scroll_by(int lines) {
+    if (lines == 0) {
+        return;
+    }
+    // Leaving the bottom is what stops following it; arriving back is what
+    // resumes. Anything in between is a fixed position, so a reply streaming in
+    // does not drag the view along while it is being read.
+    const int overflow = std::max(0, content_height_ - viewport_height_);
+    const int from     = follow_ ? 0 : scroll_;
+    scroll_            = std::clamp(from - lines, 0, overflow);
+    follow_            = scroll_ == 0;
+}
+
+void App::autosave() {
+    // Settings write themselves as they are changed.
+    //
+    // Safe to do on every committed edit because that is what `dirty` means
+    // here: a toggled checkbox, a picked model, a typed value that parsed. It
+    // is not set per keystroke inside an editor, so this runs once per change
+    // rather than once per key.
+    if (settings_.dirty()) {
+        save_settings(/*announce=*/false);
+    }
+}
+
+void App::save_settings(bool announce) {
     Config edited = settings_.config();
     edited.resolve_models();
 
     if (!save_config(edited)) {
+        // Always said, however the save was triggered: a settings screen that
+        // silently fails to write is worse than one that never saved at all.
         settings_.set_status("could not write " + paths::config_file().string());
         return;
     }
 
     settings_.mark_saved();
-    settings_.set_status("saved");
+    if (announce) {
+        settings_.set_status("saved");
+    }
 
     // The engine applies it between requests; the UI-side copy is updated here
     // so the roundtable and the bat pick up cosmetic changes immediately.
@@ -480,6 +536,9 @@ int App::run() {
 
     engine_->start();
     start_ticker();
+    // Sampled on a thread of its own: nvidia-smi costs about sixty
+    // milliseconds, which is most of a frame.
+    resources_.start([this] { screen_.PostEvent(Event::Custom); });
 
     Component root = Renderer(input_, [this] { return render(); });
 
@@ -524,6 +583,7 @@ int App::run() {
                     // The panel owns the arrangement; the config only learns
                     // about it when something actually moved.
                     settings_.set_gpu_priority(gpu_order_.order());
+                    autosave();
                     break;
                 case GpuOrderAction::Close:
                     gpu_order_.close();
@@ -598,7 +658,9 @@ int App::run() {
                 return true;
             }
             bool consumed = false;
-            switch (settings_.handle(event, consumed)) {
+            const SettingsAction action = settings_.handle(event, consumed);
+            autosave();
+            switch (action) {
                 case SettingsAction::Close:
                     in_settings_ = false;
                     return true;
@@ -619,11 +681,6 @@ int App::run() {
                     break;
             }
             return consumed;
-        }
-
-        if (event == Event::CtrlE) {
-            open_settings();
-            return true;
         }
 
         // The slash-command menu. Checked before the input component sees the
@@ -665,26 +722,32 @@ int App::run() {
             return true;
         }
 
+        // --- scrolling the transcript ---------------------------------------
         if (event == Event::PageUp) {
-            const std::size_t turns = state_.snapshot().turns.size();
-            if (turns > 0) {
-                if (follow_) {
-                    follow_     = false;
-                    focus_turn_ = static_cast<int>(turns) - 1;
-                }
-                focus_turn_ = std::max(0, focus_turn_ - 1);
-            }
+            scroll_by(-std::max(1, viewport_height_ - 2));
             return true;
         }
-
         if (event == Event::PageDown) {
-            const auto turns = static_cast<int>(state_.snapshot().turns.size());
-            if (!follow_) {
-                ++focus_turn_;
-                if (focus_turn_ >= turns - 1) {
-                    follow_ = true;  // back at the bottom: resume following
-                }
-            }
+            scroll_by(std::max(1, viewport_height_ - 2));
+            return true;
+        }
+        // The arrows, when nothing else wants them. The input is one line, so
+        // up and down mean nothing to it, and the completion menu was offered
+        // them first above.
+        if (event == Event::ArrowUp) {
+            scroll_by(-1);
+            return true;
+        }
+        if (event == Event::ArrowDown) {
+            scroll_by(1);
+            return true;
+        }
+        if (event.is_mouse() && Event(event).mouse().button == Mouse::WheelUp) {
+            scroll_by(-3);
+            return true;
+        }
+        if (event.is_mouse() && Event(event).mouse().button == Mouse::WheelDown) {
+            scroll_by(3);
             return true;
         }
 
@@ -694,6 +757,7 @@ int App::run() {
     screen_.Loop(root);
 
     stop_ticker();
+    resources_.stop();
     // Join the worker before any member is destroyed: its wake callback holds
     // a reference to the screen.
     engine_->stop();

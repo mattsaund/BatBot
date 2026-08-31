@@ -92,6 +92,15 @@ private:
     void run();
     void handle(const Request& request);
     void load_router();
+    void load_router_if_resident();
+
+    /// Make sure the delegator is loaded, freeing the expert first if there is
+    /// no room for both. A no-op when it is already there.
+    void ensure_router();
+
+    /// Drop the delegator, wrapper first. Only called with "keep delegator
+    /// loaded" off.
+    void release_router();
     void do_apply_config(Config config);
 
     /// Pick the expert that will actually answer. The router names a subject;
@@ -105,6 +114,12 @@ private:
 
     std::unique_ptr<ModelHost> host_;
     std::unique_ptr<Router>    router_;
+
+    /// The delegator's measured bias, kept across reloads of the same file so
+    /// an on-demand delegator does not re-measure it every prompt. See
+    /// ModelRouter::bias.
+    std::vector<float>         router_bias_;
+    std::string                router_bias_for_;
 
     std::vector<ChatMessage> history_;
 

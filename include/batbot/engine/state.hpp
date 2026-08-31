@@ -51,6 +51,20 @@ struct SeatState {
 struct Turn {
     std::string            prompt;
     std::string            reply;
+
+    /// The working a reasoning model does on the way to `reply`.
+    ///
+    /// Kept apart from the reply for two reasons. It is not the answer, and
+    /// showing it as one is what made gpt-oss look broken. And it must not go
+    /// back into the model's context next turn -- the format's own guidance is
+    /// that previous reasoning is dropped, and feeding it back teaches the
+    /// model that thinking aloud is part of the transcript.
+    std::string            reasoning;
+
+    /// What this turn looked up, one line each. Empty unless the expert used
+    /// the web-search tool, and shown above the reply so the user can always
+    /// see what left the machine.
+    std::vector<std::string> searches;
     std::optional<RouteDecision> route;
     bool                   streaming = false;
     bool                   cancelled = false;
@@ -67,6 +81,20 @@ struct Snapshot {
     std::string                         status;
     std::array<SeatState, kSubjectCount> seats;
     std::optional<Subject>              resident;
+
+    /// The expert this turn is flowing to, from the moment the delegator names
+    /// it until the answer is finished. What the roundtable draws the line to,
+    /// and what makes a seat's dot light up -- residency is a different
+    /// question, and the status bar is where that is answered.
+    std::optional<Subject>              linked;
+
+    /// Is the delegator in memory and ready to route?
+    ///
+    /// Always true while it is set to stay loaded. With it set to load on
+    /// demand this goes dark while an expert has the card and comes back when
+    /// the delegator does, which is the honest picture of a machine that can
+    /// only hold one of them at a time.
+    bool delegator_ready = false;
     std::vector<Turn>                   turns;
     std::vector<std::string>            notices;
     bool                                busy = false;
@@ -108,6 +136,22 @@ public:
     void restore_turn(Turn turn);
     void set_route(std::size_t turn, RouteDecision route);
     void append_reply(std::size_t turn, std::string_view chunk);
+
+    /// Append to a turn's reasoning. See Turn::reasoning.
+    void append_reasoning(std::size_t turn, std::string_view chunk);
+
+    /// Replace a turn's reply. Used when a round of generation turns out to
+    /// have been a tool request rather than an answer.
+    void set_reply(std::size_t turn, std::string text);
+
+    /// Record a lookup this turn made. See Turn::searches.
+    void add_search(std::size_t turn, std::string line);
+
+    /// The expert work is flowing to, or nothing between turns.
+    void set_linked(std::optional<Subject> subject);
+
+    /// Whether the delegator is loaded and able to route.
+    void set_delegator_ready(bool ready);
     void finish_turn(std::size_t turn, const GenerationStats& stats, long load_ms);
     void fail_turn(std::size_t turn, std::string_view reason);
 
@@ -133,6 +177,8 @@ private:
     std::string                          status_;
     std::array<SeatState, kSubjectCount>  seats_{};
     std::optional<Subject>               resident_;
+    std::optional<Subject>               linked_;
+    bool                                 delegator_ready_ = false;
     std::vector<Turn>                    turns_;
     std::vector<std::string>             notices_;
     bool                                 busy_ = false;

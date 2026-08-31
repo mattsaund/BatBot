@@ -73,22 +73,54 @@ GpuSplitMode     gpu_split_mode_from_id(std::string_view id);
 std::vector<ComputeDevice> apply_priority_order(const std::vector<ComputeDevice>& gpus,
                                                 const std::vector<int>& order);
 
-/// What a model will want from the cards, split into the part that is divided
-/// between them and the part every one of them needs.
+/// What a model will want from the cards.
 ///
-/// The distinction matters for filling in order. Weights and KV cache follow
-/// the layers, so they are what gets divided; the compute buffers do not --
-/// each card needs its own regardless of how little of the model it holds. A
-/// card filled to its last byte with weights has nowhere to put them and fails
-/// to allocate, which is why `per_card` is subtracted from every card's
-/// capacity before anything is placed.
+/// Three parts, because they are placed by three different rules. Weights, KV
+/// cache and recurrent state follow the layers, so they are what gets divided.
+/// The activation buffers do not -- every card needs its own regardless of how
+/// little of the model it holds -- so they are set aside from each card's
+/// capacity before anything is placed. The logits buffer is different again: it
+/// is large (300 MB for a 152k vocabulary at a batch of 512) and it lives only
+/// on the card that ends up with the output unit, so charging it to every card
+/// would refuse models that fit.
 ///
-/// Both come from the model's own header, so this is arithmetic rather than a
-/// margin someone guessed at. See llm/model_shape.hpp.
+/// `units` is what makes the plan exact. llama.cpp places whole layers, so a
+/// target expressed only in bytes is rounded to the nearest layer boundary --
+/// a 680 MB step on a 48-layer model, which is enough to overfill a card the
+/// arithmetic said had room to spare. With the per-unit costs in hand the
+/// split is built from a layer count instead, and the rounding disappears.
+/// Leave it empty when the model's header could not be read; the split then
+/// falls back to dividing proportionally.
+///
+/// All of it comes from the model's own header. See llm/model_shape.hpp.
 struct ModelFit {
-    std::uint64_t resident = 0;  ///< weights + KV cache, divided between cards
-    std::uint64_t per_card = 0;  ///< compute buffers, needed on each card
+    std::uint64_t resident     = 0;  ///< weights + cache + state, divided between cards
+    std::uint64_t per_card     = 0;  ///< activation buffers, needed on each card
+    std::uint64_t output_extra = 0;  ///< logits, only on the card holding the output
+
+    /// Bytes per placeable unit, in llama.cpp's order: layer 0 first, the
+    /// output last. See ModelShape::units.
+    std::vector<std::uint64_t> units;
 };
+
+/// A finished arrangement: what to hand llama.cpp, and what it will do.
+struct GpuPlan {
+    /// `tensor_split`, indexed by ggml device index. Empty means "no opinion".
+    std::vector<float> split;
+
+    /// How many units land on each device, indexed the same way. Empty when
+    /// the plan was made proportionally rather than unit by unit.
+    std::vector<int> units;
+};
+
+/// Room left on every card beyond what the arithmetic accounts for.
+///
+/// Free video memory is a moving target: a compositor redraws, a browser opens
+/// a tab, and the figure a plan was made from is stale by the time the weights
+/// are uploaded. This is the margin that absorbs that -- and the reason it is
+/// worth having is that a load which misses fails at the very last allocation,
+/// with the whole model already on the cards.
+inline constexpr std::uint64_t kCardHeadroom = 256ULL * 1024 * 1024;
 
 /// The bytes of `gpu` a model's weights may be given, after `reserve` is set
 /// aside for that card's compute buffers.
@@ -113,11 +145,26 @@ std::vector<float> compute_tensor_split(GpuSplitMode mode,
                                         const std::vector<ComputeDevice>& gpus,
                                         const std::vector<int>& order,
                                         int main_gpu,
-                                        ModelFit fit = {});
+                                        const ModelFit& fit = {});
 
-/// A one-line explanation of what a split will actually do, for the settings
-/// screen -- "RTX 4070 62%, RTX 3060 38%".
+/// The same arrangement, with the layer counts it was built from.
+///
+/// compute_tensor_split is this without the counts. Callers that want to say
+/// what the split will actually do -- "the 5060 Ti takes 21 layers of 49" --
+/// want this one.
+GpuPlan plan_gpu_split(GpuSplitMode mode,
+                       const std::vector<ComputeDevice>& gpus,
+                       const std::vector<int>& order,
+                       int main_gpu,
+                       const ModelFit& fit = {});
+
+/// A one-line explanation of what a plan will actually do, for the settings
+/// screen -- "RTX 5060 Ti 21 layers, RTX 4070 13, RTX 3060 15".
+///
+/// Layers rather than percentages wherever the plan knows them: a percentage
+/// of a model the reader cannot see the size of says very little, and the
+/// layer counts are what llama.cpp is actually being told.
 std::string describe_split(const std::vector<ComputeDevice>& gpus,
-                           const std::vector<float>& split);
+                           const GpuPlan& plan);
 
 }  // namespace batbot

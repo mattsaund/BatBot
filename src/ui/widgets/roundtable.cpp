@@ -2,13 +2,24 @@
 //
 // The roundtable.
 //
-// Ten seats arranged 3 / 2 / 2 / 3 around BatBot, in the order the subject
-// table declares them. Seat width is fixed so the ring does not jitter as a
-// model loads and its percentage changes width.
+// BatBot on the left with a dot of his own, the experts in a column beside him
+// with a dot each, and the fallback at the bottom of that column -- it is not
+// one of the nine, and the bottom of the list is where the thing that catches
+// what the others did not belongs.
+//
+// A line joins BatBot's dot to whichever seat the delegation chose, for as long
+// as work is flowing to it. The dots say what is happening rather than what is
+// in memory: a seat lights up when it is given the turn and goes dark when the
+// answer is finished, and BatBot's own dot is lit exactly when the delegator is
+// loaded and waiting -- which, with the delegator set to load on demand, is not
+// most of the time.
 #include "batbot/ui/widgets/roundtable.hpp"
 
+#include <algorithm>
 #include <array>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "batbot/ui/theme.hpp"
 
@@ -16,39 +27,6 @@ using namespace ftxui;  // NOLINT(google-build-using-namespace) -- DOM builders 
 
 namespace batbot::ui {
 namespace {
-
-/// Where each subject sits at the table.
-///
-/// Ten seats split 3 / 2 / 2 / 3 so the ring stays symmetric about BatBot:
-/// three across the top, one pair level with his head, one pair level with his
-/// feet, and three along the bottom -- the last of which is the catch-all.
-constexpr std::array<Subject, 3> kTopRow{{
-    Subject::Mathematics, Subject::Programming, Subject::Physics}};
-constexpr std::array<Subject, 2> kLeftColumn{{
-    Subject::Chemistry, Subject::Engineering}};
-constexpr std::array<Subject, 2> kRightColumn{{
-    Subject::Biology, Subject::Philosophy}};
-constexpr std::array<Subject, 3> kBottomRow{{
-    Subject::Sociology, Subject::Language, Subject::Fallback}};
-
-/// Width of the whole ring: two 11-wide seat columns, the 19-wide bat, and
-/// enough air between them to look deliberate.
-constexpr int kRingWidth = 63;
-
-// The bat's column is pinned to this, rather than sized to whatever is in it.
-//
-// The thought bubble is wider than the 19-column sprite, so without a fixed
-// width it is the bubble that decides how wide the column is -- and the two
-// fillers either side of it then split an odd number of leftover columns
-// differently, sliding BatBot a column sideways every time the status text
-// changes length. "Fallback is answering" and "swapping in Fallback" differ by
-// one character, which was enough.
-//
-// 37 fits the longest status there is ("BatBot is reading the prompt", 35
-// columns once bubbled) and still leaves the seat columns their 11 each inside
-// kRingWidth. A longer one -- an exception message -- is truncated, which is
-// the right trade: the transcript shows the whole thing anyway.
-constexpr int kBatColumnWidth = 37;
 
 Color seat_color(SeatPhase phase) {
     switch (phase) {
@@ -86,7 +64,17 @@ Element seat(Subject subject, const SeatState& state, std::size_t tick,
              bool narrow = false) {
     const SubjectInfo& info = subject_info(subject);
 
-    std::string label = seat_marker(state.phase, tick) + " " + std::string(info.tag);
+    // The tag is padded to a fixed width for the one-line strip, where the
+    // chips are laid end to end and the padding is what lines them up. In the
+    // ring the box is already a fixed width and the label is centred in it, so
+    // the padding only pushes the short tags half a column off centre.
+    std::string_view tag = info.tag;
+    if (!narrow) {
+        while (!tag.empty() && tag.back() == ' ') {
+            tag.remove_suffix(1);
+        }
+    }
+    std::string label = seat_marker(state.phase, tick) + " " + std::string(tag);
     if (state.phase == SeatPhase::Loading && !narrow) {
         const int percent = static_cast<int>(state.progress * 100.0F);
         label += " " + std::to_string(percent) + "%";
@@ -103,80 +91,166 @@ Element seat(Subject subject, const SeatState& state, std::size_t tick,
         return chip;
     }
     // In the ring, every seat reserves room for the widest label
-    // ("◴ MATH 100%") so the layout does not jitter while a model loads.
-    return chip | size(WIDTH, EQUAL, 11);
+    // ("◴ MATH 100%") so the layout does not jitter while a model loads -- and
+    // the label is centred in that room rather than left-aligned in it. A
+    // six-column chip in an eleven-column box reads as three columns further
+    // left than it is, which was enough to make the whole ring look adrift of
+    // the bat it is supposed to be arranged around.
+    return chip | hcenter | size(WIDTH, EQUAL, 11);
 }
 
-Element seat_row(const Snapshot& snapshot, const Subject* subjects, std::size_t count,
-                 std::size_t tick) {
-    Elements chips;
-    for (std::size_t i = 0; i < count; ++i) {
-        if (i > 0) {
-            chips.push_back(text("   "));
+/// Width of the gap the connector is drawn in, and where its vertical runs.
+constexpr int kLinkWidth  = 8;
+constexpr int kLinkColumn = 3;
+
+/// One row of the connector between BatBot's dot and the chosen seat's.
+///
+/// An elbow: out from BatBot, down or up the column, then in to the seat. Drawn
+/// a row at a time because that is how the rest of the panel is built, and the
+/// three shapes it can take are the three cases below.
+std::string link_row(int row, int from, int to) {
+    // Box-drawing characters are multi-byte, so a row is assembled rather than
+    // indexed.
+    if (to < 0) {
+        return std::string(static_cast<std::size_t>(kLinkWidth), ' ');  // nothing is running
+    }
+    const int lo = std::min(from, to);
+    const int hi = std::max(from, to);
+
+    std::string out;
+    if (from == to && row == from) {
+        for (int i = 0; i < kLinkWidth; ++i) {
+            out += "─";
         }
-        chips.push_back(seat(subjects[i], snapshot.seats[static_cast<std::size_t>(subjects[i])],
-                             tick));
+        return out;
     }
-    return hbox(std::move(chips)) | hcenter;
-}
-
-Element bat_column(const Snapshot& snapshot, const BatSprite& bat, std::size_t tick,
-                   bool compact) {
-    Elements lines;
-
-    const std::string bubble = thought_bubble(snapshot.mood, snapshot.status, tick);
-    if (!compact) {
-        // Always reserve the bubble row, even when empty, so BatBot does not
-        // hop up and down as he starts and stops thinking.
-        lines.push_back(bubble.empty()
-                            ? text(" ")
-                            : text(bubble) | color(theme::kAccent) | hcenter);
+    if (row == from) {
+        for (int i = 0; i < kLinkWidth; ++i) {
+            out += i < kLinkColumn ? "─" : (i == kLinkColumn ? (to > from ? "┐" : "┘") : " ");
+        }
+        return out;
     }
-
-    for (const std::string& line : bat.render(snapshot.mood, tick, compact)) {
-        lines.push_back(text(line) | color(mood_color(snapshot.mood)) | hcenter);
+    if (row == to) {
+        for (int i = 0; i < kLinkWidth; ++i) {
+            out += i < kLinkColumn ? " " : (i == kLinkColumn ? (to > from ? "└" : "┌") : "─");
+        }
+        return out;
     }
-
-    Element column = vbox(std::move(lines));
-    if (!compact) {
-        column = column | size(WIDTH, EQUAL, kBatColumnWidth);
+    if (row > lo && row < hi) {
+        for (int i = 0; i < kLinkWidth; ++i) {
+            out += i == kLinkColumn ? "│" : " ";
+        }
+        return out;
     }
-    return column;
+    return std::string(static_cast<std::size_t>(kLinkWidth), ' ');
 }
 
 }  // namespace
 
 Element roundtable(const Snapshot& snapshot, const BatSprite& bat, std::size_t tick,
                    bool compact) {
-    Element top    = seat_row(snapshot, kTopRow.data(), kTopRow.size(), tick);
-    Element bottom = seat_row(snapshot, kBottomRow.data(), kBottomRow.size(), tick);
+    // Every subject in table order, with the fallback last -- it is not one of
+    // the nine, and the bottom of the list is where the thing that catches what
+    // the others did not belongs.
+    std::vector<Subject> order = routable_subjects();
+    order.push_back(Subject::Fallback);
 
-    // The side columns hug BatBot's head and feet, with a filler between so
-    // they spread to whatever height the sprite happens to be.
-    const auto side_column = [&](const Subject* subjects) {
-        return vbox({
-            seat(subjects[0], snapshot.seats[static_cast<std::size_t>(subjects[0])], tick),
-            filler(),
-            seat(subjects[1], snapshot.seats[static_cast<std::size_t>(subjects[1])], tick),
-        });
+    const auto row_of = [&order](Subject subject) {
+        for (std::size_t i = 0; i < order.size(); ++i) {
+            if (order[i] == subject) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
     };
 
-    Element middle = hbox({
-        side_column(kLeftColumn.data()),
-        filler(),
-        bat_column(snapshot, bat, tick, compact),
-        filler(),
-        side_column(kRightColumn.data()),
+    // BatBot sits level with the middle of the list, so the connector reaches
+    // as far up as it does down.
+    const int bat_row = (static_cast<int>(order.size()) - 1) / 2;
+    const int to_row  = snapshot.linked ? row_of(*snapshot.linked) : -1;
+
+    // --- the seats, one per row ------------------------------------------
+    Elements seat_rows;
+    for (std::size_t i = 0; i < order.size(); ++i) {
+        const Subject          subject = order[i];
+        const SeatState&       state   = snapshot.seats[static_cast<std::size_t>(subject)];
+        const SubjectInfo&     info    = subject_info(subject);
+        const bool             lit     = to_row == static_cast<int>(i);
+
+        std::string label = std::string(info.name);
+        if (state.phase == SeatPhase::Loading) {
+            label += " " + std::to_string(static_cast<int>(state.progress * 100.0F)) + "%";
+        }
+
+        Element name = text(label) | color(seat_color(state.phase));
+        if (lit) {
+            name = name | bold;
+        }
+        if (state.phase == SeatPhase::Unconfigured) {
+            name = name | dim;
+        }
+
+        seat_rows.push_back(hbox({
+            text(link_row(static_cast<int>(i), bat_row, to_row))
+                | color(to_row >= 0 ? theme::kSeatActive : theme::kMeta),
+            text(seat_marker(state.phase, tick) + " ") | color(seat_color(state.phase)),
+            std::move(name),
+        }));
+    }
+
+    // --- BatBot, and his own dot -------------------------------------------
+    //
+    // The dot is lit when the delegator is loaded and waiting, which is exactly
+    // when it can route the next prompt. With the delegator set to load on
+    // demand it goes dark while an expert has the card, and that is the true
+    // picture rather than a decoration.
+    // The same diamond the seats use, and for the same reason: filled means
+    // this one is doing something, hollow means it is there and waiting.
+    const bool        ready = snapshot.delegator_ready && !snapshot.busy;
+    const SeatPhase   phase = ready ? SeatPhase::Active : SeatPhase::Dormant;
+    const std::string dot   = seat_marker(phase, tick);
+
+    Elements bat_lines;
+    for (const std::string& line : bat.render(snapshot.mood, tick, compact)) {
+        bat_lines.push_back(text(line) | color(mood_color(snapshot.mood)));
+    }
+    Element sprite = vbox(std::move(bat_lines));
+
+    // The label goes on the row directly above the dot, so the two read as one
+    // thing rather than as a heading over the whole column.
+    //
+    // Both are pushed to the right of the column, which is what puts the dot
+    // against the line: the connector leaves from the cell immediately after
+    // it, so its horizontal run meets the diamond's right vertex rather than
+    // starting somewhere out in the gap.
+    Elements dot_column;
+    for (int row = 0; row < static_cast<int>(order.size()); ++row) {
+        if (row == bat_row - 1) {
+            dot_column.push_back(
+                hbox({filler(), text("BatBot") | color(theme::kBat) | bold}));
+        } else if (row == bat_row) {
+            dot_column.push_back(
+                hbox({filler(), text(dot) | color(seat_color(phase))}));
+        } else {
+            dot_column.push_back(text(" "));
+        }
+    }
+
+    Element table = hbox({
+        vbox({filler(), std::move(sprite), filler()}),
+        text("  "),
+        vbox(std::move(dot_column)) | size(WIDTH, EQUAL, 6),
+        vbox(std::move(seat_rows)),
     });
 
-    // Pin the ring to a fixed width and centre it. Left to its own devices the
-    // filler() between the columns spreads the side seats to the panel edges,
-    // which stops reading as a table BatBot is sitting at.
+    const std::string bubble = thought_bubble(snapshot.mood, snapshot.status, tick);
+    if (compact || bubble.empty()) {
+        return hbox({filler(), std::move(table), filler()});
+    }
     return vbox({
-        top,
-        middle | flex,
-        bottom,
-    }) | size(WIDTH, EQUAL, kRingWidth) | hcenter;
+        hbox({filler(), std::move(table), filler()}),
+        text(bubble) | color(theme::kAccent) | hcenter,
+    });
 }
 
 Element roundtable_strip(const Snapshot& snapshot, std::size_t tick) {
@@ -189,13 +263,15 @@ Element roundtable_strip(const Snapshot& snapshot, std::size_t tick) {
                              tick, /*narrow=*/true));
     }
 
-    // Nine narrow chips come to roughly 70 columns, so the mood still fits on
-    // an 80-column terminal -- which is the whole reason the strip exists.
+    // Ten narrow chips come to about 76 columns, which leaves the mood very
+    // little on an 80-column terminal -- and the seats are what the strip is
+    // for. So the mood shrinks first: better a clipped mood than a clipped
+    // roundtable.
     const std::string bubble = thought_bubble(snapshot.mood, snapshot.status, tick);
     chips.push_back(filler());
     chips.push_back(text(" "));  // never let the mood touch the last chip
     chips.push_back(text(bubble.empty() ? std::string("( idle )") : bubble)
-                    | color(mood_color(snapshot.mood)));
+                    | color(mood_color(snapshot.mood)) | flex_shrink);
 
     return hbox(std::move(chips));
 }

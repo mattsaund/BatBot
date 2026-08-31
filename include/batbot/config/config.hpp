@@ -76,6 +76,22 @@ struct RoutingConfig {
     /// Send work to Fallback when the chosen subject has no model behind it,
     /// rather than substituting some other filled seat.
     bool use_fallback_expert = true;
+
+    /// Keep the delegator in memory between prompts.
+    ///
+    /// On, it is loaded once and stays -- which costs its whole footprint for
+    /// the life of the session, and is why the delegator has to be small.
+    ///
+    /// Off, exactly one model is resident at any moment. The delegator is freed
+    /// the instant it has routed, the expert is loaded, and when the expert has
+    /// answered it is freed too and the delegator comes back ready for the next
+    /// prompt. The peak is then the larger of the two rather than the sum,
+    /// which is what makes room for a delegator big enough to route well.
+    ///
+    /// The cost is a load per model per prompt, so a follow-up question reloads
+    /// the expert. A prompt pinned with a slash command skips the delegator
+    /// entirely and pays only for the expert.
+    bool keep_delegator_loaded = true;
 };
 
 /// How the machine's GPUs are used.
@@ -125,11 +141,45 @@ struct GpuConfig {
     bool vram_only = false;
 };
 
+/// What the experts can reach beyond the machine.
+///
+/// Everything here is off by default. BatBot is local-first, and a program that
+/// quietly started sending what you typed to a search engine would not be.
+struct ToolsConfig {
+    /// Let experts look things up. See tools/web_search.hpp.
+    bool web_search = false;
+
+    /// wikipedia | searxng | brave
+    std::string search_provider = "wikipedia";
+
+    /// The address of your own searxng instance, for that provider.
+    std::string search_endpoint;
+
+    /// The API key for brave. Written to the config file in plain text, which
+    /// is worth knowing before putting one there.
+    std::string search_api_key;
+
+    int search_results = 5;   ///< how many to hand the expert
+    int search_timeout = 10;  ///< seconds before giving up
+
+    /// How many times one prompt may search before it has to answer. A model
+    /// that searches, reads the results and wants to search again is being
+    /// useful; one that does it eight times is stuck.
+    int search_rounds = 2;
+};
+
 /// Purely cosmetic knobs.
 struct UiConfig {
     int  animation_ms   = 90;    ///< frame interval while BatBot is busy
     bool show_roundtable = true; ///< draw the ring (toggle at runtime with Ctrl-T)
     bool unicode        = true;  ///< false falls back to a pure-ASCII bat
+
+    /// Keep a reasoning model's working on screen after it has answered.
+    ///
+    /// Off, the working is shown while it is happening -- which is the only
+    /// sign of life during the seconds before the answer starts -- and then
+    /// replaced by the answer. On, it stays, dimmed, above every reply.
+    bool show_reasoning = false;
 };
 
 /// The whole config file.
@@ -143,7 +193,22 @@ struct Config {
     std::array<ModelParams, kSubjectCount> experts;  ///< indexed by Subject
     RoutingConfig routing;
     GpuConfig     gpu;
+    ToolsConfig   tools;
     UiConfig      ui;
+
+    /// How hard a reasoning model should think: low | medium | high.
+    ///
+    /// Appended to the system prompt as `Reasoning: <level>`, which is where
+    /// gpt-oss expects it. llama.cpp does not run the model's own jinja
+    /// template -- it recognises the harmony format and applies a built-in
+    /// formatter that emits no system preamble at all -- so the line has to be
+    /// written into the system message rather than passed as a template
+    /// argument. Measured on gpt-oss-20b: high produces more working than low
+    /// on every prompt that produced any.
+    ///
+    /// A model that does not know the convention reads one more line of system
+    /// prompt and carries on.
+    std::string reasoning_effort = "medium";
 
     std::string system_prompt =
         "You are BatBot, a focused local expert. Answer precisely and completely, "

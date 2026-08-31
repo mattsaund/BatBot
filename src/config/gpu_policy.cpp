@@ -32,6 +32,23 @@ const ModelShape& shape_of(ShapeCache& cache, const std::string& path) {
     return cache.emplace(path, read_model_shape(path)).first->second;
 }
 
+/// What one model asks of the cards, in the terms the planner works in.
+ModelFit fit_of(const ModelShape& shape, const ModelParams& params) {
+    ModelFit fit;
+    // The input embedding is never offloaded, so it is not part of what the
+    // cards are asked to divide. See ModelShape::host_weights.
+    const std::uint64_t resident = shape.resident_bytes(params.n_ctx);
+    fit.resident     = resident > shape.host_weights ? resident - shape.host_weights : resident;
+    fit.per_card     = shape.compute_bytes(params.n_batch) - shape.logit_bytes(params.n_batch);
+    fit.output_extra = shape.logit_bytes(params.n_batch);
+
+    fit.units.reserve(shape.units.size());
+    for (std::size_t i = 0; i < shape.units.size(); ++i) {
+        fit.units.push_back(shape.unit_bytes(i, params.n_ctx));
+    }
+    return fit;
+}
+
 void stamp(ModelParams& params, const std::vector<float>& split, int main_gpu) {
     params.tensor_split = split;
     params.main_gpu     = main_gpu;
@@ -60,7 +77,54 @@ void stamp_memory(ModelParams& params, const GpuConfig& gpu, bool have_gpu) {
     }
 }
 
+/// Which card the delegator belongs on. See place_delegator.
+int delegator_device(const std::vector<ComputeDevice>& gpus, const GpuConfig& gpu) {
+    if (gpus.empty() || gpu_split_mode_from_id(gpu.mode) != GpuSplitMode::Priority) {
+        return gpu.main_gpu;
+    }
+    return apply_priority_order(gpus, gpu.priority).back().index;
+}
+
 }  // namespace
+
+void place_delegator(ModelParams& params, const GpuConfig& gpu) {
+    if (gpu_split_mode_from_id(gpu.mode) == GpuSplitMode::Auto) {
+        // "Auto" is the user saying llama.cpp decides how models are divided.
+        // Pinning the delegator would be BatBot overriding that for one model
+        // and not the other, which is exactly the kind of hidden policy the
+        // mode exists to switch off.
+        return;
+    }
+    const std::vector<ComputeDevice> gpus = gpu_devices();
+    if (gpus.size() < 2) {
+        return;  // nothing to choose between
+    }
+    const int device = delegator_device(gpus, gpu);
+    std::vector<float> split(static_cast<std::size_t>(gpus.back().index) + 1, 0.0F);
+    split[static_cast<std::size_t>(device)] = 1.0F;
+    stamp(params, split, device);
+}
+
+std::string refresh_gpu_split(ModelParams& params, const GpuConfig& gpu) {
+    const std::vector<ComputeDevice> gpus = gpu_devices();
+    if (gpus.empty()) {
+        return {};
+    }
+
+    const GpuSplitMode mode = gpu_split_mode_from_id(gpu.mode);
+    if (mode == GpuSplitMode::Auto) {
+        return {};  // an explicit tensor_split in the config file is left alone
+    }
+
+    const ModelShape shape = read_model_shape(params.path);
+    const GpuPlan    plan  = plan_gpu_split(mode, gpus, gpu.priority, gpu.main_gpu,
+                                            fit_of(shape, params));
+    if (plan.split.empty()) {
+        return {};
+    }
+    stamp(params, plan.split, gpu.main_gpu);
+    return describe_split(gpus, plan);
+}
 
 std::string apply_gpu_policy(Config& config) {
     const std::vector<ComputeDevice> all_gpus = gpu_devices();
@@ -84,42 +148,42 @@ std::string apply_gpu_policy(Config& config) {
         return {};
     }
 
-    // The delegator is small and lives on one device for its whole life;
-    // splitting a 1B model across three cards costs more in transfers than it
-    // saves in memory. Experts are the ones worth spreading.
-    stamp(config.router, {}, config.gpu.main_gpu);
+    // The delegator gets one card of its own. See place_delegator.
+    place_delegator(config.router, config.gpu);
 
     // A split is per-model, not per-machine. Priority mode fills the cards in
     // order, and how far down the order a model reaches depends on how big it
     // is -- a 1B expert never leaves the first card, a 30B one uses all three.
     // So each seat gets the split computed for the file it actually names.
     //
-    // Weights plus KV cache are what gets divided, because both follow the
-    // layers. The compute buffers do not -- every card needs its own -- so
-    // they are set aside from each card's capacity rather than shared out.
+    // What is stamped here is a plan made from the memory that is free right
+    // now, which is not the memory that will be free when the model is loaded:
+    // the delegator has yet to be loaded, and a desktop's video memory moves
+    // about by gigabytes. So this is the preview the settings screen shows and
+    // the starting point for a load, and ModelHost re-plans against live
+    // memory immediately before it commits. See refresh_gpu_split.
     ShapeCache shapes;
-    const auto split_for = [&](const ModelParams& params) {
+    const auto plan_for = [&](const ModelParams& params) {
         const ModelShape& shape = shape_of(shapes, params.path);
-        return compute_tensor_split(mode, gpus, config.gpu.priority, config.gpu.main_gpu,
-                                    ModelFit{shape.resident_bytes(params.n_ctx),
-                                             shape.compute_bytes(params.n_batch)});
+        return plan_gpu_split(mode, gpus, config.gpu.priority, config.gpu.main_gpu,
+                              fit_of(shape, params));
     };
 
-    std::vector<float> described;
-    std::uint64_t      described_bytes = 0;
-    std::string        described_model;
+    GpuPlan       described;
+    std::uint64_t described_bytes = 0;
+    std::string   described_model;
     for (ModelParams& expert : config.experts) {
-        const std::vector<float> split = split_for(expert);
-        if (split.empty()) {
+        const GpuPlan plan = plan_for(expert);
+        if (plan.split.empty()) {
             continue;
         }
-        stamp(expert, split, config.gpu.main_gpu);
+        stamp(expert, plan.split, config.gpu.main_gpu);
         // Keep the largest expert's arrangement: it is the one worth reporting,
         // the one most likely not to fit, and the sensible thing to hand to
         // `defaults` below.
         if (const std::uint64_t bytes = shape_of(shapes, expert.path).weights;
-            described.empty() || bytes > described_bytes) {
-            described       = split;
+            described.split.empty() || bytes > described_bytes) {
+            described       = plan;
             described_bytes = bytes;
             described_model = expert.model;
         }
@@ -130,16 +194,16 @@ std::string apply_gpu_policy(Config& config) {
     // -- a hand-written tensor_split left in the config file would otherwise
     // survive a mode that is supposed to override it -- so it takes the
     // largest expert's, or a capacity-proportional one when no seat is filled.
-    const std::vector<float> defaults_split =
-        described.empty() ? split_for(config.defaults) : described;
-    if (!defaults_split.empty()) {
-        stamp(config.defaults, defaults_split, config.gpu.main_gpu);
+    const GpuPlan defaults_plan =
+        described.split.empty() ? plan_for(config.defaults) : described;
+    if (!defaults_plan.split.empty()) {
+        stamp(config.defaults, defaults_plan.split, config.gpu.main_gpu);
     }
-    if (described.empty()) {
-        described = defaults_split;
+    if (described.split.empty()) {
+        described = defaults_plan;
     }
 
-    if (described.empty()) {
+    if (described.split.empty()) {
         return {};
     }
     // Name the model. The split is worked out per-model now, so a bare list of

@@ -7,12 +7,15 @@
 #include "batbot/ui/app.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <filesystem>
 #include <sstream>
 
 #include "batbot/config/paths.hpp"
 #include "batbot/llm/model_catalog.hpp"
 #include "batbot/runtime/devices.hpp"
+#include "batbot/tools/web_search.hpp"
 #include "batbot/session/usage.hpp"
 #include "batbot/ui/theme.hpp"
 #include "batbot/util/format.hpp"
@@ -72,7 +75,10 @@ bool App::handle_command(const std::string& text) {
         return true;
     }
 
-    if (command == "config" || command == "settings") {
+    // "config" still works, and is not advertised: it is what this was called
+    // before, and breaking a command somebody has in their fingers to save one
+    // line of a menu is a poor trade.
+    if (command == "settings" || command == "config") {
         open_settings();
         return true;
     }
@@ -165,6 +171,78 @@ bool App::handle_command(const std::string& text) {
                 say(std::string(info.name) + ": " + params.model + "  -- MISSING at " + params.path);
             } else {
                 say(std::string(info.name) + ": " + params.model);
+            }
+        }
+        return true;
+    }
+
+    if (command == "effort") {
+        static const std::array<std::string_view, 3> kLevels{{"low", "medium", "high"}};
+        if (rest.empty()) {
+            say("reasoning effort is " + config_.reasoning_effort
+                + " -- /effort low | medium | high");
+            return true;
+        }
+        std::string wanted = rest;
+        std::transform(wanted.begin(), wanted.end(), wanted.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (std::find(kLevels.begin(), kLevels.end(), wanted) == kLevels.end()) {
+            say("effort is low, medium or high -- not \"" + rest + "\"");
+            return true;
+        }
+        update_config([&wanted](Config& config) { config.reasoning_effort = wanted; });
+        // Only a model that knows the convention acts on it, and the only way
+        // to find out is to ask one. Saying so beats implying every model obeys.
+        say("reasoning effort is now " + wanted
+            + " -- models that support it will think " 
+            + (wanted == "high" ? "harder" : wanted == "low" ? "less" : "as usual"));
+        return true;
+    }
+
+    if (command == "thinking") {
+        const bool wanted = !config_.ui.show_reasoning;
+        update_config([wanted](Config& config) { config.ui.show_reasoning = wanted; });
+        say(wanted ? "a thinking model's working now stays on screen"
+                   : "a thinking model's working is shown while it happens, then replaced "
+                     "by the answer");
+        return true;
+    }
+
+    if (command == "search") {
+        if (rest.empty()) {
+            say("usage: /search <what to look up>");
+            return true;
+        }
+        const ToolsConfig& tools = config_.tools;
+        if (!tools.web_search) {
+            say("web search is off. Turn it on with /settings, under TOOLS.");
+            return true;
+        }
+
+        batbot::tools::SearchSettings settings;
+        settings.enabled         = tools.web_search;
+        settings.provider        = tools.search_provider;
+        settings.endpoint        = tools.search_endpoint;
+        settings.api_key         = tools.search_api_key;
+        settings.max_results     = tools.search_results;
+        settings.timeout_seconds = tools.search_timeout;
+
+        // Runs on the UI thread, which is why it is bounded by a timeout: this
+        // is the one command that waits on something outside the machine.
+        std::string error;
+        const std::vector<batbot::tools::SearchResult> results =
+            batbot::tools::search(rest, settings, error);
+        state_.clear_notices();
+        if (results.empty()) {
+            say(error.empty() ? "nothing found" : error);
+            return true;
+        }
+        say("\"" + rest + "\" via " + settings.provider);
+        for (const batbot::tools::SearchResult& result : results) {
+            say("  " + result.title);
+            say("    " + result.url);
+            if (!result.snippet.empty()) {
+                say("    " + result.snippet);
             }
         }
         return true;

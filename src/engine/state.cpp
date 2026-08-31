@@ -31,7 +31,9 @@ Snapshot AppState::snapshot() const {
     copy.mood     = mood_;
     copy.status   = status_;
     copy.seats    = seats_;
-    copy.resident = resident_;
+    copy.resident        = resident_;
+    copy.linked          = linked_;
+    copy.delegator_ready = delegator_ready_;
     copy.turns    = turns_;
     copy.notices  = notices_;
     copy.busy     = busy_;
@@ -97,7 +99,7 @@ void AppState::configure_seats(const Config& config) {
 
 void AppState::set_resident(std::optional<Subject> subject) {
     const std::lock_guard<std::mutex> lock(mutex_);
-    // Demote whoever was previously active; only one expert is ever resident.
+    // Demote whoever was previously lit; only one expert is ever resident.
     for (SeatState& seat : seats_) {
         if (seat.phase == SeatPhase::Active) {
             seat.phase = SeatPhase::Dormant;
@@ -111,6 +113,30 @@ void AppState::set_resident(std::optional<Subject> subject) {
             seats_[index].progress = 1.0F;
         }
     }
+}
+
+void AppState::set_linked(std::optional<Subject> subject) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    linked_ = subject;
+    // A seat is lit while work is flowing to it and dark the moment it stops.
+    // Whether the weights are still in memory afterwards is a separate fact,
+    // and one the status bar already reports.
+    for (SeatState& seat : seats_) {
+        if (seat.phase == SeatPhase::Active) {
+            seat.phase = SeatPhase::Dormant;
+        }
+    }
+    if (subject) {
+        const auto index = static_cast<std::size_t>(*subject);
+        if (index < kSubjectCount && seats_[index].phase == SeatPhase::Dormant) {
+            seats_[index].phase = SeatPhase::Active;
+        }
+    }
+}
+
+void AppState::set_delegator_ready(bool ready) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    delegator_ready_ = ready;
 }
 
 std::size_t AppState::begin_turn(std::string prompt) {
@@ -139,6 +165,27 @@ void AppState::append_reply(std::size_t turn, std::string_view chunk) {
     const std::lock_guard<std::mutex> lock(mutex_);
     if (turn < turns_.size()) {
         turns_[turn].reply.append(chunk);
+    }
+}
+
+void AppState::append_reasoning(std::size_t turn, std::string_view chunk) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (turn < turns_.size()) {
+        turns_[turn].reasoning.append(chunk);
+    }
+}
+
+void AppState::set_reply(std::size_t turn, std::string text) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (turn < turns_.size()) {
+        turns_[turn].reply = std::move(text);
+    }
+}
+
+void AppState::add_search(std::size_t turn, std::string line) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (turn < turns_.size()) {
+        turns_[turn].searches.push_back(std::move(line));
     }
 }
 

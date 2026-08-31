@@ -43,6 +43,13 @@ inline constexpr ftxui::Color::Palette16 kAccent  = ftxui::Color::Magenta;
 inline constexpr ftxui::Color::Palette16 kHighlight       = ftxui::Color::GrayDark;
 inline constexpr ftxui::Color::Palette16 kMetaOnHighlight = ftxui::Color::GrayLight;
 
+// --- rendered markdown -----------------------------------------------------
+// Models answer in markdown whether or not you ask them to. These are what its
+// parts are drawn in; see util/markdown.hpp.
+inline constexpr ftxui::Color::Palette16 kHeading = ftxui::Color::CyanLight;
+inline constexpr ftxui::Color::Palette16 kCode    = ftxui::Color::GreenLight;
+inline constexpr ftxui::Color::Palette16 kMarker  = ftxui::Color::Magenta;
+
 }  // namespace theme
 
 /// Secondary text, in the shade that stays readable on the row it is on.

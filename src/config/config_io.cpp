@@ -134,6 +134,8 @@ bool save_config(const Config& config, const std::filesystem::path& file) {
          "leaves out is inherited from \"defaults\". Editable in the app with ctrl-s."},
         {"models_dir",    config.models_dir},
         {"system_prompt", config.system_prompt},
+        {"reasoning_effort", config.reasoning_effort},
+        {"reasoning_effort", config.reasoning_effort},
         {"router",        model_params_to_json(config.router)},
         {"defaults",      model_params_to_json(config.defaults, /*include_model=*/false)},
         {"experts",       experts},
@@ -147,10 +149,21 @@ bool save_config(const Config& config, const std::filesystem::path& file) {
         {"routing", json{
             {"min_confidence",       tidy(config.routing.min_confidence)},
             {"use_fallback_expert", config.routing.use_fallback_expert},
+            {"keep_delegator_loaded", config.routing.keep_delegator_loaded},
+        }},
+        {"tools", json{
+            {"web_search",      config.tools.web_search},
+            {"search_provider", config.tools.search_provider},
+            {"search_endpoint", config.tools.search_endpoint},
+            {"search_api_key",  config.tools.search_api_key},
+            {"search_results",  config.tools.search_results},
+            {"search_timeout",  config.tools.search_timeout},
+            {"search_rounds",   config.tools.search_rounds},
         }},
         {"ui", json{
             {"animation_ms",    config.ui.animation_ms},
             {"show_roundtable", config.ui.show_roundtable},
+            {"show_reasoning", config.ui.show_reasoning},
             {"unicode",         config.ui.unicode},
         }},
     };
@@ -213,6 +226,8 @@ void write_default_config(const std::filesystem::path& file) {
          "leaves out is inherited from \"defaults\". Editable in the app with ctrl-s."},
         {"models_dir", paths::models_dir().string()},
         {"system_prompt", defaults.system_prompt},
+        {"reasoning_effort", defaults.reasoning_effort},
+        {"reasoning_effort", defaults.reasoning_effort},
         {"router", model_params_to_json(router_defaults)},
         {"defaults", model_params_to_json(defaults.defaults, /*include_model=*/false)},
         {"experts", experts},
@@ -226,10 +241,21 @@ void write_default_config(const std::filesystem::path& file) {
         {"routing", json{
             {"min_confidence",       defaults.routing.min_confidence},
             {"use_fallback_expert", defaults.routing.use_fallback_expert},
+            {"keep_delegator_loaded", defaults.routing.keep_delegator_loaded},
+        }},
+        {"tools", json{
+            {"web_search",      defaults.tools.web_search},
+            {"search_provider", defaults.tools.search_provider},
+            {"search_endpoint", defaults.tools.search_endpoint},
+            {"search_api_key",  defaults.tools.search_api_key},
+            {"search_results",  defaults.tools.search_results},
+            {"search_timeout",  defaults.tools.search_timeout},
+            {"search_rounds",   defaults.tools.search_rounds},
         }},
         {"ui", json{
             {"animation_ms",    defaults.ui.animation_ms},
             {"show_roundtable", defaults.ui.show_roundtable},
+            {"show_reasoning", defaults.ui.show_reasoning},
             {"unicode",         defaults.ui.unicode},
         }},
     };
@@ -272,6 +298,7 @@ Config load_config(const std::filesystem::path& file, std::vector<std::string>& 
     }
 
     read_field(doc, "system_prompt", config.system_prompt, "config", warnings);
+    read_field(doc, "reasoning_effort", config.reasoning_effort, "config", warnings);
     read_field(doc, "models_dir",    config.models_dir,    "config", warnings);
 
     if (const auto it = doc.find("defaults"); it != doc.end() && it->is_object()) {
@@ -319,13 +346,26 @@ Config load_config(const std::filesystem::path& file, std::vector<std::string>& 
     if (const auto routing = doc.find("routing"); routing != doc.end() && routing->is_object()) {
         read_field(*routing, "min_confidence",       config.routing.min_confidence,
                    "routing", warnings);
+        read_field(*routing, "keep_delegator_loaded", config.routing.keep_delegator_loaded,
+                   "routing", warnings);
         read_field(*routing, "use_fallback_expert", config.routing.use_fallback_expert,
                    "routing", warnings);
+    }
+
+    if (const auto tools = doc.find("tools"); tools != doc.end() && tools->is_object()) {
+        read_field(*tools, "web_search",      config.tools.web_search,      "tools", warnings);
+        read_field(*tools, "search_provider", config.tools.search_provider, "tools", warnings);
+        read_field(*tools, "search_endpoint", config.tools.search_endpoint, "tools", warnings);
+        read_field(*tools, "search_api_key",  config.tools.search_api_key,  "tools", warnings);
+        read_field(*tools, "search_results",  config.tools.search_results,  "tools", warnings);
+        read_field(*tools, "search_timeout",  config.tools.search_timeout,  "tools", warnings);
+        read_field(*tools, "search_rounds",   config.tools.search_rounds,   "tools", warnings);
     }
 
     if (const auto ui = doc.find("ui"); ui != doc.end() && ui->is_object()) {
         read_field(*ui, "animation_ms",    config.ui.animation_ms,    "ui", warnings);
         read_field(*ui, "show_roundtable", config.ui.show_roundtable, "ui", warnings);
+        read_field(*ui, "show_reasoning", config.ui.show_reasoning, "ui", warnings);
         read_field(*ui, "unicode",         config.ui.unicode,         "ui", warnings);
     }
 

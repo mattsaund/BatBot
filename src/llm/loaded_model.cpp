@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <vector>
 
 #include <llama.h>
@@ -142,6 +143,147 @@ std::string LoadedModel::format_chat(const std::vector<ChatMessage>& messages,
     return buffer;
 }
 
+namespace detail {
+
+std::size_t reusable_prefix(const std::vector<llama_token>& cached,
+                            const std::vector<llama_token>& wanted) {
+    std::size_t common = 0;
+    while (common < cached.size() && common < wanted.size() &&
+           cached[common] == wanted[common]) {
+        ++common;
+    }
+    if (common == wanted.size() && common > 0) {
+        --common;  // see the header: never the whole prompt
+    }
+    return common;
+}
+
+}  // namespace detail
+
+std::size_t LoadedModel::reuse_prefix(const std::vector<llama_token>& tokens) {
+    llama_memory_t memory = llama_get_memory(ctx_);
+
+    const std::size_t common = detail::reusable_prefix(cached_, tokens);
+    if (common > 0) {
+        // Nothing to remove when the new prompt simply continues the old one,
+        // which is what a conversation growing by a turn looks like.
+        //
+        // Otherwise the tail has to go, and that can fail: a recurrent model
+        // keeps a state rather than a per-token cache, and a state cannot be
+        // rewound to an arbitrary point. llama.cpp says so by returning false,
+        // and the honest answer to that is to start again from cold.
+        if (common == cached_.size() ||
+            llama_memory_seq_rm(memory, 0, static_cast<llama_pos>(common), -1)) {
+            cached_.resize(common);
+            return common;
+        }
+    }
+
+    llama_memory_clear(memory, true);
+    cached_.clear();
+    return 0;
+}
+
+std::vector<float> LoadedModel::score_labels(const std::string& prompt,
+                                             const std::vector<std::string>& labels,
+                                             const CancelCallback& cancel) {
+    std::vector<float> scores(labels.size(), kUnscored);
+    if (labels.empty()) {
+        return scores;
+    }
+
+    const llama_vocab* vocab = llama_model_get_vocab(model_);
+    llama_memory_t     memory = llama_get_memory(ctx_);
+    // Scoring leaves the cache holding labels rather than a conversation, so
+    // the prefix bookkeeping is not valid across it either way.
+    llama_memory_clear(memory, true);
+    cached_.clear();
+
+    std::vector<llama_token> tokens = tokenize(vocab, prompt, true);
+    if (tokens.empty()) {
+        return scores;
+    }
+    const int context_size = static_cast<int>(llama_n_ctx(ctx_));
+    if (static_cast<int>(tokens.size()) >= context_size) {
+        tokens.erase(tokens.begin(),
+                     tokens.end() - (context_size - std::min(256, context_size / 4)));
+    }
+
+    const int batch_size = std::max(1, static_cast<int>(llama_n_batch(ctx_)));
+    for (std::size_t offset = 0; offset < tokens.size();
+         offset += static_cast<std::size_t>(batch_size)) {
+        if (cancel && cancel()) {
+            return scores;
+        }
+        const int count = static_cast<int>(
+            std::min<std::size_t>(static_cast<std::size_t>(batch_size), tokens.size() - offset));
+        llama_batch batch = llama_batch_get_one(tokens.data() + offset, count);
+        if (llama_decode(ctx_, batch) != 0) {
+            return scores;
+        }
+    }
+
+    const int n_vocab   = llama_vocab_n_tokens(vocab);
+    const auto n_prompt = static_cast<llama_pos>(tokens.size());
+
+    // Keep a copy. Scoring a label of more than one token decodes into the
+    // context, which replaces the logits this needs for the label after it.
+    const float* raw = llama_get_logits_ith(ctx_, -1);
+    if (raw == nullptr || n_vocab <= 0) {
+        return scores;
+    }
+    const std::vector<float> after_prompt(raw, raw + n_vocab);
+
+    // log softmax at one position, for one token.
+    const auto log_probability = [n_vocab](const float* logits, llama_token token) {
+        const float highest = *std::max_element(logits, logits + n_vocab);
+        float sum = 0.0F;
+        for (int i = 0; i < n_vocab; ++i) {
+            sum += std::exp(logits[i] - highest);
+        }
+        return logits[token] - highest - std::log(sum);
+    };
+
+    for (std::size_t i = 0; i < labels.size(); ++i) {
+        if (cancel && cancel()) {
+            break;
+        }
+        std::vector<llama_token> label = tokenize(vocab, labels[i], false);
+        if (label.empty()) {
+            continue;
+        }
+
+        const float* logits = after_prompt.data();
+        float        total  = 0.0F;
+        bool         decoded = false;
+        for (std::size_t t = 0; t < label.size(); ++t) {
+            total += log_probability(logits, label[t]);
+            if (t + 1 == label.size()) {
+                break;  // nothing after it to score, so nothing to decode
+            }
+            llama_batch batch = llama_batch_get_one(&label[t], 1);
+            if (llama_decode(ctx_, batch) != 0) {
+                total = kUnscored;
+                break;
+            }
+            decoded = true;
+            logits  = llama_get_logits_ith(ctx_, -1);
+            if (logits == nullptr) {
+                total = kUnscored;
+                break;
+            }
+        }
+        scores[i] = total;
+
+        // Put the context back to the end of the prompt so the next label is
+        // scored against the same state rather than against this one.
+        if (decoded) {
+            llama_memory_seq_rm(memory, 0, n_prompt, -1);
+        }
+    }
+    return scores;
+}
+
 GenerationStats LoadedModel::generate(const std::string& prompt,
                                       const ModelParams& params,
                                       const TokenCallback& on_token,
@@ -150,13 +292,10 @@ GenerationStats LoadedModel::generate(const std::string& prompt,
     GenerationStats stats;
     const llama_vocab* vocab = llama_model_get_vocab(model_);
 
-    // Each turn starts from a clean slate. Re-feeding the whole conversation is
-    // wasteful, but an expert swap invalidates the cache anyway, and it keeps
-    // this loop obviously correct. Prefix reuse is a later optimisation.
-    llama_memory_clear(llama_get_memory(ctx_), true);
-
     std::vector<llama_token> tokens = tokenize(vocab, prompt, true);
     if (tokens.empty()) {
+        llama_memory_clear(llama_get_memory(ctx_), true);
+        cached_.clear();
         return stats;
     }
 
@@ -167,6 +306,13 @@ GenerationStats LoadedModel::generate(const std::string& prompt,
                      tokens.end() - (context_size - std::min(256, context_size / 4)));
     }
     stats.prompt_tokens = static_cast<int>(tokens.size());
+
+    // Everything the context already holds of this prompt is kept. A
+    // conversation resends its whole history each turn and all but the newest
+    // exchange of it is identical, so on a large expert this is most of the
+    // wait before the first token. See LoadedModel::cached_.
+    const std::size_t reused = reuse_prefix(tokens);
+    stats.prompt_reused = static_cast<int>(reused);
 
     llama_sampler* chain = llm::build_sampler_chain(vocab, params, grammar);
 
@@ -180,10 +326,12 @@ GenerationStats LoadedModel::generate(const std::string& prompt,
     // --- prompt ingestion --------------------------------------------------
     const auto prompt_start = Clock::now();
     const int batch_size = std::max(1, params.n_batch);
-    for (std::size_t offset = 0; offset < tokens.size(); offset += static_cast<std::size_t>(batch_size)) {
+    for (std::size_t offset = reused; offset < tokens.size();
+         offset += static_cast<std::size_t>(batch_size)) {
         if (cancel && cancel()) {
             stats.cancelled = true;
             stats.prompt_ms = ms_since(prompt_start);
+            cached_.clear();  // the cache holds part of a prompt nobody will finish
             return stats;
         }
         const int count = static_cast<int>(
@@ -191,8 +339,11 @@ GenerationStats LoadedModel::generate(const std::string& prompt,
         llama_batch batch = llama_batch_get_one(tokens.data() + offset, count);
         if (llama_decode(ctx_, batch) != 0) {
             stats.prompt_ms = ms_since(prompt_start);
+            cached_.clear();
             return stats;
         }
+        cached_.insert(cached_.end(), tokens.begin() + static_cast<long>(offset),
+                       tokens.begin() + static_cast<long>(offset) + count);
     }
     stats.prompt_ms = ms_since(prompt_start);
 
@@ -230,8 +381,10 @@ GenerationStats LoadedModel::generate(const std::string& prompt,
         llama_token next = token;
         llama_batch batch = llama_batch_get_one(&next, 1);
         if (llama_decode(ctx_, batch) != 0) {
+            cached_.clear();
             break;
         }
+        cached_.push_back(next);
     }
 
     // Flush whatever is left, even if it is an incomplete sequence -- the model
