@@ -16,7 +16,17 @@ RAW_URL="https://raw.githubusercontent.com/mattsaund/batbot/main/install.sh"
 BRANCH="main"
 # Which GPU SDK to install, so that runtime can be built from the settings
 # screen later. It is not "which runtime to install" -- BatBot installs none.
-RUNTIME="auto"
+RUNTIME="auto"   # auto | cpu | cuda | vulkan | metal
+
+# Which backends the settings screen will offer, which is not the same list on
+# every platform: Metal exists only on Apple hardware and CUDA has not existed
+# there since 2018. Kept in step with backend_available_here() in
+# src/runtime/backend.cpp.
+if [ "$(uname -s)" = "Darwin" ]; then
+    BACKEND_LIST="CPU, Metal and Vulkan"
+else
+    BACKEND_LIST="CPU, CUDA and Vulkan"
+fi
 
 # Must match BATBOT_LLAMA_TAG in cmake/BatBotDependencies.cmake: a runtime
 # built from a different tag would load and then crash on the first tensor.
@@ -26,7 +36,12 @@ INSTALL_DEPS=1
 ASSUME_YES=0
 DO_UNINSTALL=0
 DO_CHECK=0
-JOBS="$(command -v nproc >/dev/null 2>&1 && nproc || echo 4)"
+# nproc is GNU coreutils; macOS has sysctl instead. Four is the fallback when
+# neither answers, which is a build that is slower than it could be rather than
+# one that does not happen.
+JOBS="$(command -v nproc >/dev/null 2>&1 && nproc \
+        || sysctl -n hw.ncpu 2>/dev/null \
+        || echo 4)"
 
 CMAKE_MIN_MAJOR=3
 CMAKE_MIN_MINOR=24
@@ -436,9 +451,10 @@ usage: install.sh [options]
 
   --gpu MODE       which GPU SDK to install so that runtime can be built
                    later from the settings screen. No runtime is installed
-                   either way.  cuda | vulkan | cpu | auto   (default: auto)
+                   either way.  cuda | vulkan | metal | cpu | auto  (default: auto)
                    auto detects your hardware and picks the best backend
-                   it can actually build for.
+                   it can actually build for -- always metal on macOS, where
+                   it is the only one and needs no SDK.
   --prefix DIR     install location (default: /usr/local with sudo,
                    otherwise ~/.local)
   --branch NAME    git branch to build (default: main)
@@ -480,8 +496,8 @@ while [ $# -gt 0 ]; do
 done
 
 case "$RUNTIME" in
-    auto|cuda|vulkan|cpu) ;;
-    *) die "--gpu must be one of: auto, cuda, vulkan, cpu" ;;
+    auto|cuda|vulkan|metal|cpu) ;;
+    *) die "--gpu must be one of: auto, cuda, vulkan, metal, cpu" ;;
 esac
 
 # --------------------------------------------------------------------------
@@ -513,8 +529,49 @@ confirm() {
 # --------------------------------------------------------------------------
 # Platform
 # --------------------------------------------------------------------------
+
+# macOS. Homebrew for the toolchain, Metal for the GPU, and no sudo anywhere:
+# brew refuses to run as root, and nothing else here needs it once the prefix
+# is somewhere the user owns.
+detect_platform_macos() {
+    SUDO=""
+    PKG="brew"
+
+    if ! command -v brew >/dev/null 2>&1; then
+        PKG="unknown"
+        if [ "$INSTALL_DEPS" = 1 ]; then
+            warn "Homebrew not found; skipping package installation."
+            warn "install it from https://brew.sh, or pass --no-deps and provide cmake yourself."
+            INSTALL_DEPS=0
+        fi
+    fi
+
+    # The compiler, the SDK and the Metal shader compiler all arrive together
+    # in the Xcode command line tools, and Homebrew needs them too -- so this
+    # is the one dependency that cannot be installed by the package manager.
+    if ! xcode-select -p >/dev/null 2>&1; then
+        warn "the Xcode command line tools are not installed."
+        warn "run:  xcode-select --install"
+    fi
+
+    info "platform     : macOS $(sw_vers -productVersion 2>/dev/null || echo unknown) ($(uname -m))"
+    info "package tool : $PKG"
+}
+
 detect_platform() {
-    [ "$(uname -s)" = "Linux" ] || die "this installer supports Linux only (found $(uname -s))."
+    OS="$(uname -s)"
+    case "$OS" in
+        Linux|Darwin) ;;
+        *) die "this installer supports Linux and macOS (found $OS)." ;;
+    esac
+
+    # macOS takes a different route through everything below: Homebrew rather
+    # than a system package manager, and Metal rather than CUDA or Vulkan. It
+    # is handled first so the Linux path stays exactly as it was.
+    if [ "$OS" = "Darwin" ]; then
+        detect_platform_macos
+        return
+    fi
 
     if [ "$(id -u)" -ne 0 ]; then
         if command -v sudo >/dev/null 2>&1; then
@@ -584,6 +641,7 @@ pkg_install() {
         apt)    { $SUDO apt-get update -qq \
                   && DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y -qq "$@"; } \
                   > "$PKG_LOG" 2>&1 || status=$? ;;
+        brew)   brew install "$@"                          > "$PKG_LOG" 2>&1 || status=$? ;;
         dnf)    $SUDO dnf install -y -q "$@"                > "$PKG_LOG" 2>&1 || status=$? ;;
         pacman) $SUDO pacman -Sy --needed --noconfirm "$@"  > "$PKG_LOG" 2>&1 || status=$? ;;
         zypper) $SUDO zypper --non-interactive install -y "$@" > "$PKG_LOG" 2>&1 || status=$? ;;
@@ -606,6 +664,7 @@ pkg_install() {
 pkg_available() {
     case "$PKG" in
         apt)    apt-cache policy "$1" 2>/dev/null | grep -q 'Candidate: [^(]' ;;
+        brew)   brew info --formula "$1" >/dev/null 2>&1 ;;
         dnf)    dnf list --available "$1" >/dev/null 2>&1 || dnf list --installed "$1" >/dev/null 2>&1 ;;
         pacman) pacman -Si "$1" >/dev/null 2>&1 ;;
         zypper) zypper --non-interactive info "$1" 2>/dev/null | grep -q '^Version' ;;
@@ -650,7 +709,11 @@ download_with_progress() {
     if [ -n "$total" ] && [ "$total" -gt 0 ] 2>/dev/null && [ "$IS_TTY" = 1 ]; then
         while kill -0 "$pid" 2>/dev/null; do
             now=0
-            [ -f "$out" ] && now="$(stat -c %s "$out" 2>/dev/null || echo 0)"
+            # stat's flags differ between GNU and BSD, so ask both. wc is the
+            # last resort and is everywhere.
+            [ -f "$out" ] && now="$(stat -c %s "$out" 2>/dev/null \
+                                    || stat -f %z "$out" 2>/dev/null \
+                                    || wc -c < "$out" 2>/dev/null || echo 0)"
             PHASE_LABEL="$label  $(human_bytes "$now") / $(human_bytes "$total")"
             phase_at "$((now * 100 / total))"
             sleep 0.15
@@ -776,6 +839,16 @@ decide_backend() {
         return
     fi
 
+    # On a Mac there is exactly one answer. Metal ships with the operating
+    # system, so there is no SDK to install and nothing to detect -- the only
+    # question is whether the command line tools are there, which
+    # detect_platform_macos has already asked.
+    if [ "$OS" = "Darwin" ]; then
+        RUNTIME="metal"
+        info "GPU SDK: Metal (built in; nothing to install)"
+        return
+    fi
+
     if [ "$have_nvidia" = 0 ]; then
         # No NVIDIA card. Vulkan still covers AMD and Intel GPUs.
         if [ "$PKG" != "unknown" ]; then
@@ -837,6 +910,11 @@ resolve_packages() {
         zypper) PKGS_BASE=(gcc-c++ make cmake git-core curl)
                 PKGS_VULKAN=(shaderc vulkan-devel spirv-headers)
                 PKGS_CUDA=(cuda) ;;
+        # macOS: the compiler, git and curl come with the command line tools,
+        # and Metal needs no package at all. Only cmake is actually missing.
+        brew)   PKGS_BASE=(cmake)
+                PKGS_VULKAN=()
+                PKGS_CUDA=() ;;
     esac
     return 0
 }
@@ -1292,7 +1370,7 @@ run_check() {
     info "config     : ${XDG_CONFIG_HOME:-$HOME/.config}/batbot/config.json"
     info "runtime dir: ${XDG_DATA_HOME:-$HOME/.local/share}/batbot/runtimes"
     info "runtimes   : none -- you choose one from the settings screen"
-    muted "Compute backends are loadable: CPU, CUDA and Vulkan can be added or"
+    muted "Compute backends are loadable: $BACKEND_LIST can be added or"
     muted "removed at any time from the settings screen, without rebuilding."
 
     if [ -n "$CUDA_NOTE" ]; then

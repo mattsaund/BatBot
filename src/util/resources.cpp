@@ -125,7 +125,120 @@ std::vector<ResourceSample> read_gpus() {
     return gpus;
 }
 
+/// One `sysctl -n <name>`, as a string. Empty on anything but macOS, and on a
+/// Mac where the key does not exist.
+std::string sysctl_value(const char* name) {
+    if (!on_path("sysctl")) {
+        return {};
+    }
+    Subprocess child;
+    std::string error;
+    if (!child.start({"sysctl", "-n", name}, {}, /*extra_env=*/{}, error)) {
+        return {};
+    }
+    std::string line;
+    std::string first;
+    if (child.read_line(line)) {
+        first = line;
+    }
+    while (child.read_line(line)) {
+        // drain
+    }
+    return child.wait() == 0 ? std::string(trim(first)) : std::string{};
+}
+
+/// What one program wrote, as a whole string.
+std::string output_of(const std::vector<std::string>& argv) {
+    if (!on_path(argv.front())) {
+        return {};
+    }
+    Subprocess child;
+    std::string error;
+    if (!child.start(argv, {}, /*extra_env=*/{}, error)) {
+        return {};
+    }
+    std::string text;
+    std::string line;
+    while (child.read_line(line)) {
+        text += line;
+        text += '\n';
+    }
+    return child.wait() == 0 ? text : std::string{};
+}
+
+/// The processor and its memory, on macOS.
+///
+/// Reported as one row rather than two, because on Apple silicon that is the
+/// truth: the GPU and the processor share one pool, and drawing a separate
+/// "vram" line for the same bytes would be inventing a distinction the hardware
+/// does not make. Temperature is left unknown -- reading it needs
+/// `powermetrics`, which needs root, and a monitor that asks for a password is
+/// worse than one that shows a dash.
+bool read_macos_cpu(ResourceSample& sample) {
+    const std::string name = sysctl_value("machdep.cpu.brand_string");
+    if (name.empty()) {
+        return false;
+    }
+    sample.name = name;
+
+    std::uint64_t total = 0;
+    if (!to_number(sysctl_value("hw.memsize"), total) || total == 0) {
+        return false;
+    }
+    std::uint64_t page_size = 0;
+    if (!to_number(sysctl_value("hw.pagesize"), page_size) || page_size == 0) {
+        page_size = 4096;
+    }
+    sample.total = total;
+    parse_vm_stat(output_of({"vm_stat"}), page_size, total, sample.used);
+    return true;
+}
+
 }  // namespace
+
+bool parse_vm_stat(std::string_view text, std::uint64_t page_size, std::uint64_t total,
+                   std::uint64_t& used) {
+    // "Pages free:   123456."  -- the trailing full stop is part of the format.
+    std::uint64_t free_pages    = 0;
+    std::uint64_t speculative   = 0;
+    std::uint64_t purgeable     = 0;
+    bool          saw_something = false;
+
+    std::size_t at = 0;
+    while (at <= text.size()) {
+        const std::size_t end = text.find('\n', at);
+        const std::string_view line =
+            text.substr(at, end == std::string_view::npos ? std::string_view::npos : end - at);
+        at = end == std::string_view::npos ? text.size() + 1 : end + 1;
+
+        const std::size_t colon = line.find(':');
+        if (colon == std::string_view::npos) {
+            continue;
+        }
+        std::string_view key   = trim(line.substr(0, colon));
+        std::string_view value = trim(line.substr(colon + 1));
+        while (!value.empty() && value.back() == '.') {
+            value.remove_suffix(1);
+        }
+        std::uint64_t pages = 0;
+        if (!to_number(value, pages)) {
+            continue;
+        }
+        if (key == "Pages free")        { free_pages  = pages; saw_something = true; }
+        if (key == "Pages speculative") { speculative = pages; saw_something = true; }
+        if (key == "Pages purgeable")   { purgeable   = pages; saw_something = true; }
+    }
+    if (!saw_something || total == 0) {
+        return false;
+    }
+
+    // Free, speculative and purgeable are all available without evicting
+    // anything anyone wants -- the same three the Activity Monitor leaves out
+    // of "memory used", and the same distinction MemAvailable draws on Linux.
+    const std::uint64_t available = (free_pages + speculative + purgeable) * page_size;
+    used = available < total ? total - available : 0;
+    return true;
+}
 
 int ResourceSample::memory_percent() const {
     if (total == 0) {
@@ -320,12 +433,18 @@ void ResourceMonitor::run() {
 
     while (running_.load()) {
         ResourceSnapshot next;
-        next.ready    = true;
-        next.gpus     = read_gpus();
-        next.cpu.name = cpu_name.empty() ? "processor" : cpu_name;
+        next.ready = true;
+        next.gpus  = read_gpus();
 
-        parse_meminfo(read_file("/proc/meminfo"), next.cpu.used, next.cpu.total);
-        next.cpu.temperature_c = cpu_temperature();
+        // Linux first, because /proc is the cheap answer and reading it costs
+        // no subprocess at all. Where there is no /proc, ask macOS the same
+        // three questions through sysctl.
+        if (parse_meminfo(read_file("/proc/meminfo"), next.cpu.used, next.cpu.total)) {
+            next.cpu.name          = cpu_name.empty() ? "processor" : cpu_name;
+            next.cpu.temperature_c = cpu_temperature();
+        } else if (!read_macos_cpu(next.cpu)) {
+            next.cpu.name = cpu_name.empty() ? "processor" : cpu_name;
+        }
 
         // A percentage of processor time needs two readings, so the first pass
         // reports none rather than reporting the average since boot.

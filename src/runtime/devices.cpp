@@ -8,6 +8,7 @@
 
 #include <ggml-backend.h>
 
+#include "batbot/runtime/backend.hpp"
 #include "batbot/util/format.hpp"
 
 namespace batbot {
@@ -461,6 +462,50 @@ std::vector<float> compute_tensor_split(GpuSplitMode mode,
                                         int main_gpu,
                                         const ModelFit& fit) {
     return plan_gpu_split(mode, gpus, order, main_gpu, fit).split;
+}
+
+GpuSettingSupport gpu_setting_support(const std::vector<ComputeDevice>& devices) {
+    std::size_t gpus           = 0;
+    bool        reports_memory = false;
+    bool        can_split      = false;
+    std::string backend;
+
+    for (const ComputeDevice& device : devices) {
+        if (!device.is_gpu) {
+            continue;
+        }
+        ++gpus;
+        reports_memory = reports_memory || device.memory_total > 0;
+        if (const auto kind = backend_from_reg_name(device.backend)) {
+            can_split = can_split || backend_info(*kind).multi_device;
+            backend   = backend_info(*kind).name;
+        } else if (backend.empty()) {
+            // A backend BatBot does not manage still has a name worth using.
+            backend = device.backend;
+        }
+    }
+
+    GpuSettingSupport support;
+    if (gpus == 0) {
+        // Everything about the GPU is moot, and the fix is the same for all of
+        // them, so it is said the same way.
+        support.split = support.gpu_only = support.vram_only =
+            "no GPU runtime is loaded -- install one under Runtimes";
+        return support;
+    }
+
+    if (gpus == 1) {
+        support.split = "only one GPU: " + backend + " has nothing to divide";
+    } else if (!can_split) {
+        support.split = backend + " runs one device at a time";
+    }
+    if (!reports_memory) {
+        // The check compares a model's size against free device memory. A
+        // backend that reports none turns the setting into one that saves and
+        // then does nothing at all.
+        support.vram_only = backend + " does not report how much memory its devices have";
+    }
+    return support;
 }
 
 std::string describe_split(const std::vector<ComputeDevice>& gpus, const GpuPlan& plan) {

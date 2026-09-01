@@ -74,10 +74,9 @@ curl -fsSL .../install.sh | bash -s -- --gpu vulkan --prefix ~/.local
 
 ## Runtimes
 
-BatBot Supports `CUDA`, `Vulkan`, and `CPU` Runtimes. Will support `MLX` Very soon.
+BatBot supports `CUDA`, `Vulkan`, `Metal` and `CPU` runtimes.
 
 They are stored in `~/.local/share/batbot/runtimes`.
-
 
 building the CUDA runtime, and the CPU one with it -- every runtime needs it.
 

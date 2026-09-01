@@ -345,12 +345,19 @@ check_not "the bar carries no second percentage" \
 check_not "the step counter is left to the heading above" \
           grep -q "\[3/5\]" <<< "$BLOCK"
 
-# The elapsed clock. SECONDS is 0 for the whole first second of a run, so a
-# phase that starts promptly must still be recognised as running.
+# The elapsed clock. A phase that starts in the very first second has
+# PHASE_START=0, and zero is a real start time -- it must not be mistaken for
+# the -1 that means "no phase is running".
+#
+# What is asserted is that a clock appears at all, not what it reads. The
+# elapsed figure is SECONDS - PHASE_START, and with PHASE_START=0 that is
+# however long this script has been running: pinning it to "(0s)" made the
+# check pass or fail on whether the machine was busy enough for the suite to
+# take a second to get here.
 STEP_NUM=3; STEP_PCT=0; PHASE_LABEL="prompt"
 PHASE_START=0
 check     "a phase that started in the first second still shows its clock" \
-          grep -q "(0s)" <<< "$(block_draw)"
+          grep -q "s)" <<< "$(block_draw)"
 PHASE_START=-1
 check_not "a part with no phase running shows no clock" \
           grep -q "s)" <<< "$(block_draw)"

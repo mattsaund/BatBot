@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <system_error>
 
+#include "batbot/runtime/backend.hpp"
 #include "batbot/runtime/devices.hpp"
 #include "batbot/ui/theme.hpp"
 
@@ -191,7 +192,31 @@ void SettingsView::build_rows() {
                      nullptr, nullptr, nullptr, &config_.ui.show_reasoning, 0, {}});
     rows_.push_back({Kind::Bool, "Unicode glyphs", "off uses a pure-ASCII bat",
                      nullptr, nullptr, nullptr, &config_.ui.unicode, 0, {}});
+
+    // Last, so it sees the finished list.
+    mark_inert_rows();
 }
+
+/// Dim every hardware setting the loaded devices cannot act on.
+///
+/// The rule and its explanations are in runtime/devices.cpp, where they can be
+/// tested against a made-up machine; this is the mapping from those three
+/// answers onto the rows that ask the questions.
+void SettingsView::mark_inert_rows() {
+    const GpuSettingSupport support = gpu_setting_support(compute_devices());
+
+    for (Row& row : rows_) {
+        if (row.label == "Multi-GPU split" || row.label == "Main GPU" ||
+            row.label == "GPU priority order") {
+            row.inert = support.split;
+        } else if (row.label == "GPU-only compute") {
+            row.inert = support.gpu_only;
+        } else if (row.label == "Dedicated VRAM only") {
+            row.inert = support.vram_only;
+        }
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // GPU priority order
@@ -337,6 +362,13 @@ void SettingsView::move_selection(int delta) {
 
 void SettingsView::activate_selection() {
     const Row& row = rows_[selected_];
+
+    if (!row.inert.empty()) {
+        // Pressing enter on a dimmed row is how you ask what is wrong with it,
+        // so answer rather than doing nothing.
+        status_ = row.inert;
+        return;
+    }
 
     switch (row.kind) {
         case Kind::Header:
@@ -559,6 +591,21 @@ Element SettingsView::render_row(const Row& row, std::size_t index) const {
 
     std::string value = value_of(row);
     Color value_color = theme::kUser;
+
+    // A setting the runtime cannot honour shows why instead of what it is set
+    // to. The value is still in the config and is still saved -- plug the card
+    // back in and it takes effect again -- but showing it here would be showing
+    // a number that is doing nothing.
+    if (!row.inert.empty()) {
+        Element label = text(row.label);
+        return hbox({
+                   text(selected ? " > " : "   ") | color(theme::kMeta),
+                   (selected ? label | bold : label) | dim
+                       | size(WIDTH, EQUAL, kLabelWidth),
+                   text(row.inert) | color(meta_color(selected)) | dim | flex,
+               }) |
+               (selected ? bgcolor(theme::kHighlight) : nothing);
+    }
 
     if (row.kind == Kind::Directory) {
         std::error_code ec;

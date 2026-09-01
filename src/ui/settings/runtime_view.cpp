@@ -107,7 +107,8 @@ void RuntimeView::start_install() {
         return;
     }
     if (!runtime.buildable) {
-        status_ = runtime.blocker + ".  sudo apt install " + std::string(info.apt_packages);
+        const std::string hint = install_hint(info);
+        status_ = hint.empty() ? runtime.blocker : runtime.blocker + ".  " + hint;
         return;
     }
 

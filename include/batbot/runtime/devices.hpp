@@ -158,6 +158,24 @@ GpuPlan plan_gpu_split(GpuSplitMode mode,
                        int main_gpu,
                        const ModelFit& fit = {});
 
+/// Which of the GPU settings the loaded devices can actually act on.
+///
+/// A setting the hardware cannot honour is worse than a missing one: it reads
+/// as configured, it saves, and nothing happens. So each field is either empty
+/// -- the setting works -- or the reason it does not, phrased for the person
+/// looking at it and naming what would have to change.
+///
+/// Read from the devices rather than from the config, because it is whatever
+/// is loaded that honours a setting or ignores it. `describe_split` lives here
+/// for the same reason: the explanation belongs with the fact.
+struct GpuSettingSupport {
+    std::string split;      ///< dividing one model between several cards
+    std::string gpu_only;   ///< keeping every layer off the processor
+    std::string vram_only;  ///< refusing a model that will not fit in device memory
+};
+
+GpuSettingSupport gpu_setting_support(const std::vector<ComputeDevice>& devices);
+
 /// A one-line explanation of what a plan will actually do, for the settings
 /// screen -- "RTX 5060 Ti 21 layers, RTX 4070 13, RTX 3060 15".
 ///

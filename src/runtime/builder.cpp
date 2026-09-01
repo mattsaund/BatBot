@@ -487,8 +487,9 @@ void RuntimeBuilder::run(BackendKind kind) {
     // four minutes of configuring teaches the user nothing they could not have
     // been told immediately.
     if (!info.required_tool.empty() && !util::on_path(std::string(info.required_tool))) {
-        fail(std::string(info.required_tool) + " is not on PATH. Install it with:  sudo apt install " +
-             std::string(info.apt_packages));
+        const std::string hint = install_hint(info);
+        fail(std::string(info.required_tool) + " is not on PATH." +
+             (hint.empty() ? "" : "  Install it with:  " + hint));
         running_.store(false);
         return;
     }
@@ -542,6 +543,17 @@ void RuntimeBuilder::run(BackendKind kind) {
         };
         if (!unversion.empty()) {
             configure.emplace_back("-DCMAKE_PROJECT_INCLUDE=" + unversion.string());
+        }
+        if (kind == BackendKind::Metal) {
+            // Not a default worth trusting.
+            //
+            // ggml can put the Metal shaders in a `default.metallib` beside the
+            // module instead of inside it, and the install here copies the
+            // module and nothing else -- deliberately, because everything else
+            // a build leaves in bin/ is a duplicate of it. A Metal backend that
+            // left its shaders behind would install cleanly and then fail on
+            // the first tensor, which is the worst shape a failure can take.
+            configure.emplace_back("-DGGML_METAL_EMBED_LIBRARY=ON");
         }
         if (kind == BackendKind::Cuda) {
             // The single biggest thing this build spends time on. See

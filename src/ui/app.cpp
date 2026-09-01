@@ -568,6 +568,13 @@ int App::run() {
             }
             if (runtimes_.handle(event) == RuntimeAction::Close) {
                 runtimes_.close();
+                // Installing or removing a runtime changes what the hardware
+                // settings can do -- a machine with one GPU cannot divide a
+                // model between cards, and a machine with none cannot keep the
+                // work off the processor. The rows work that out when they are
+                // built, so they are rebuilt here rather than left describing
+                // the hardware as it was when the screen opened.
+                settings_.refresh();
             }
             return true;
         }

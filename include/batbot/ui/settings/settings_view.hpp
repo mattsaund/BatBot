@@ -122,9 +122,21 @@ private:
         std::vector<std::string> options;  ///< for Enum rows
         ActionId     action = ActionId::None;  ///< for Action rows
         PanelId      panel  = PanelId::None;   ///< for Panel rows
+
+        /// Why this row cannot be changed right now, or empty when it can.
+        ///
+        /// A setting whose runtime cannot honour it is worse than a missing
+        /// one: it reads as configured, it saves, and nothing happens. So the
+        /// row stays visible and selectable -- you have to be able to land on
+        /// it to find out why -- and says what would have to change.
+        std::string  inert = {};
     };
 
     void build_rows();
+
+    /// Fill in Row::inert for every setting whose runtime cannot act on it.
+    /// Called at the end of build_rows, so it sees the finished list.
+    void mark_inert_rows();
     void move_selection(int delta);
 
     /// The cards behind Config::gpu.priority, named, for the row's value

@@ -63,6 +63,16 @@ bool parse_stat(std::string_view text, std::uint64_t& busy, std::uint64_t& total
 /// i5-12400" is not a label, it is a legal notice.
 std::string parse_cpu_name(std::string_view cpuinfo);
 
+/// macOS `vm_stat` output, as (used, total) bytes.
+///
+/// There is no /proc on a Mac and no single figure for "available" either.
+/// vm_stat counts pages, and what is genuinely in use is the pages that are
+/// neither free nor speculative nor purgeable file cache -- the same
+/// distinction MemAvailable draws on Linux, made by hand. `page_size` and
+/// `total` come from sysctl, which this cannot ask for itself.
+bool parse_vm_stat(std::string_view text, std::uint64_t page_size, std::uint64_t total,
+                   std::uint64_t& used);
+
 /// Samples the machine on a thread of its own and hands back the last reading.
 ///
 /// `on_change` is called after each sample so the screen can redraw; it runs on

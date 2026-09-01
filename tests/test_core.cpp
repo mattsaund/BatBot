@@ -193,6 +193,32 @@ TEST(memory_is_measured_as_available_not_free) {
     CHECK(!util::parse_meminfo("nothing useful here\n", used, total));
 }
 
+TEST(macos_page_counts_become_bytes_used) {
+    // Trimmed from real vm_stat output. The trailing full stop is part of the
+    // format, and the page size is 16 KiB on Apple silicon rather than 4.
+    const std::string vm_stat =
+        "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+        "Pages free:                       100.\n"
+        "Pages active:                     500.\n"
+        "Pages inactive:                   200.\n"
+        "Pages speculative:                 50.\n"
+        "Pages wired down:                 150.\n"
+        "Pages purgeable:                   25.\n";
+
+    const std::uint64_t page  = 16384;
+    const std::uint64_t total = std::uint64_t{1000} * page;
+    std::uint64_t used = 0;
+    CHECK(util::parse_vm_stat(vm_stat, page, total, used));
+
+    // Free, speculative and purgeable are all available without evicting
+    // anything anyone wants, which is 175 of the 1000 pages.
+    CHECK_EQ(used, std::uint64_t{825} * page);
+
+    // Nothing recognisable is not a reading, however long the text is.
+    CHECK(!util::parse_vm_stat("no pages here\n", page, total, used));
+    CHECK(!util::parse_vm_stat(vm_stat, page, /*total=*/0, used));
+}
+
 TEST(processor_time_is_split_into_busy_and_total) {
     // Fields: user nice system idle iowait irq softirq steal. Idle and iowait
     // are the two that are not work.
@@ -1496,8 +1522,65 @@ TEST(every_backend_has_a_unique_id_and_round_trips) {
         CHECK(!info.blurb.empty());
         CHECK(!info.cmake_option.empty());
     }
-    CHECK(!backend_from_id("metal").has_value());
+    CHECK(!backend_from_id("opencl").has_value());
     CHECK(!backend_from_id("").has_value());
+}
+
+TEST(ggml_calls_the_metal_backend_something_else_entirely) {
+    // ggml registers it as "MTL", not "Metal". Matching on the id would leave
+    // an installed Metal runtime reported as inactive for ever, with its
+    // devices working perfectly the whole time -- a wrong panel over a working
+    // machine, which is the kind of bug nobody thinks to look for.
+    CHECK(backend_from_reg_name("MTL").has_value());
+    CHECK_EQ(static_cast<int>(*backend_from_reg_name("MTL")),
+             static_cast<int>(BackendKind::Metal));
+    CHECK(!backend_from_reg_name("Metal").has_value());  // ggml never says this
+
+    // And every entry's registry name resolves to itself, so a future backend
+    // cannot be added with the field left at whatever looked plausible.
+    for (const BackendInfo& info : all_backends()) {
+        const auto parsed = backend_from_reg_name(info.reg_name);
+        CHECK(parsed.has_value());
+        if (parsed) {
+            CHECK_EQ(static_cast<int>(*parsed), static_cast<int>(info.kind));
+        }
+    }
+}
+
+TEST(a_backend_the_platform_cannot_have_is_not_offered) {
+    // Metal exists only on Apple hardware; CUDA has not existed on macOS since
+    // 2018. Listing either in the wrong place offers a build that cannot
+    // succeed, which is worse than not offering it.
+#ifdef __APPLE__
+    CHECK(backend_available_here(BackendKind::Metal));
+    CHECK(!backend_available_here(BackendKind::Cuda));
+#else
+    CHECK(!backend_available_here(BackendKind::Metal));
+    CHECK(backend_available_here(BackendKind::Cuda));
+#endif
+    // These two run anywhere, and the CPU one has to: nothing loads without it.
+    CHECK(backend_available_here(BackendKind::Cpu));
+    CHECK(backend_available_here(BackendKind::Vulkan));
+}
+
+TEST(the_install_hint_names_a_package_manager_this_machine_has) {
+    // The field it reads from is chosen by what is on PATH rather than assumed,
+    // because telling a Fedora user to run apt is worse than telling them
+    // nothing at all. Whichever manager this machine has, the hint has to name
+    // it and the packages have to be the ones for it.
+    const std::string cuda = install_hint(backend_info(BackendKind::Cuda));
+    if (!cuda.empty()) {
+        const BackendInfo& info = backend_info(BackendKind::Cuda);
+        const bool apt    = cuda == "sudo apt install " + std::string(info.apt_packages);
+        const bool dnf    = cuda == "sudo dnf install " + std::string(info.dnf_packages);
+        const bool pacman = cuda == "sudo pacman -S " + std::string(info.pacman_packages);
+        CHECK(apt || dnf || pacman);
+    }
+
+    // Metal names no package anywhere: it arrives with the Xcode command line
+    // tools, which Homebrew itself requires, so anyone who could run the
+    // suggestion already has what it would install.
+    CHECK(install_hint(backend_info(BackendKind::Metal)).empty());
 }
 
 TEST(ggml_registry_names_map_onto_backends_whatever_their_case) {
@@ -2161,6 +2244,84 @@ TEST(a_model_that_fits_on_the_first_card_never_leaves_it) {
     const std::vector<int> actual = llama_cpp_assignment(plan.split, 8);
     CHECK_EQ(actual[0], 0);
     CHECK_EQ(actual[1], 8);
+}
+
+TEST(a_setting_the_hardware_cannot_honour_says_so) {
+    // The failure this exists for is silent: a split mode saved on a machine
+    // with one card reads as configured, saves, and does nothing.
+    ComputeDevice cpu;
+    cpu.index   = 3;
+    cpu.name    = "CPU";
+    cpu.backend = "CPU";
+    cpu.is_gpu  = false;
+
+    // Nothing but a processor.
+    {
+        const GpuSettingSupport support = gpu_setting_support({cpu});
+        CHECK(!support.split.empty());
+        CHECK(!support.gpu_only.empty());
+        CHECK(!support.vram_only.empty());
+        // The reason has to name the way out, or a dimmed row is just a dimmed
+        // row.
+        CHECK(support.split.find("Runtimes") != std::string::npos);
+    }
+
+    // One card. Dividing a model between cards is meaningless; keeping the work
+    // off the processor and refusing an oversized model are not.
+    {
+        ComputeDevice one = fake_gpu(0, "RTX 4070", 12 * kGb);
+        one.backend       = "CUDA";
+        const GpuSettingSupport support = gpu_setting_support({one, cpu});
+        CHECK(!support.split.empty());
+        CHECK(support.split.find("CUDA") != std::string::npos);
+        CHECK(support.gpu_only.empty());
+        CHECK(support.vram_only.empty());
+    }
+
+    // Two cards on a backend that spreads a model: everything works.
+    {
+        ComputeDevice a = fake_gpu(0, "RTX 4070", 12 * kGb);
+        ComputeDevice b = fake_gpu(1, "RTX 3060", 12 * kGb);
+        a.backend = b.backend = "CUDA";
+        const GpuSettingSupport support = gpu_setting_support({a, b, cpu});
+        CHECK(support.split.empty());
+        CHECK(support.gpu_only.empty());
+        CHECK(support.vram_only.empty());
+    }
+}
+
+TEST(a_backend_that_runs_one_device_cannot_be_asked_to_split) {
+    // Metal is the case in hand: unified memory and one GPU, so there is
+    // neither anything to divide nor anywhere to divide it to. Two devices
+    // reported by such a backend would still not make a split possible.
+    ComputeDevice a = fake_gpu(0, "Apple M3 Max", 48 * kGb);
+    ComputeDevice b = fake_gpu(1, "Apple M3 Max", 48 * kGb);
+    a.backend = b.backend = "MTL";
+
+    const GpuSettingSupport support = gpu_setting_support({a, b});
+    CHECK(!support.split.empty());
+    CHECK(support.split.find("Metal") != std::string::npos);  // its name, not ggml's id
+    // The memory settings are still real there: Metal reports a working set,
+    // and going past it makes the machine swap.
+    CHECK(support.gpu_only.empty());
+    CHECK(support.vram_only.empty());
+}
+
+TEST(a_backend_that_reports_no_memory_cannot_refuse_a_model) {
+    // vram_only compares a model against free device memory. A backend that
+    // reports none makes it a setting that saves and then does nothing, which
+    // is the state this whole mechanism exists to make visible.
+    ComputeDevice a = fake_gpu(0, "some GPU", 0);
+    ComputeDevice b = fake_gpu(1, "some GPU", 0);
+    a.backend = b.backend = "Vulkan";
+    a.memory_free = b.memory_free = 0;
+
+    const GpuSettingSupport support = gpu_setting_support({a, b});
+    CHECK(!support.vram_only.empty());
+    CHECK(support.vram_only.find("Vulkan") != std::string::npos);
+    // Two cards on a splitting backend, so this one is still fine.
+    CHECK(support.split.empty());
+    CHECK(support.gpu_only.empty());
 }
 
 TEST(split_modes_round_trip_through_their_ids) {
