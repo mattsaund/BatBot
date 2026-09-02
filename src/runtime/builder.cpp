@@ -544,6 +544,16 @@ void RuntimeBuilder::run(BackendKind kind) {
         if (!unversion.empty()) {
             configure.emplace_back("-DCMAKE_PROJECT_INCLUDE=" + unversion.string());
         }
+        // A runtime build produces exactly the backend that was asked for. On a
+        // Mac that has to be said out loud: ggml turns Metal and BLAS on by
+        // itself under APPLE, so asking for the CPU runtime would quietly build
+        // three modules and install all of them -- and `produces` below, which
+        // decides what the install verifies, would not know about two of them.
+        if (kind != BackendKind::Metal) {
+            configure.emplace_back("-DGGML_METAL=OFF");
+        }
+        configure.emplace_back("-DGGML_BLAS=OFF");
+        configure.emplace_back("-DGGML_ACCELERATE=OFF");
         if (kind == BackendKind::Metal) {
             // Not a default worth trusting.
             //

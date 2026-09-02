@@ -106,6 +106,17 @@ if(BATBOT_BACKEND_DL)
 
     set(GGML_CUDA       OFF CACHE INTERNAL "")
     set(GGML_VULKAN     OFF CACHE INTERNAL "")
+
+    # These three are not off by default on a Mac. ggml sets GGML_METAL_DEFAULT
+    # and GGML_BLAS_DEFAULT to ON under APPLE, and GGML_ACCELERATE is ON
+    # everywhere, so a build whose entire purpose is to contain no backend
+    # would arrive containing two -- compiled, and then left in bin/ for the
+    # install rules to ignore, while the settings screen goes on to build Metal
+    # a second time. Naming them costs nothing on Linux, where they are already
+    # off, and is the difference between the design holding and not on macOS.
+    set(GGML_METAL      OFF CACHE INTERNAL "")
+    set(GGML_BLAS       OFF CACHE INTERNAL "")
+    set(GGML_ACCELERATE OFF CACHE INTERNAL "")
 else()
     # Monolithic fallback: one static binary with at most one GPU backend
     # compiled in. Nothing is loadable and the runtime manager reports itself

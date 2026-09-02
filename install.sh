@@ -1086,6 +1086,21 @@ show_log_tail() {
     # redraw erases real output.
     block_clear
     show_cursor
+
+    # The end of the log is not reliably where the error is. CMake writes its
+    # status lines to stdout, which libc block-buffers when it is a file, and
+    # its errors to stderr, which it does not -- so the two arrive out of order,
+    # and a build killed part way through loses whatever stdout had buffered.
+    # Either way the tail can be 25 lines of cheerful progress with the actual
+    # failure sitting further up, which is worse than useless in a bug report.
+    # So the error is looked for by name first, and the tail is what follows.
+    local hits
+    hits="$(grep -n -E 'CMake Error|error:|Error [0-9]+|FAILED:|No such file' "$log" 2>/dev/null | head -20)"
+    if [ -n "$hits" ]; then
+        printf '\n%s--- errors in %s ---%s\n' "$C_DIM" "$log" "$C_RESET" >&2
+        printf '%s\n' "$hits" >&2
+    fi
+
     printf '\n%s--- last %d lines of %s ---%s\n' "$C_DIM" "$lines" "$log" "$C_RESET" >&2
     tail -n "$lines" "$log" >&2
     printf '%s--- end ---%s\n\n' "$C_DIM" "$C_RESET" >&2

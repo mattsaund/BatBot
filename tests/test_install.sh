@@ -407,10 +407,45 @@ check_not "no backend modules are installed by CMake" \
 check     "the CPU backend is not compiled into the build" \
           grep -q "set(GGML_CPU              OFF CACHE INTERNAL" \
           "$HERE/../cmake/BatBotDependencies.cmake"
+# ggml sets GGML_METAL_DEFAULT and GGML_BLAS_DEFAULT to ON under APPLE, so
+# "no backend at all" is only true on a Mac if all three are named explicitly.
+for opt in GGML_METAL GGML_BLAS GGML_ACCELERATE; do
+    check "the base build turns $opt off (ggml defaults it on for Apple)" \
+          grep -q "set($opt *OFF CACHE INTERNAL" \
+          "$HERE/../cmake/BatBotDependencies.cmake"
+done
+
+# Same defaults, same problem, one layer down: a CPU runtime built on a Mac
+# would otherwise emit ggml-metal and ggml-blas alongside it.
+check     "a runtime build turns off BLAS and Accelerate" \
+          grep -q -- '-DGGML_BLAS=OFF' "$HERE/../src/runtime/builder.cpp"
+check     "a runtime build turns off Metal unless Metal is what was asked for" \
+          grep -q "kind != BackendKind::Metal" "$HERE/../src/runtime/builder.cpp"
+
 check     "the llama.cpp source is still kept, so a later build needs no network" \
           grep -q "seed_runtime_source" "$HERE/../install.sh"
 check     "the summary says no runtime is installed" \
           grep -q "runtimes : .*none yet" "$HERE/../install.sh"
+
+echo "  failure reporting"
+
+# The report Matt got from the Mac was 25 lines of successful status messages
+# and no error, because the tail of a log is not where the error necessarily
+# is. A failure report that omits the failure costs a whole round trip.
+buried_log="$(mktemp)"; buried_out="$(mktemp)"
+{
+    echo "CMake Error at ggml/src/CMakeLists.txt:592 (add_subdirectory):"
+    echo "  The source directory does not contain a CMakeLists.txt file."
+    i=1
+    while [ "$i" -le 30 ]; do echo "-- harmless status line $i"; i=$((i + 1)); done
+} > "$buried_log"
+show_log_tail "$buried_log" 25 > "$buried_out" 2>&1 || true
+
+check     "an error buried above the tail is still reported" \
+          grep -q "CMake Error" "$buried_out"
+check     "the tail is shown as well, not instead" \
+          grep -q "harmless status line 30" "$buried_out"
+rm -f "$buried_log" "$buried_out"
 
 echo "  bash 3.2 on macOS"
 
