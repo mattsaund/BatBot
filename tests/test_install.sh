@@ -412,6 +412,56 @@ check     "the llama.cpp source is still kept, so a later build needs no network
 check     "the summary says no runtime is installed" \
           grep -q "runtimes : .*none yet" "$HERE/../install.sh"
 
+echo "  bash 3.2 on macOS"
+
+# macOS ships bash 3.2.57 and always will -- Apple froze it in 2007 over the
+# GPLv3 -- so `#!/usr/bin/env bash` finds 3.2 on a machine that has not
+# installed a newer one, which is every machine this script is run on.
+#
+# 3.2 scans a bare $name with isalnum() a byte at a time, and macOS's ctype
+# table answers yes for the bytes of a UTF-8 character. So a bare colour
+# variable written against a tick becomes a variable whose name has the tick's
+# three bytes glued on the end, which is unset, and `set -u` kills the install --
+# which is exactly what happened at step 2/5, reported as
+# "C_GRN?: unbound variable" because the terminal cannot print the bytes back.
+#
+# Linux never shows this: glibc's isalnum says no for those bytes, so the same
+# line is correct here and fatal there. Braces are the fix, and this is the
+# check that keeps them.
+# grep -P is GNU-only, and this check has to run on the machine it is about.
+# LC_ALL=C makes the bracket a byte range rather than a character one, which is
+# the whole point: it is the raw bytes 3.2 misreads.
+check_not "no bare \$VAR is followed by a non-ASCII character (bash 3.2 eats it)" \
+          env LC_ALL=C grep -qE '[$][A-Za-z_][A-Za-z0-9_]*[^ -~'"$(printf '\t')"']' \
+          "$HERE/../install.sh" "$HERE/../tests/test_install.sh" \
+          "$HERE/../tests/test_uninstall.sh"
+
+# The 4.x features that would fail the same way: silently on Linux, fatally on
+# a Mac. Associative arrays and the upper/lower-casing expansions are the ones
+# most likely to be reached for here.
+check_not "no bash 4+ syntax the Mac's shell cannot parse" \
+          grep -qE '(declare|local) -[A]|(declare|local) -[n]|map[f]ile|read[a]rray|[$][{][A-Za-z_][A-Za-z0-9_]*(\^\^|,,)' \
+          "$HERE/../install.sh" "$HERE/../tests/test_install.sh" \
+          "$HERE/../tests/test_uninstall.sh"
+
+# An empty array expanded as "${arr[@]}" is an unbound variable in 3.2 -- so
+# the Mac, where PKGS_VULKAN and PKGS_CUDA are both empty, is the one machine
+# where it fires. ${arr[@]+"${arr[@]}"} is the portable spelling.
+check_not "no bare \"\${arr[@]}\" expansion (empty arrays are fatal in bash 3.2)" \
+          grep -qE '[^+]"[$][{]PKGS_[A-Z]*\[@\][}]"' "$HERE/../install.sh"
+
+runtime_for() {
+    ( OS="$1"; RUNTIME="$2"; decide_backend >/dev/null 2>&1; printf '%s' "$RUNTIME" )
+}
+
+check_eq "a Mac asked for auto gets Metal" "$(runtime_for Darwin auto)" "metal"
+check_eq "a Mac may ask for Metal outright" "$(runtime_for Darwin metal)" "metal"
+# die exits non-zero, so the subshell prints nothing at all.
+check_eq "CUDA on a Mac is refused, not attempted" "$(runtime_for Darwin cuda)" ""
+check_eq "Metal off a Mac is refused, not attempted" "$(runtime_for Linux metal)" ""
+check     "the refusal names what to use instead" \
+          grep -q -- "use --gpu metal (or --gpu cpu)" "$HERE/../install.sh"
+
 echo
 echo "$((PASS + FAIL)) checks, $FAIL failed"
 [ "$FAIL" -eq 0 ]

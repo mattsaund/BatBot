@@ -62,7 +62,7 @@ curl -fsSL .../install.sh | bash -s -- --gpu vulkan --prefix ~/.local
 
 | option | |
 |---|---|
-| `--gpu cuda\|vulkan\|cpu\|auto` | which GPU SDK to install (default `auto`) |
+| `--gpu cuda\|vulkan\|metal\|cpu\|auto` | which GPU SDK to install (default `auto`; `metal` on a Mac, and `cuda` is refused there) |
 | `--prefix DIR` | install location (default `/usr/local`, or `~/.local` without sudo) |
 | `--jobs N` | parallel build jobs |
 | `--check` | report what would happen, change nothing, never ask for sudo |
@@ -77,8 +77,6 @@ curl -fsSL .../install.sh | bash -s -- --gpu vulkan --prefix ~/.local
 BatBot supports `CUDA`, `Vulkan`, `Metal` and `CPU` runtimes.
 
 They are stored in `~/.local/share/batbot/runtimes`.
-
-building the CUDA runtime, and the CPU one with it -- every runtime needs it.
 
 ## Multiple GPUs
 

@@ -426,7 +426,7 @@ STEP_WEIGHTS=(0 2 26 2 8 62)
 info()  { note "    $*"; }
 muted() { note "    $C_DIM$*$C_RESET"; }
 warn()  { note "$C_YEL !! $C_RESET $*"; }
-ok()    { note "    $C_GRN✓$C_RESET $*"; }
+ok()    { note "    ${C_GRN}✓${C_RESET} $*"; }
 die()   { block_clear; show_cursor; printf '\n%serror:%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
 
 banner() {
@@ -835,6 +835,16 @@ decide_backend() {
     fi
 
     if [ "$RUNTIME" != "auto" ]; then
+        # A request the platform cannot honour is refused here rather than
+        # three phases later, where it would surface as a missing package. The
+        # pairs are absolute: NVIDIA has shipped no macOS driver since 2018,
+        # and Metal exists nowhere else.
+        if [ "$OS" = "Darwin" ] && [ "$RUNTIME" = "cuda" ]; then
+            die "CUDA has no macOS driver; use --gpu metal (or --gpu cpu)"
+        fi
+        if [ "$OS" != "Darwin" ] && [ "$RUNTIME" = "metal" ]; then
+            die "Metal is macOS only; use --gpu cuda, --gpu vulkan or --gpu cpu"
+        fi
         info "GPU SDK: $RUNTIME (requested)"
         return
     fi
@@ -939,7 +949,7 @@ install_dependencies() {
     resolve_packages
 
     phase 40 "installing the build toolchain"
-    pkg_install "${PKGS_BASE[@]}" || die "could not install the build toolchain"
+    pkg_install ${PKGS_BASE[@]+"${PKGS_BASE[@]}"} || die "could not install the build toolchain"
     phase_end
 
     # The Vulkan SDK goes in without asking: it is a few megabytes, and it is
@@ -947,8 +957,8 @@ install_dependencies() {
     # being greyed out with "glslc is not installed".
     if [ "${#PKGS_VULKAN[@]}" -gt 0 ] && [ "$RUNTIME" != "cpu" ]; then
         phase 30 "installing the Vulkan SDK"
-        if packages_available "${PKGS_VULKAN[@]}"; then
-            pkg_install "${PKGS_VULKAN[@]}" ||
+        if packages_available ${PKGS_VULKAN[@]+"${PKGS_VULKAN[@]}"}; then
+            pkg_install ${PKGS_VULKAN[@]+"${PKGS_VULKAN[@]}"} ||
                 warn "the Vulkan SDK did not install; Vulkan runtimes cannot be built"
         else
             warn "no Vulkan SDK packages on this distribution; Vulkan runtimes cannot be built"
@@ -960,7 +970,7 @@ install_dependencies() {
     # NVIDIA card. It is only offered when the hardware asked for it, and it is
     # the only dependency here that is a question rather than a decision.
     if [ "$RUNTIME" = "cuda" ]; then
-        if ! packages_available "${PKGS_CUDA[@]}"; then
+        if ! packages_available ${PKGS_CUDA[@]+"${PKGS_CUDA[@]}"}; then
             warn "the CUDA toolkit is not packaged here; the Vulkan runtime covers this card"
             RUNTIME="vulkan"
             return 0
@@ -972,7 +982,7 @@ install_dependencies() {
         muted "without it, only the Vulkan and CPU runtimes can be built later"
         if confirm "Install the CUDA toolkit now?" y; then
             phase 30 "installing the CUDA toolkit"
-            pkg_install "${PKGS_CUDA[@]}" || {
+            pkg_install ${PKGS_CUDA[@]+"${PKGS_CUDA[@]}"} || {
                 warn "the CUDA toolkit failed to install; the Vulkan runtime covers this card"
                 RUNTIME="vulkan"
             }
