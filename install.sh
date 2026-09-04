@@ -2,7 +2,7 @@
 #
 # Crucible installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/mattsaund/crucible/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/mattsaund/Crucible/main/install.sh | bash
 #
 # Installs the build toolchain and the GPU SDKs, builds Crucible with loadable
 # runtimes, pre-builds the GPU runtime this machine wants, and puts the binary
@@ -10,8 +10,8 @@
 
 set -euo pipefail
 
-REPO_URL="https://github.com/mattsaund/crucible.git"
-RAW_URL="https://raw.githubusercontent.com/mattsaund/crucible/main/install.sh"
+REPO_URL="https://github.com/mattsaund/Crucible.git"
+RAW_URL="https://raw.githubusercontent.com/mattsaund/Crucible/main/install.sh"
 
 BRANCH="main"
 # Which GPU SDK to install, so that runtime can be built from the settings
@@ -479,7 +479,7 @@ usage: install.sh [options]
   -h, --help       this message
 
   Windows has its own one-command installer:
-    irm https://raw.githubusercontent.com/mattsaund/crucible/main/install.ps1 | iex
+    irm https://raw.githubusercontent.com/mattsaund/Crucible/main/install.ps1 | iex
 
 examples:
   curl -fsSL $RAW_URL | bash

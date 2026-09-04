@@ -278,13 +278,13 @@ One command, on any of the three.
 **Linux and macOS**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mattsaund/crucible/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/mattsaund/Crucible/main/install.sh | bash
 ```
 
 **Windows** (PowerShell)
 
 ```powershell
-irm https://raw.githubusercontent.com/mattsaund/crucible/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/mattsaund/Crucible/main/install.ps1 | iex
 ```
 
 Either one installs Crucible and the build tools it needs, and re-running it
@@ -310,7 +310,7 @@ crucible --uninstall
 If the binary is already gone, the installer can clean up instead:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mattsaund/crucible/main/install.sh | bash -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/mattsaund/Crucible/main/install.sh | bash -s -- --uninstall
 ```
 
 ### Installer options
@@ -369,7 +369,7 @@ Everything else — llama.cpp, FTXUI, nlohmann/json, and for the desktop app Dea
 ImGui and GLFW — is fetched and pinned automatically.
 
 ```sh
-git clone https://github.com/mattsaund/crucible.git
+git clone https://github.com/mattsaund/Crucible.git
 cd crucible
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)

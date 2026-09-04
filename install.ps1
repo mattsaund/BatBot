@@ -5,7 +5,7 @@
 .DESCRIPTION
     The Windows half of install.sh. One command:
 
-        irm https://raw.githubusercontent.com/mattsaund/crucible/main/install.ps1 | iex
+        irm https://raw.githubusercontent.com/mattsaund/Crucible/main/install.ps1 | iex
 
     It does what the shell installer does, in the same order and with the same
     decisions: find or install the build tools, fetch the source, configure,
@@ -47,7 +47,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$RepoUrl = 'https://github.com/mattsaund/crucible.git'
+$RepoUrl = 'https://github.com/mattsaund/Crucible.git'
 $SrcDir  = Join-Path $env:LOCALAPPDATA 'crucible\src'
 
 # ---------------------------------------------------------------------------
