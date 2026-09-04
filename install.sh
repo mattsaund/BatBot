@@ -18,6 +18,12 @@ BRANCH="main"
 # screen later. It is not "which runtime to install" -- Crucible installs none.
 RUNTIME="auto"   # auto | cpu | cuda | vulkan | metal
 
+# The desktop application. Opt-in because it is the only part of Crucible that
+# needs anything from the system beyond a compiler -- OpenGL and, on Linux, a
+# handful of X11 development headers. Someone who only wants `crucible` in a
+# terminal should not have to install those to get it.
+WITH_GUI=0
+
 # Which backends the settings screen will offer, which is not the same list on
 # every platform: Metal exists only on Apple hardware and CUDA has not existed
 # there since 2018. Kept in step with backend_available_here() in
@@ -459,6 +465,9 @@ usage: install.sh [options]
                    otherwise ~/.local)
   --branch NAME    git branch to build (default: main)
   --jobs N         parallel build jobs (default: all cores)
+  --gui            also build the desktop application (crucible-gui).
+                   Needs OpenGL and, on Linux, the X11 development headers,
+                   which this installs. The terminal program needs neither.
   --no-deps        do not install system packages
   -y, --yes        assume yes; never prompt
   --check          report what would be installed and which runtime is chosen
@@ -470,6 +479,7 @@ examples:
   curl -fsSL $RAW_URL | bash
   curl -fsSL $RAW_URL | bash -s -- --gpu vulkan
   ./install.sh --prefix ~/.local --gpu cpu
+  ./install.sh --gui
 EOF
 }
 
@@ -478,6 +488,7 @@ EOF
 # --------------------------------------------------------------------------
 while [ $# -gt 0 ]; do
     case "$1" in
+        --gui)       WITH_GUI=1;       shift ;;
         --gpu)       RUNTIME="${2:-}";    shift 2 ;;
         --gpu=*)     RUNTIME="${1#*=}";   shift ;;
         --prefix)    PREFIX="${2:-}"; shift 2 ;;
@@ -898,11 +909,12 @@ decide_backend() {
 PKGS_BASE=()
 PKGS_VULKAN=()
 PKGS_CUDA=()
+PKGS_GUI=()
 
 # Which packages this distribution needs for the chosen backend. Split out from
 # the install so --check can report them without touching anything.
 resolve_packages() {
-    PKGS_BASE=(); PKGS_VULKAN=(); PKGS_CUDA=()
+    PKGS_BASE=(); PKGS_VULKAN=(); PKGS_CUDA=(); PKGS_GUI=()
     case "$PKG" in
         apt)    PKGS_BASE=(build-essential cmake git pkg-config curl ca-certificates)
                 # spirv-headers is the one that is easy to miss: ggml's Vulkan
@@ -910,21 +922,33 @@ resolve_packages() {
                 # without it the build dies at configure time with an error
                 # naming a CMake package rather than anything installable.
                 PKGS_VULKAN=(glslc libvulkan-dev spirv-headers)
-                PKGS_CUDA=(nvidia-cuda-toolkit) ;;
+                PKGS_CUDA=(nvidia-cuda-toolkit)
+                # The desktop app. GLFW itself is preferred from the system;
+                # these are what it needs either way, and what building it from
+                # source needs when the distribution has no package.
+                PKGS_GUI=(libgl1-mesa-dev libglfw3-dev libx11-dev libxrandr-dev
+                          libxinerama-dev libxcursor-dev libxi-dev) ;;
         dnf)    PKGS_BASE=(gcc-c++ make cmake git pkgconf-pkg-config curl)
                 PKGS_VULKAN=(glslc vulkan-loader-devel spirv-headers-devel)
-                PKGS_CUDA=(cuda-toolkit) ;;
+                PKGS_CUDA=(cuda-toolkit)
+                PKGS_GUI=(mesa-libGL-devel glfw-devel libX11-devel libXrandr-devel
+                          libXinerama-devel libXcursor-devel libXi-devel) ;;
         pacman) PKGS_BASE=(base-devel cmake git curl)
                 PKGS_VULKAN=(shaderc vulkan-headers vulkan-icd-loader spirv-headers)
-                PKGS_CUDA=(cuda) ;;
+                PKGS_CUDA=(cuda)
+                PKGS_GUI=(mesa glfw libx11 libxrandr libxinerama libxcursor libxi) ;;
         zypper) PKGS_BASE=(gcc-c++ make cmake git-core curl)
                 PKGS_VULKAN=(shaderc vulkan-devel spirv-headers)
-                PKGS_CUDA=(cuda) ;;
-        # macOS: the compiler, git and curl come with the command line tools,
-        # and Metal needs no package at all. Only cmake is actually missing.
+                PKGS_CUDA=(cuda)
+                PKGS_GUI=(Mesa-libGL-devel libglfw-devel libX11-devel libXrandr-devel
+                          libXinerama-devel libXcursor-devel libXi-devel) ;;
+        # macOS: the compiler, git, curl and OpenGL all come with the system
+        # or the command line tools. Only cmake is actually missing, and GLFW
+        # is built from source because Homebrew's is not always there.
         brew)   PKGS_BASE=(cmake)
                 PKGS_VULKAN=()
-                PKGS_CUDA=() ;;
+                PKGS_CUDA=()
+                PKGS_GUI=() ;;
     esac
     return 0
 }
@@ -962,6 +986,24 @@ install_dependencies() {
                 warn "the Vulkan SDK did not install; Vulkan runtimes cannot be built"
         else
             warn "no Vulkan SDK packages on this distribution; Vulkan runtimes cannot be built"
+        fi
+        phase_end
+    fi
+
+    # The desktop app's dependencies, when it was asked for. Small -- a few
+    # megabytes of headers -- but they are the one thing Crucible needs from the
+    # system beyond a compiler, which is why the GUI is opt-in and this is not
+    # installed for someone who only wants the terminal program.
+    if [ "$WITH_GUI" = "1" ] && [ "${#PKGS_GUI[@]}" -gt 0 ]; then
+        phase 20 "installing the desktop app's dependencies"
+        if packages_available ${PKGS_GUI[@]+"${PKGS_GUI[@]}"}; then
+            pkg_install ${PKGS_GUI[@]+"${PKGS_GUI[@]}"} || {
+                warn "could not install them; building the terminal app only"
+                WITH_GUI=0
+            }
+        else
+            warn "no OpenGL/GLFW development packages here; building the terminal app only"
+            WITH_GUI=0
         fi
         phase_end
     fi
@@ -1128,6 +1170,7 @@ run_configure() {
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="$PREFIX" \
         -DCRUCIBLE_BACKEND_DL=ON \
+        -DCRUCIBLE_BUILD_GUI="$([ "$WITH_GUI" = "1" ] && echo ON || echo OFF)" \
         > "$BUILD_LOG" 2>&1 || status=$?
     return 0
 }

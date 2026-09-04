@@ -398,6 +398,29 @@ STEP_NUM=0; STEP_PCT=0
 # makes the choice of backend reversible.
 # --------------------------------------------------------------------------
 echo
+echo "  the desktop app is opt-in"
+
+# The GUI is the one part of Crucible that needs anything from the system
+# beyond a compiler. Someone who only wants the terminal program must not be
+# made to install OpenGL and half of X11 to get it.
+check     "the desktop app is off unless asked for" \
+          grep -q 'option(CRUCIBLE_BUILD_GUI .* OFF)' "$HERE/../CMakeLists.txt"
+check     "--gui turns it on" \
+          grep -q -- '--gui)       WITH_GUI=1' "$HERE/../install.sh"
+check     "the installer passes the choice through to cmake" \
+          grep -q 'DCRUCIBLE_BUILD_GUI=' "$HERE/../install.sh"
+check     "it is off unless --gui is passed" \
+          grep -q '^WITH_GUI=0$' "$HERE/../install.sh"
+# The packages are the point of the flag: they are what an install that only
+# wants the terminal program must not be made to pull in.
+check     "the GUI's packages are behind that flag" \
+          grep -q 'WITH_GUI" = "1" \] && \[ "${#PKGS_GUI\[@\]}"' "$HERE/../install.sh"
+# A window library that cannot be installed must downgrade to the terminal
+# program rather than failing an install that was otherwise going to work.
+check     "a missing window library falls back to the terminal app" \
+          grep -q 'building the terminal app only' "$HERE/../install.sh"
+
+echo
 echo "  no runtimes are installed"
 
 check_not "the installer builds no runtime" \

@@ -45,6 +45,13 @@ option(CRUCIBLE_WARNINGS "Enable a strict warning set for Crucible's own sources
 option(CRUCIBLE_BUILD_TESTS "Build the unit tests" ON)
 option(CRUCIBLE_BUILD_TOOLS "Build the developer tools (routebench)" ON)
 
+# The desktop application. Off by default because it is the one part of
+# Crucible that needs anything from the system -- OpenGL, and on Linux the X11
+# or Wayland development headers -- and someone who only wants the terminal
+# program should not have to install those to get it. install.sh turns it on
+# when the headers are there.
+option(CRUCIBLE_BUILD_GUI "Build the desktop application (crucible-gui)" OFF)
+
 # Needed before the dependencies are configured: ggml decides where to install
 # its backend modules while it is being added, so CRUCIBLE_LIBDIR has to exist by
 # then.
@@ -160,6 +167,27 @@ target_link_libraries(crucible PRIVATE
     ftxui::component)
 
 # ---------------------------------------------------------------------------
+# crucible-gui -- the desktop binary
+#
+# The same engine with a different face. It links crucible::core exactly as the
+# terminal program does and knows nothing about routing, cooking or models that
+# the terminal does not: if the two ever disagree about what an expert is, that
+# is a bug in one of the faces rather than a difference of opinion.
+# ---------------------------------------------------------------------------
+if(CRUCIBLE_BUILD_GUI)
+    add_executable(crucible-gui
+        src/gui/main.cpp
+        src/gui/app.cpp
+        src/gui/theme.cpp)
+    target_link_libraries(crucible-gui PRIVATE crucible::core crucible_imgui)
+    if(CRUCIBLE_BACKEND_DL)
+        set_target_properties(crucible-gui PROPERTIES
+            BUILD_RPATH   "$ORIGIN/../${CRUCIBLE_LIBDIR}"
+            INSTALL_RPATH "$ORIGIN/../${CRUCIBLE_LIBDIR}")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
 # Warnings -- applied only to our own targets, never to the vendored deps.
 # ---------------------------------------------------------------------------
 if(CRUCIBLE_WARNINGS AND (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
@@ -169,6 +197,9 @@ if(CRUCIBLE_WARNINGS AND (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
         -Wunused -Woverloaded-virtual -Wdouble-promotion)
     target_compile_options(crucible_core PRIVATE ${_crucible_warnings})
     target_compile_options(crucible      PRIVATE ${_crucible_warnings})
+    if(CRUCIBLE_BUILD_GUI)
+        target_compile_options(crucible-gui PRIVATE ${_crucible_warnings})
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -234,6 +265,11 @@ set(CRUCIBLE_INSTALL_COMPONENT crucible)
 install(TARGETS crucible
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         COMPONENT ${CRUCIBLE_INSTALL_COMPONENT})
+if(CRUCIBLE_BUILD_GUI)
+    install(TARGETS crucible-gui
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+            COMPONENT ${CRUCIBLE_INSTALL_COMPONENT})
+endif()
 if(CRUCIBLE_BUILD_TOOLS)
     install(TARGETS crucible-routebench
             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
@@ -269,6 +305,11 @@ message(STATUS "  build type    : ${CMAKE_BUILD_TYPE}")
 message(STATUS "  compiler      : ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "  native tuning : ${CRUCIBLE_NATIVE}")
 message(STATUS "  tests         : ${CRUCIBLE_BUILD_TESTS}")
+if(CRUCIBLE_BUILD_GUI)
+    message(STATUS "  desktop app   : yes -- crucible-gui")
+else()
+    message(STATUS "  desktop app   : no  -- configure with -DCRUCIBLE_BUILD_GUI=ON")
+endif()
 if(CRUCIBLE_BACKEND_DL)
     message(STATUS "  runtimes      : loadable, none built in -- add them from settings")
 else()

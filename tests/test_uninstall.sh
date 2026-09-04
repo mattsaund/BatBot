@@ -18,11 +18,18 @@ fi
 
 # These tests run the real binary, so a stale one reports failures that look
 # like product bugs and are not. Refuse rather than mislead.
+#
+# src/gui is excluded because nothing in it is linked into `crucible` -- it is
+# the desktop application, built from the same core into a different binary.
+# Editing it left this refusing to run against a `crucible` that was in fact
+# perfectly current.
+#
 # The parentheses matter: without them find reads this as
 # "(-name '*.cpp') OR ('*.hpp' AND -newer)", which matches every source file
 # whatever its age.
 NEWER="$(find "$HERE/../src" "$HERE/../include" \
-         \( -name '*.cpp' -o -name '*.hpp' \) -newer "$CRUCIBLE" 2>/dev/null | head -1)"
+         -path "$HERE/../src/gui" -prune -o \
+         \( -name '*.cpp' -o -name '*.hpp' \) -newer "$CRUCIBLE" -print 2>/dev/null | head -1)"
 if [ -n "$NEWER" ]; then
     echo "$CRUCIBLE is older than $NEWER -- rebuild, or pass the right binary" >&2
     exit 2

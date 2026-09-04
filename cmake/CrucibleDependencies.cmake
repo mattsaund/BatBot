@@ -16,6 +16,8 @@ find_package(Threads REQUIRED)
 set(CRUCIBLE_LLAMA_TAG b10678     CACHE STRING "llama.cpp git tag to build against")
 set(CRUCIBLE_FTXUI_TAG v7.0.3     CACHE STRING "FTXUI git tag to build against")
 set(CRUCIBLE_JSON_TAG  v3.12.0    CACHE STRING "nlohmann/json git tag to build against")
+set(CRUCIBLE_IMGUI_TAG v1.91.9b   CACHE STRING "Dear ImGui git tag to build against")
+set(CRUCIBLE_GLFW_TAG  3.4        CACHE STRING "GLFW git tag, used only when the system has none")
 
 # ---------------------------------------------------------------------------
 # Symlink-free shared libraries
@@ -57,6 +59,70 @@ FetchContent_Declare(ftxui
     GIT_PROGRESS   TRUE)
 
 FetchContent_MakeAvailable(nlohmann_json ftxui)
+
+# ---------------------------------------------------------------------------
+# The desktop window: GLFW and Dear ImGui.
+#
+# Only fetched when the GUI is being built, because they are the one dependency
+# that needs anything from the system -- OpenGL and, on Linux, the X11 or
+# Wayland development headers. Someone who only wants `crucible` in a terminal
+# should not have to install those to get it.
+#
+# ImGui rather than Qt or a web stack, and the reason is the core library.
+# Crucible's engine is C++ and the whole point of the desktop app is that it is
+# the same program with a different face -- same Engine, same roster, same cook
+# loop, no protocol in between. ImGui links straight against it and produces one
+# self-contained binary. Qt would mean a system dependency an order of magnitude
+# larger; Electron or Tauri would mean a second language and an IPC layer whose
+# only job is to undo the fact that the engine is already right there.
+# ---------------------------------------------------------------------------
+if(CRUCIBLE_BUILD_GUI)
+    find_package(OpenGL REQUIRED)
+
+    # The system's GLFW when there is one -- it is a small, stable library and
+    # distributions package it well. Building our own is the fallback, and needs
+    # the X11 development headers that install.sh asks for.
+    find_package(glfw3 3.3 QUIET)
+    if(NOT glfw3_FOUND)
+        set(GLFW_BUILD_EXAMPLES OFF CACHE INTERNAL "")
+        set(GLFW_BUILD_TESTS    OFF CACHE INTERNAL "")
+        set(GLFW_BUILD_DOCS     OFF CACHE INTERNAL "")
+        set(GLFW_INSTALL        OFF CACHE INTERNAL "")
+        FetchContent_Declare(glfw
+            GIT_REPOSITORY https://github.com/glfw/glfw.git
+            GIT_TAG        ${CRUCIBLE_GLFW_TAG}
+            GIT_SHALLOW    TRUE
+            GIT_PROGRESS   TRUE)
+        FetchContent_MakeAvailable(glfw)
+        message(STATUS "GLFW: building from source (no system package found)")
+    else()
+        message(STATUS "GLFW: using the system package")
+    endif()
+
+    # ImGui ships no CMakeLists of its own, so the sources are named here. Only
+    # the two backends Crucible uses are compiled in.
+    FetchContent_Declare(imgui
+        GIT_REPOSITORY https://github.com/ocornut/imgui.git
+        GIT_TAG        ${CRUCIBLE_IMGUI_TAG}
+        GIT_SHALLOW    TRUE
+        GIT_PROGRESS   TRUE)
+    FetchContent_MakeAvailable(imgui)
+
+    add_library(crucible_imgui STATIC
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+        # std::string overloads for the input widgets. Without these every text
+        # box needs a fixed char buffer and its own resize dance, which is a
+        # great deal of ceremony for a name and a description.
+        ${imgui_SOURCE_DIR}/misc/cpp/imgui_stdlib.cpp)
+    target_include_directories(crucible_imgui PUBLIC
+        ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends ${imgui_SOURCE_DIR}/misc/cpp)
+    target_link_libraries(crucible_imgui PUBLIC glfw OpenGL::GL)
+endif()
 
 # --- llama.cpp -------------------------------------------------------------
 # We link libllama directly and use the raw C API, so none of llama.cpp's own
