@@ -1,4 +1,15 @@
 // SPDX-License-Identifier: MIT
+//
+// The terminal settings screen.
+//
+// One flat list of rows rebuilt from the Config on every refresh, rather than a
+// widget tree holding its own copies. The config is the single place a setting
+// lives, so a change made here, in the GUI, or by hand in the file all arrive
+// the same way, and there is no second state to fall out of step.
+//
+// Rows that cannot apply are marked inert instead of hidden -- a CUDA setting
+// on a machine with no CUDA is worth seeing greyed out, because "where did that
+// option go" is a worse question than "why can't I change this".
 #include "crucible/ui/settings/settings_view.hpp"
 
 #include <algorithm>

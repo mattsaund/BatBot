@@ -51,18 +51,8 @@ void AppState::set_mood(Mood mood, std::string status) {
     status_ = std::move(status);
 }
 
-Mood AppState::mood() const {
-    const std::lock_guard<std::mutex> lock(mutex_);
-    return mood_;
-}
-
 std::optional<std::size_t> AppState::seat_index(const ExpertId& id) const {
     return roster_ ? roster_->find(id) : std::nullopt;
-}
-
-std::shared_ptr<const Roster> AppState::roster() const {
-    const std::lock_guard<std::mutex> lock(mutex_);
-    return roster_;
 }
 
 void AppState::set_seat(const ExpertId& id, SeatPhase phase, float progress) {
@@ -246,16 +236,6 @@ void AppState::finish_turn(std::size_t turn, const GenerationStats& stats, long 
 void AppState::set_live_rate(double tokens_per_second) {
     const std::lock_guard<std::mutex> lock(mutex_);
     live_rate_ = tokens_per_second;
-}
-
-TokenUsage AppState::session_usage() const {
-    const std::lock_guard<std::mutex> lock(mutex_);
-    return session_usage_;
-}
-
-TokenUsage AppState::project_usage() const {
-    const std::lock_guard<std::mutex> lock(mutex_);
-    return project_usage_;
 }
 
 void AppState::set_project_usage(TokenUsage usage) {

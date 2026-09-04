@@ -68,10 +68,6 @@ void RuntimeView::refresh() {
     }
 }
 
-bool RuntimeView::building() const {
-    return builder_.progress().running();
-}
-
 void RuntimeView::shutdown() {
     builder_.stop();
 }

@@ -86,15 +86,6 @@ LoadedModel::~LoadedModel() {
 
 std::uint64_t LoadedModel::params() const { return llama_model_n_params(model_); }
 std::uint64_t LoadedModel::bytes()  const { return llama_model_size(model_); }
-int LoadedModel::n_ctx_train()      const { return llama_model_n_ctx_train(model_); }
-
-std::string LoadedModel::description() const {
-    std::string buffer(256, '\0');
-    const int written = llama_model_desc(model_, buffer.data(),
-                                         static_cast<int32_t>(buffer.size()));
-    buffer.resize(written > 0 ? static_cast<std::size_t>(written) : 0);
-    return buffer;
-}
 
 std::string LoadedModel::format_chat(const std::vector<ChatMessage>& messages,
                                      bool add_assistant_prefix) const {

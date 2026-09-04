@@ -1,4 +1,16 @@
 // SPDX-License-Identifier: MIT
+//
+// What changed between two versions of a file.
+//
+// Not a general diff: no LCS, no move detection, one hunk. The common prefix
+// and common suffix are skipped and everything between them is reported as the
+// change, which for two edits far apart in a file over-reports the middle.
+//
+// That is the right trade here. This exists to answer "what did that write
+// do?" in a journal entry, where the answer is almost always one contiguous
+// edit, and an exact algorithm would cost more than the accuracy is worth. A
+// diff that has to be truncated says so in place: a diff that stops without
+// warning reads as a complete diff of a smaller change.
 #include "crucible/util/diff.hpp"
 
 #include <algorithm>

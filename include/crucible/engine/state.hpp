@@ -138,7 +138,6 @@ public:
     Snapshot snapshot() const;
 
     void set_mood(Mood mood, std::string status = {});
-    Mood mood() const;
 
     void set_seat(const ExpertId& id, SeatPhase phase, float progress = 0.0F);
     void set_seat_progress(const ExpertId& id, float progress);
@@ -151,10 +150,6 @@ public:
     /// This is also the only way the roster the UI draws is replaced, which is
     /// what makes `/newexpert` a config change like any other.
     void configure_seats(const Config& config);
-
-    /// The roster currently on screen, for callers that need to resolve an id
-    /// without taking a whole snapshot.
-    std::shared_ptr<const Roster> roster() const;
 
     void set_resident(std::optional<ExpertId> id);
 
@@ -190,8 +185,6 @@ public:
     /// engine, and reset to 0 when the turn ends.
     void set_live_rate(double tokens_per_second);
 
-    TokenUsage session_usage() const;
-    TokenUsage project_usage() const;
     /// Seed the project total from disk. Called once, at startup.
     void set_project_usage(TokenUsage usage);
 

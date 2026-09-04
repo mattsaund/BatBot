@@ -119,8 +119,6 @@ public:
     const std::string& path() const { return path_; }
     std::uint64_t      params() const;       ///< parameter count, for the UI
     std::uint64_t      bytes() const;        ///< in-memory size
-    int                n_ctx_train() const;  ///< context the model was trained for
-    std::string        description() const;
 
 private:
     friend class ModelHost;

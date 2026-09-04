@@ -181,7 +181,14 @@ if(CRUCIBLE_BUILD_GUI)
         src/gui/main.cpp
         src/gui/app.cpp
         src/gui/markdown_view.cpp
-        src/gui/theme.cpp)
+        src/gui/theme.cpp
+        src/gui/widgets.cpp
+        src/gui/panels/sidebar.cpp
+        src/gui/panels/chat.cpp
+        src/gui/panels/cook.cpp
+        src/gui/panels/experts.cpp
+        src/gui/panels/settings.cpp
+        src/gui/panels/dialogs.cpp)
     target_link_libraries(crucible-gui PRIVATE crucible::core crucible_imgui)
     if(CRUCIBLE_BACKEND_DL AND NOT WIN32)
         set_target_properties(crucible-gui PROPERTIES
@@ -247,7 +254,15 @@ endif()
 # ---------------------------------------------------------------------------
 if(CRUCIBLE_BUILD_TESTS)
     enable_testing()
-    add_executable(crucible_tests tests/test_core.cpp)
+    add_executable(crucible_tests
+        tests/test_main.cpp
+        tests/test_routing.cpp
+        tests/test_tools.cpp
+        tests/test_cook.cpp
+        tests/test_config.cpp
+        tests/test_devices.cpp
+        tests/test_runtime.cpp
+        tests/test_session.cpp)
     target_link_libraries(crucible_tests PRIVATE crucible::core)
     target_include_directories(crucible_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
     if(CRUCIBLE_WARNINGS AND (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))

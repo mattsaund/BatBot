@@ -1,4 +1,20 @@
 // SPDX-License-Identifier: MIT
+//
+// Drawing parsed markdown with Dear ImGui.
+//
+// util/markdown.hpp does the parsing, both faces share it, and this is the
+// desktop half of the rendering -- ui/widgets/markdown_view.cpp is the
+// terminal's.
+//
+// The work here is wrapping. ImGui::TextWrapped wraps one string in one font
+// and one colour, which is no use for a paragraph whose bold run continues
+// mid-sentence: drawing each span separately breaks the line at every style
+// change instead of at the width. So the spans are flattened into words that
+// each remember their own face, and the wrapping is done a word at a time.
+//
+// Word::space_after is why `**Bold**:` renders tight. A space between every
+// pair of words is nearly right and wrong exactly where punctuation follows a
+// styled run, which is where it is most noticeable.
 #include "markdown_view.hpp"
 
 #include <algorithm>

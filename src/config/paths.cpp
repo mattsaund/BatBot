@@ -15,7 +15,6 @@
 
 #include <cstdlib>
 
-#include "crucible/util/platform.hpp"
 
 namespace crucible::paths {
 namespace {
@@ -77,11 +76,6 @@ std::filesystem::path runtimes_dir()      { return data_dir() / "runtimes"; }
 std::filesystem::path runtime_src_dir()   { return data_dir() / "runtime-src"; }
 std::filesystem::path runtime_build_dir() { return data_dir() / "runtime-build"; }
 std::filesystem::path projects_dir()      { return data_dir() / "projects"; }
-
-std::filesystem::path executable_dir() {
-    const std::filesystem::path self = util::executable_path();
-    return self.empty() ? std::filesystem::path{} : self.parent_path();
-}
 
 std::filesystem::path expand_user(std::string_view raw) {
     if (raw.empty()) {

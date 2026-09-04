@@ -1,4 +1,15 @@
 // SPDX-License-Identifier: MIT
+//
+// Reading and writing what a cook did.
+//
+// Three types in one file because they are three views of the same JSON. Cook
+// is a run in full, with every step; CookSummary is the row the history list
+// draws, cheap enough to read a hundred of; CookLog owns the directory they
+// live in and hands out ids.
+//
+// The steps are appended as a cook runs rather than written at the end, so a
+// crash costs the last step and not the hour before it -- which is also why a
+// journal on disk can be in a running state with no process behind it.
 #include "crucible/cook/journal.hpp"
 
 #include <algorithm>

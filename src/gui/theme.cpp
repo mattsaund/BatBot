@@ -1,4 +1,20 @@
 // SPDX-License-Identifier: MIT
+//
+// The palette, the ImGui style, the fonts, and the mark.
+//
+// Black, white and orange, with the orange being the same three values the
+// terminal palette uses, so the two faces cannot drift into different oranges.
+//
+// Fonts: JetBrains Mono is embedded in the binary rather than looked for on the
+// system, since a program that changes typeface depending on the machine is not
+// one design. load_fonts asks for glyph ranges beyond Latin-1 -- punctuation,
+// arrows, maths -- because ImGui's default range stops at 0x00FF and renders a
+// bullet as a hollow box.
+//
+// The mark is drawn rather than loaded: a path filled twice, the core leaning
+// against the body so the two edges cross instead of nesting, which is what
+// makes it read as two tongues of one flame rather than a shape with an
+// outline. It does not animate. Nothing here does.
 #include "theme.hpp"
 
 #include "fonts.hpp"
@@ -250,38 +266,6 @@ void draw_flame(ImDrawList* draw, ImVec2 centre, float radius, float alpha) {
     // one flame instead of a shape with an outline.
     flame_path(draw, ImVec2(base.x, base.y - radius * 0.03F), radius * 0.46F, -0.9F);
     draw->PathFillConcave(fade(kFlameBright));
-}
-
-void draw_crucible(ImDrawList* draw, ImVec2 centre, float radius) {
-    // The vessel first, so the flame sits in front of its mouth rather than
-    // behind it.
-    const float w    = radius * 0.95F;
-    const float top  = centre.y + radius * 0.30F;
-    const float base = centre.y + radius * 1.00F;
-
-    // A trapezoid, wider at the rim: the shape the ASCII crucible draws with
-    // slashes, and the shape a crucible actually is.
-    const ImVec2 pot[4] = {
-        ImVec2(centre.x - w,          top),
-        ImVec2(centre.x + w,          top),
-        ImVec2(centre.x + w * 0.58F,  base),
-        ImVec2(centre.x - w * 0.58F,  base),
-    };
-    draw->AddConvexPolyFilled(pot, 4, kRaised);
-    draw->AddPolyline(pot, 4, kFlame, ImDrawFlags_Closed, 2.0F);
-
-    // The melt: a bright line across the rim, which is where the light in the
-    // mark comes from.
-    draw->AddLine(ImVec2(centre.x - w * 0.86F, top),
-                  ImVec2(centre.x + w * 0.86F, top), kFlameBright, 2.5F);
-
-    // The stand: two legs splaying out from the base.
-    draw->AddLine(ImVec2(centre.x - w * 0.40F, base),
-                  ImVec2(centre.x - w * 0.72F, base + radius * 0.30F), kFlame, 2.0F);
-    draw->AddLine(ImVec2(centre.x + w * 0.40F, base),
-                  ImVec2(centre.x + w * 0.72F, base + radius * 0.30F), kFlame, 2.0F);
-
-    draw_flame(draw, ImVec2(centre.x, centre.y - radius * 0.52F), radius * 0.68F);
 }
 
 void draw_dot(ImDrawList* draw, ImVec2 centre, float radius, Dot dot) {

@@ -50,10 +50,6 @@ public:
 
     const std::string& status() const { return status_; }
 
-    /// True while a build is running, so the application knows not to let the
-    /// user quit out from under it without a word.
-    bool building() const;
-
     /// Reports a finished build exactly once, so the application can drop the
     /// models it has loaded and pick them up again on the new backend. Models
     /// choose their devices when they load, so one that was already resident

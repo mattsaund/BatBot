@@ -42,10 +42,6 @@ std::filesystem::path runtime_build_dir();
 /// data_dir()/projects -- per-project session history, keyed by directory.
 std::filesystem::path projects_dir();
 
-/// The directory holding the running executable, or empty if it cannot be
-/// determined. Used to find files installed alongside Crucible.
-std::filesystem::path executable_dir();
-
 /// Expand a leading `~` and resolve to an absolute path. Does not require the
 /// path to exist, so it is safe to call on a model path the user has not
 /// downloaded yet.

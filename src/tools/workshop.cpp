@@ -1,4 +1,33 @@
 // SPDX-License-Identifier: MIT
+//
+// Parsing the tool protocol, and carrying out what it asks for.
+//
+// workshop.hpp says what the tools are and why they are bounded the way they
+// are; this is how a line of model output becomes an action. Three stages:
+// verb_of finds the verb a line opens with, parse_tool_call turns the line and
+// any fenced body into a ToolCall, and run_tool dispatches to the do_* that
+// carries it out.
+//
+// The parsing is more defensive than it looks, and each guard is here because
+// a cook was lost to what it prevents.
+//
+//   - A verb only counts at the start of a line. An expert explaining that you
+//     should "RUN: make test" is writing prose, and running it is not what it
+//     asked for.
+//   - The colon is optional for LIST and READ and required for the rest, since
+//     misreading a read costs a turn and misreading a write costs a file. See
+//     colon_optional.
+//   - A WRITE target that looks like a sentence is refused outright, because a
+//     model that means its text as a description will otherwise get a file
+//     named after it. See plausible_path.
+//   - attempted_tool_call spots the near-misses -- the right verb in the wrong
+//     shape -- so the cook loop can answer with the syntax instead of treating
+//     a malformed call as an answer.
+//
+// The containment itself is resolve_in_root, and its order is the point:
+// weakly_canonical runs first, so a symlink is followed before anything is
+// compared, and the comparison is component by component rather than on the
+// strings. Both matter, and neither is obvious from the outside.
 #include "crucible/tools/workshop.hpp"
 
 #include <algorithm>

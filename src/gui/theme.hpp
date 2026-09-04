@@ -19,7 +19,6 @@ namespace crucible::gui::theme {
 // into two different oranges.
 constexpr ImU32 kFlame      = IM_COL32(0xFF, 0x87, 0x00, 0xFF);
 constexpr ImU32 kFlameBright = IM_COL32(0xFF, 0xAF, 0x00, 0xFF);
-constexpr ImU32 kFlameHot   = IM_COL32(0xFF, 0xE0, 0x9A, 0xFF);
 constexpr ImU32 kError      = IM_COL32(0xFF, 0x5F, 0x00, 0xFF);
 
 constexpr ImU32 kInk        = IM_COL32(0x0B, 0x0B, 0x0C, 0xFF);  ///< the ground
@@ -80,10 +79,6 @@ ImFont* heading();
 ///
 /// It does not move. Nothing in this file does.
 void draw_flame(ImDrawList* draw, ImVec2 centre, float radius, float alpha = 1.0F);
-
-/// The flame with the vessel under it, for places with room for the whole
-/// idea rather than just the mark.
-void draw_crucible(ImDrawList* draw, ImVec2 centre, float radius);
 
 /// A status diamond, the same vocabulary the terminal panel uses: filled
 /// means working, hollow means ready, faint means nothing assigned. Static --

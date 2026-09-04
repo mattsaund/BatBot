@@ -84,8 +84,16 @@ private:
     void begin_cook();
     void update_config(const std::function<void(Config&)>& change);
     void persist_session();
-    void absorb_written_examples();
     void refresh_models();
+
+    /// Take any routing examples the delegator wrote for itself and put them in
+    /// the config, so a seat that has learned what it is for keeps that across
+    /// restarts. An expert added with `/newexpert` starts with the blurb the
+    /// user typed and earns its examples by being routed to.
+    void absorb_written_examples();
+
+    /// Post a line to the status strip. The last few only: this is a status
+    /// channel, not a log.
     void say(std::string message);
 
     /// Point Crucible at another directory: new history, new cook journal, new
