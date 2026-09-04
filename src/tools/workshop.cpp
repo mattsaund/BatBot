@@ -250,6 +250,24 @@ bool plausible_path(std::string_view target) {
     return target.find_first_of(kRefused) == std::string_view::npos;
 }
 
+/// `file` as it should be recorded: relative to the root, always.
+///
+/// An expert names the same file two ways over a long cook -- "src/calc.py"
+/// once and the absolute path the next time -- and both are accepted, because
+/// both are inside the root. Recording what it typed made the journal count one
+/// file as two, so "3 files changed" was a number about the model's phrasing
+/// rather than about the project.
+std::string relative_to_root(const std::filesystem::path& root,
+                             const std::filesystem::path& file) {
+    std::error_code ec;
+    const std::filesystem::path base = std::filesystem::weakly_canonical(root, ec);
+    if (ec) {
+        return file.string();
+    }
+    const std::filesystem::path relative = std::filesystem::relative(file, base, ec);
+    return ec || relative.empty() ? file.string() : relative.generic_string();
+}
+
 ToolResult failure(std::string message) {
     ToolResult result;
     result.ok      = false;
@@ -390,13 +408,15 @@ ToolResult do_write(const ToolCall& call, const WorkshopSettings& settings) {
 
     const util::DiffStat stat = util::diff_stat(previous, written);
 
+    const std::string recorded = relative_to_root(settings.root, *file);
+
     ToolResult result;
     result.ok      = true;
-    result.changed = {call.argument};
+    result.changed = {recorded};
     result.detail  = util::unified_diff(previous, written);
-    result.summary = (existed ? "updated " : "created ") + call.argument
+    result.summary = (existed ? "updated " : "created ") + recorded
                    + "  " + stat.summary();
-    result.output  = "wrote " + call.argument + " (" + stat.summary() + ")";
+    result.output  = "wrote " + recorded + " (" + stat.summary() + ")";
     return result;
 }
 

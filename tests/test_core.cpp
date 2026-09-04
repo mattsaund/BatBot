@@ -819,6 +819,53 @@ TEST(a_command_runs_in_the_project_and_reports_its_status) {
     CHECK(failed.summary.find("exit 3") != std::string::npos);
 }
 
+TEST(a_file_named_two_ways_is_recorded_once) {
+    TempDir dir;
+    const tools::WorkshopSettings settings = workshop_at(dir.path());
+
+    // An expert names the same file relatively once and absolutely the next
+    // time, and both are accepted because both are inside the root. Recording
+    // what it typed made "3 files changed" a number about the model's phrasing
+    // rather than about the project.
+    tools::ToolCall write;
+    write.kind     = tools::ToolKind::Write;
+    write.argument = "src/calc.py";
+    write.content  = "x = 1";
+    const tools::ToolResult first = do_call(write, settings);
+    CHECK(first.ok);
+
+    write.argument = (dir.path() / "src" / "calc.py").string();
+    write.content  = "x = 2";
+    const tools::ToolResult second = do_call(write, settings);
+    CHECK(second.ok);
+
+    CHECK_EQ(first.changed.size(), std::size_t{1});
+    CHECK_EQ(second.changed.size(), std::size_t{1});
+    CHECK_EQ(first.changed[0], std::string("src/calc.py"));
+    CHECK_EQ(second.changed[0], first.changed[0]);
+
+    // Which is what makes the journal's file count mean something.
+    Cook cook;
+    cook.steps.push_back(step_of(1, "programming", "write", "a", true, 0, first.changed));
+    cook.steps.push_back(step_of(1, "programming", "write", "b", true, 0, second.changed));
+    CHECK_EQ(cook.files_touched().size(), std::size_t{1});
+}
+
+TEST(different_work_reaches_a_different_expert) {
+    // The whole point of a handoff: the line an expert writes goes back through
+    // the delegator, and work of a different kind lands in a different seat.
+    // Checked with the keyword router, which needs no model and is therefore
+    // the same answer every time.
+    CHECK(route_of("write the API documentation and proofread the README prose")
+          == "language");
+    CHECK(route_of("refactor the parser function and fix the segfault")
+          == "programming");
+    // Words the Engineering keyword set actually carries -- "preload" and
+    // "bolted joint" are in its worked examples, which is what the *model*
+    // router reads, not this one.
+    CHECK(route_of("what torque should this bearing and weld take") == "engineering");
+}
+
 TEST(a_command_starts_in_the_project_but_is_not_confined_to_it) {
     TempDir dir;
     const auto root = dir.path() / "project";

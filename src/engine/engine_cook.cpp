@@ -83,6 +83,20 @@ constexpr int kNudgeAt   = 1;   ///< say plainly that it is going in circles
 constexpr int kRestartAt = 4;   ///< throw the context away and restate the goal
 constexpr int kAbandonAt = 10;  ///< it is stuck; stop rather than burn the budget
 
+/// How many actions may pass before the loop stops and asks what is next.
+///
+/// The handover exists so a cook can pass from the expert that writes the code
+/// to the one that writes the documentation. Finishing a piece with DONE
+/// prompts for it -- but a small model may never say DONE, and then a
+/// three-hour cook is one expert doing everything, which is the thing the
+/// roundtable is for.
+///
+/// So the loop asks on its own schedule as well. Twelve actions is far enough
+/// that a piece of work has usually been finished and near enough that a wrong
+/// expert is not left in the chair for an hour. The answer is usually the seat
+/// already there, which costs one routing pass and no reload.
+constexpr int kCheckpointEvery = 12;
+
 /// What the expert is told it is doing, over and above its own system prompt.
 std::string cook_system_prompt(const Config& config, const std::string& goal,
                                const tools::WorkshopSettings& workshop,
@@ -391,6 +405,16 @@ void Engine::do_cook(const std::string& goal, int budget_seconds,
     int  strikes = 0;
     bool looping = false;
 
+    // Actions since the last time the delegator was asked who should be doing
+    // this. See kCheckpointEvery.
+    int since_checkpoint = 0;
+
+    // The line the loop uses to ask, in both places that ask it.
+    const std::string handoff_request =
+        "Say what the next most valuable piece of work towards the goal is, in one "
+        "line, as:\n\nHANDOFF: <the next piece of work>\n\nSay nothing else. If it "
+        "needs a different kind of expertise than yours, say so plainly in that line.";
+
     while (!cook_stop_.load(std::memory_order_relaxed)
            && !cancel_.load(std::memory_order_relaxed)
            && running_.load(std::memory_order_relaxed)
@@ -540,6 +564,7 @@ void Engine::do_cook(const std::string& goal, int budget_seconds,
             // is what carries the history across the handover.
             ++cook_.iterations;
             recent.clear();
+            since_checkpoint = 0;
             next_instruction = "Do this now: " + work;
             continue;
         }
@@ -563,11 +588,8 @@ void Engine::do_cook(const std::string& goal, int budget_seconds,
             // documentation rather than code, a writing expert takes the seat.
             ++cook_.iterations;
             recent.clear();
-            next_instruction =
-                "That piece is done. Say what the next most valuable piece of work "
-                "towards the goal is, in one line, as:\n\nHANDOFF: <the next piece "
-                "of work>\n\nSay nothing else. If it needs a different kind of "
-                "expertise than this one, say so plainly in that line.";
+            since_checkpoint = 0;
+            next_instruction = "That piece is done. " + handoff_request;
             continue;
         }
 
@@ -588,6 +610,21 @@ void Engine::do_cook(const std::string& goal, int budget_seconds,
 
         recent.push_back({"user", result.output});
         next_instruction = "Continue.";
+
+        // --- has anyone else got a better claim on this? -------------------
+        //
+        // Asked on a schedule rather than only when the expert thinks to. See
+        // kCheckpointEvery: without this a model that never says DONE keeps the
+        // seat for the whole budget, and the roundtable may as well be one
+        // chair.
+        if (++since_checkpoint >= kCheckpointEvery) {
+            since_checkpoint = 0;
+            next_instruction =
+                "Stop and take stock. " + handoff_request
+                + "\nIf you are the right expert for it, say so in the line and carry "
+                  "on.";
+            continue;
+        }
 
         // --- am I going in circles? ---------------------------------------
         window.emplace_back(step.kind + "|" + call->argument, !result.changed.empty());
@@ -630,7 +667,8 @@ void Engine::do_cook(const std::string& goal, int budget_seconds,
             recent.clear();
             window.clear();
             ++cook_.iterations;
-            strikes = 0;
+            strikes          = 0;
+            since_checkpoint = 0;
             // Handed the listing again, because the thing it has most likely
             // lost by now is what the project actually contains -- and telling
             // it to "read a file you have not read" without saying which files
