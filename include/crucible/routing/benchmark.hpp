@@ -13,18 +13,25 @@
 #include <string_view>
 #include <vector>
 
-#include "crucible/routing/subject.hpp"
+#include "crucible/routing/expert.hpp"
 
 namespace crucible {
 
-/// One prompt whose subject a knowledgeable person would not argue about.
+/// One prompt whose expert a knowledgeable person would not argue about.
 struct RouteCase {
-    Subject          expect;
+    /// The `Expert::id` that should take it. A string rather than a handle:
+    /// these cases are written against the nine that ship, and they have to
+    /// stay meaningful when the roster around them has been added to.
+    std::string_view expect;
     std::string_view prompt;
 };
 
-/// Six per subject, and deliberately unambiguous: a benchmark full of genuinely
-/// debatable questions measures nothing.
+/// Six per shipped expert, and deliberately unambiguous: a benchmark full of
+/// genuinely debatable questions measures nothing.
+///
+/// Only the shipped nine are covered. A user-made expert has no answer sheet,
+/// which is the honest position -- nobody but its author knows what should
+/// route to it.
 const std::vector<RouteCase>& benchmark_cases();
 
 }  // namespace crucible

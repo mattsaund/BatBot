@@ -22,8 +22,6 @@ namespace {
 /// off mid-word turns a button into a riddle.
 constexpr int kLabelWidth = 28;
 
-/// Sentinel seat meaning "the delegator", which is not one of the subjects.
-constexpr std::size_t kRouterSeat = kSubjectCount;
 
 std::string format_float(float value) {
     std::array<char, 32> buffer{};
@@ -67,131 +65,135 @@ void SettingsView::build_rows() {
 
     const auto header = [&](std::string label) {
         rows_.push_back({Kind::Header, std::move(label), "", nullptr, nullptr,
-                         nullptr, nullptr, 0, {}});
+                         nullptr, nullptr, {}});
     };
 
     header("MODELS");
     rows_.push_back({Kind::Directory, "Models directory",
                      "where Crucible looks for .gguf files", &config_.models_dir,
-                     nullptr, nullptr, nullptr, 0, {}, ActionId::None});
+                     nullptr, nullptr, nullptr, {}, ActionId::None});
     // The way back from a models directory that was moved somewhere awkward,
     // or onto a drive that is no longer plugged in.
     rows_.push_back({Kind::Action, "Reset model path to default",
                      "put the models directory back where Crucible expects it",
-                     nullptr, nullptr, nullptr, nullptr, 0, {},
+                     nullptr, nullptr, nullptr, nullptr, {},
                      ActionId::ResetModelsDir});
     rows_.push_back({Kind::Panel, "Manage models",
                      "delete GGUF files you no longer want",
-                     nullptr, nullptr, nullptr, nullptr, 0, {},
+                     nullptr, nullptr, nullptr, nullptr, {},
                      ActionId::None, PanelId::Models});
 
     header("DELEGATOR");
     rows_.push_back({Kind::ModelRef, "Router model",
                      "small model that picks the expert; blank falls back to keywords",
-                     &config_.router.model, nullptr, nullptr, nullptr, kRouterSeat, {}});
+                     &config_.router.model, nullptr, nullptr, nullptr, {}});
 
     header("EXPERTS");
-    for (const SubjectInfo& info : all_subjects()) {
-        const auto seat = static_cast<std::size_t>(info.subject);
-        rows_.push_back({Kind::ModelRef, std::string(info.name), std::string(info.blurb),
-                         &config_.experts[seat].model, nullptr, nullptr, nullptr, seat, {}});
+    // One row per seat on the live roster, so an expert added with /newexpert
+    // appears here without a restart. The row points straight at the map entry
+    // for that id -- `operator[]` creates it if this is the first time the seat
+    // has been seen, which is exactly what a newly added expert needs -- and
+    // std::map keeps that pointer valid as later seats are inserted.
+    for (const Expert& expert : config_.roster.experts()) {
+        rows_.push_back({Kind::ModelRef, expert.name, expert.blurb,
+                         &config_.experts[expert.id].model, nullptr, nullptr, nullptr, {}});
     }
 
     header("ROUTING");
     rows_.push_back({Kind::Float, "Min confidence",
                      "below this the delegator is treated as undecided",
-                     nullptr, nullptr, &config_.routing.min_confidence, nullptr, 0, {}});
+                     nullptr, nullptr, &config_.routing.min_confidence, nullptr, {}});
     rows_.push_back({Kind::Bool, "Keep delegator loaded",
                      "off frees it after each decision, leaving the expert the whole card",
-                     nullptr, nullptr, nullptr, &config_.routing.keep_delegator_loaded, 0, {}});
+                     nullptr, nullptr, nullptr, &config_.routing.keep_delegator_loaded, {}});
     rows_.push_back({Kind::Bool, "Use fallback expert",
                      "empty seats send work to Fallback rather than elsewhere",
-                     nullptr, nullptr, nullptr, &config_.routing.use_fallback_expert, 0, {}});
+                     nullptr, nullptr, nullptr, &config_.routing.use_fallback_expert, {}});
 
     header("DEFAULTS");
     ModelParams& d = config_.defaults;
     rows_.push_back({Kind::Int,   "Context size",   "tokens of context per expert",
-                     nullptr, &d.n_ctx, nullptr, nullptr, 0, {}});
+                     nullptr, &d.n_ctx, nullptr, nullptr, {}});
     rows_.push_back({Kind::Int,   "GPU layers",     "-1 offloads as much as fits",
-                     nullptr, &d.n_gpu_layers, nullptr, nullptr, 0, {}});
+                     nullptr, &d.n_gpu_layers, nullptr, nullptr, {}});
     rows_.push_back({Kind::Int,   "Batch size",     "prompt ingestion batch",
-                     nullptr, &d.n_batch, nullptr, nullptr, 0, {}});
+                     nullptr, &d.n_batch, nullptr, nullptr, {}});
     rows_.push_back({Kind::Int,   "Threads",        "0 picks automatically",
-                     nullptr, &d.n_threads, nullptr, nullptr, 0, {}});
+                     nullptr, &d.n_threads, nullptr, nullptr, {}});
     rows_.push_back({Kind::Int,   "Max tokens",     "hard cap on a single reply",
-                     nullptr, &d.max_tokens, nullptr, nullptr, 0, {}});
+                     nullptr, &d.max_tokens, nullptr, nullptr, {}});
     rows_.push_back({Kind::Float, "Temperature",    "0 is greedy and deterministic",
-                     nullptr, nullptr, &d.temperature, nullptr, 0, {}});
+                     nullptr, nullptr, &d.temperature, nullptr, {}});
     rows_.push_back({Kind::Float, "Top-p",          "nucleus sampling cutoff",
-                     nullptr, nullptr, &d.top_p, nullptr, 0, {}});
+                     nullptr, nullptr, &d.top_p, nullptr, {}});
     rows_.push_back({Kind::Int,   "Top-k",          "candidates kept before sampling",
-                     nullptr, &d.top_k, nullptr, nullptr, 0, {}});
+                     nullptr, &d.top_k, nullptr, nullptr, {}});
     rows_.push_back({Kind::Float, "Min-p",          "minimum relative probability",
-                     nullptr, nullptr, &d.min_p, nullptr, 0, {}});
+                     nullptr, nullptr, &d.min_p, nullptr, {}});
     rows_.push_back({Kind::Float, "Repeat penalty", "1.0 disables it",
-                     nullptr, nullptr, &d.repeat_penalty, nullptr, 0, {}});
+                     nullptr, nullptr, &d.repeat_penalty, nullptr, {}});
     rows_.push_back({Kind::Bool,  "Flash attention", "faster attention where supported",
-                     nullptr, nullptr, nullptr, &d.flash_attn, 0, {}});
+                     nullptr, nullptr, nullptr, &d.flash_attn, {}});
     rows_.push_back({Kind::Enum,  "Split granularity",
                      "what gets divided between GPUs: whole layers, or rows within them",
-                     &d.split_mode, nullptr, nullptr, nullptr, 0,
+                     &d.split_mode, nullptr, nullptr, nullptr,
                      {"layer", "row", "tensor", "none"}});
 
     header("HARDWARE");
     rows_.push_back({Kind::Panel, "Runtimes",
                      "install or remove CUDA / Vulkan / CPU backends",
-                     nullptr, nullptr, nullptr, nullptr, 0, {},
+                     nullptr, nullptr, nullptr, nullptr, {},
                      ActionId::None, PanelId::Runtimes});
     rows_.push_back({Kind::Enum, "Multi-GPU split",
                      "how one expert is divided between the graphics cards",
-                     &config_.gpu.mode, nullptr, nullptr, nullptr, 0,
+                     &config_.gpu.mode, nullptr, nullptr, nullptr,
                      {"auto", "even", "priority", "single"}});
     rows_.push_back({Kind::Int, "Main GPU",
                      "device index for small tensors, and the whole model in single mode",
-                     nullptr, &config_.gpu.main_gpu, nullptr, nullptr, 0, {}});
+                     nullptr, &config_.gpu.main_gpu, nullptr, nullptr, {}});
     rows_.push_back({Kind::Panel, "GPU priority order",
                      "which card is filled first, when the split is by priority",
-                     nullptr, nullptr, nullptr, nullptr, 0, {},
+                     nullptr, nullptr, nullptr, nullptr, {},
                      ActionId::None, PanelId::GpuOrder});
     rows_.push_back({Kind::Bool, "GPU-only compute",
                      "put every layer on the GPU and keep the processor out of it",
-                     nullptr, nullptr, nullptr, &config_.gpu.gpu_only, 0, {}});
+                     nullptr, nullptr, nullptr, &config_.gpu.gpu_only, {}});
     rows_.push_back({Kind::Bool, "Dedicated VRAM only",
                      "refuse a model that would spill out of video memory into RAM",
-                     nullptr, nullptr, nullptr, &config_.gpu.vram_only, 0, {}});
+                     nullptr, nullptr, nullptr, &config_.gpu.vram_only, {}});
 
     header("BEHAVIOUR");
     rows_.push_back({Kind::Text, "System prompt", "sent to every expert",
-                     &config_.system_prompt, nullptr, nullptr, nullptr, 0, {}});
+                     &config_.system_prompt, nullptr, nullptr, nullptr, {}});
     rows_.push_back({Kind::Enum, "Reasoning effort", "how hard a thinking model works",
-                     &config_.reasoning_effort, nullptr, nullptr, nullptr, 0,
+                     &config_.reasoning_effort, nullptr, nullptr, nullptr,
                      {"low", "medium", "high"}});
 
     header("TOOLS");
     rows_.push_back({Kind::Bool, "Web search",
                      "let experts look things up -- the only thing Crucible sends off the machine",
-                     nullptr, nullptr, nullptr, &config_.tools.web_search, 0, {}});
+                     nullptr, nullptr, nullptr, &config_.tools.web_search, {}});
     rows_.push_back({Kind::Enum, "Search provider", "where the looking up happens",
-                     &config_.tools.search_provider, nullptr, nullptr, nullptr, 0,
+                     &config_.tools.search_provider, nullptr, nullptr, nullptr,
                      {"wikipedia", "searxng", "brave"}});
     rows_.push_back({Kind::Text, "Search endpoint", "the address of your own searxng instance",
-                     &config_.tools.search_endpoint, nullptr, nullptr, nullptr, 0, {}});
+                     &config_.tools.search_endpoint, nullptr, nullptr, nullptr, {}});
     rows_.push_back({Kind::Text, "Search API key", "for brave; stored in the config in plain text",
-                     &config_.tools.search_api_key, nullptr, nullptr, nullptr, 0, {}});
+                     &config_.tools.search_api_key, nullptr, nullptr, nullptr, {}});
     rows_.push_back({Kind::Int,  "Search results", "how many to hand the expert",
-                     nullptr, &config_.tools.search_results, nullptr, nullptr, 0, {}});
+                     nullptr, &config_.tools.search_results, nullptr, nullptr, {}});
     rows_.push_back({Kind::Int,  "Search rounds", "how many times one prompt may search",
-                     nullptr, &config_.tools.search_rounds, nullptr, nullptr, 0, {}});
+                     nullptr, &config_.tools.search_rounds, nullptr, nullptr, {}});
 
     header("INTERFACE");
     rows_.push_back({Kind::Int,  "Animation ms", "frame interval while busy",
-                     nullptr, &config_.ui.animation_ms, nullptr, nullptr, 0, {}});
+                     nullptr, &config_.ui.animation_ms, nullptr, nullptr, {}});
     rows_.push_back({Kind::Bool, "Show roundtable", "draw the ring of experts",
-                     nullptr, nullptr, nullptr, &config_.ui.show_roundtable, 0, {}});
+                     nullptr, nullptr, nullptr, &config_.ui.show_roundtable, {}});
     rows_.push_back({Kind::Bool, "Show reasoning", "keep a thinking model's working on screen",
-                     nullptr, nullptr, nullptr, &config_.ui.show_reasoning, 0, {}});
+                     nullptr, nullptr, nullptr, &config_.ui.show_reasoning, {}});
     rows_.push_back({Kind::Bool, "Unicode glyphs", "off uses a pure-ASCII crucible",
-                     nullptr, nullptr, nullptr, &config_.ui.unicode, 0, {}});
+                     nullptr, nullptr, nullptr, &config_.ui.unicode, {}});
 
     // Last, so it sees the finished list.
     mark_inert_rows();
@@ -247,7 +249,7 @@ std::vector<std::string> SettingsView::models_in_use() const {
         }
     };
     add(config_.router.model);
-    for (const ModelParams& expert : config_.experts) {
+    for (const auto& [id, expert] : config_.experts) {
         add(expert.model);
     }
     return names;
@@ -265,7 +267,7 @@ void SettingsView::forget_models(const std::vector<std::string>& names) {
         config_.router.path.clear();
         changed = true;
     }
-    for (ModelParams& expert : config_.experts) {
+    for (auto& [id, expert] : config_.experts) {
         if (gone(expert.model)) {
             expert.model.clear();
             expert.path.clear();

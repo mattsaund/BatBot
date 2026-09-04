@@ -13,7 +13,9 @@
 #include <string>
 
 #include "crucible/llm/model_host.hpp"
-#include "crucible/routing/subject.hpp"
+#include <memory>
+
+#include "crucible/routing/expert.hpp"
 
 namespace crucible {
 
@@ -27,11 +29,16 @@ enum class RouteSource {
 };
 
 struct RouteDecision {
-    /// Fallback, because that is what "nobody has decided yet" means. A
-    /// default-constructed decision reaches the engine whenever the delegator
-    /// could not run at all, and defaulting to a real subject sent every one of
-    /// those prompts to that subject's expert as though it had been chosen.
-    Subject     subject    = Subject::Fallback;
+    /// The fallback seat, because that is what "nobody has decided yet" means.
+    /// A default-constructed decision reaches the engine whenever the delegator
+    /// could not run at all, and defaulting to a real expert sent every one of
+    /// those prompts to that expert as though it had been chosen.
+    ///
+    /// An id rather than an index into the roster: a decision outlives the
+    /// roster it was made against -- it is written into the session history and
+    /// read back weeks later -- and an index would then name whichever expert
+    /// had since moved into that slot.
+    ExpertId    expert     = ExpertId(kFallbackId);
     float       confidence = 0.0F;
     RouteSource source     = RouteSource::Fallback;
     std::string detail;     ///< short human-readable note for the status line
@@ -73,7 +80,12 @@ public:
 /// fully deterministic -- but blind to anything the word list does not cover.
 class KeywordRouter final : public Router {
 public:
+    explicit KeywordRouter(std::shared_ptr<const Roster> roster);
+
     RouteDecision route(const std::string& prompt, const CancelCallback& cancel) override;
+
+private:
+    std::shared_ptr<const Roster> roster_;
 };
 
 /// Asks the resident delegator which subject a prompt belongs to.
@@ -87,8 +99,10 @@ public:
 /// The scores are then calibrated: see `bias_`.
 class ModelRouter final : public Router {
 public:
-    /// `system_prompt_override` is for experiments; empty uses the built-in.
+    /// `system_prompt_override` is for experiments; empty uses the one the
+    /// roster generates.
     ModelRouter(LoadedModel& model, ModelParams params,
+                std::shared_ptr<const Roster> roster,
                 std::string system_prompt_override = {});
 
     RouteDecision route(const std::string& prompt, const CancelCallback& cancel) override;
@@ -99,8 +113,8 @@ public:
     void set_calibration(float strength) { calibration_ = strength; }
 
     /// The raw label scores for one prompt, uncalibrated, parallel to
-    /// routable_subjects(). For crucible-routebench --explain, which is how a
-    /// delegator that never picks one of the nine gets diagnosed.
+    /// `Roster::routable()`. For crucible-routebench --explain, which is how a
+    /// delegator that never picks one of the seats gets diagnosed.
     std::vector<float> raw_scores(const std::string& prompt);
 
     /// The measured bias, so it survives a reload of the same delegator.
@@ -144,10 +158,11 @@ private:
 
     LoadedModel&  model_;
     ModelParams   params_;
+    std::shared_ptr<const Roster> roster_;
     std::string   system_prompt_;
     std::vector<std::pair<std::string, std::string>> examples_;
-    std::vector<Subject>     subjects_;  ///< the routable ones, in tag order
-    std::vector<std::string> labels_;    ///< their tags, parallel to subjects_
+    std::vector<ExpertId>    ids_;     ///< the routable seats, in roster order
+    std::vector<std::string> labels_;  ///< their names, parallel to ids_
 
     /// What the delegator answers when it is asked nothing at all.
     ///

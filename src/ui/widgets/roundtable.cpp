@@ -17,6 +17,8 @@
 
 #include <algorithm>
 #include <array>
+#include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -60,21 +62,17 @@ std::string seat_marker(SeatPhase phase, std::size_t tick) {
 ///
 /// `narrow` drops the load percentage and the fixed width, for the one-line
 /// strip where nine full-width chips would not fit in 80 columns.
-Element seat(Subject subject, const SeatState& state, std::size_t tick,
+Element seat(const Expert& expert, const SeatState& state, std::size_t tick,
              bool narrow = false) {
-    const SubjectInfo& info = subject_info(subject);
-
     // The tag is padded to a fixed width for the one-line strip, where the
     // chips are laid end to end and the padding is what lines them up. In the
     // ring the box is already a fixed width and the label is centred in it, so
-    // the padding only pushes the short tags half a column off centre.
-    std::string_view tag = info.tag;
-    if (!narrow) {
-        while (!tag.empty() && tag.back() == ' ') {
-            tag.remove_suffix(1);
-        }
+    // padding there would only push the short tags half a column off centre.
+    std::string tag = expert.tag;
+    if (narrow) {
+        tag.resize(4, ' ');
     }
-    std::string label = seat_marker(state.phase, tick) + " " + std::string(tag);
+    std::string label = seat_marker(state.phase, tick) + " " + tag;
     if (state.phase == SeatPhase::Loading && !narrow) {
         const int percent = static_cast<int>(state.progress * 100.0F);
         label += " " + std::to_string(percent) + "%";
@@ -97,6 +95,15 @@ Element seat(Subject subject, const SeatState& state, std::size_t tick,
     // left than it is, which was enough to make the whole ring look adrift of
     // the crucible it is supposed to be arranged around.
     return chip | hcenter | size(WIDTH, EQUAL, 11);
+}
+
+/// A snapshot taken before the first configure_seats has no roster. Drawing
+/// nothing for one frame is better than a null dereference, and better than
+/// pretending the shipped nine are there when the config may not have them.
+const std::shared_ptr<const Roster>& kEmptyRoster() {
+    static const std::shared_ptr<const Roster> empty =
+        std::make_shared<const Roster>(Roster::bare());
+    return empty;
 }
 
 /// Width of the gap the connector is drawn in, and where its vertical runs.
@@ -149,35 +156,34 @@ std::string link_row(int row, int from, int to) {
 
 Element roundtable(const Snapshot& snapshot, const CrucibleSprite& sprite, std::size_t tick,
                    bool compact) {
-    // Every subject in table order, with the fallback last -- it is not one of
-    // the nine, and the bottom of the list is where the thing that catches what
-    // the others did not belongs.
-    std::vector<Subject> order = routable_subjects();
-    order.push_back(Subject::Fallback);
+    // The roster is drawn in its own order, which already puts the fallback
+    // last: it is not one of the specialists, and the bottom of the list is
+    // where the thing that catches what the others did not belongs.
+    const Roster& roster = snapshot.roster ? *snapshot.roster : *kEmptyRoster();
+    const std::size_t rows = roster.size();
 
-    const auto row_of = [&order](Subject subject) {
-        for (std::size_t i = 0; i < order.size(); ++i) {
-            if (order[i] == subject) {
-                return static_cast<int>(i);
-            }
+    // -1 is "nothing is running", which is what link_row draws a blank gap
+    // for. A linked expert that is no longer on the roster lands here too: it
+    // was ejected mid-turn, and there is no row left to draw a line to.
+    int to_row = -1;
+    if (snapshot.linked) {
+        if (const std::optional<std::size_t> row = roster.find(*snapshot.linked)) {
+            to_row = static_cast<int>(*row);
         }
-        return -1;
-    };
+    }
 
     // Crucible sits level with the middle of the list, so the connector reaches
     // as far up as it does down.
-    const int sprite_row = (static_cast<int>(order.size()) - 1) / 2;
-    const int to_row  = snapshot.linked ? row_of(*snapshot.linked) : -1;
+    const int sprite_row = (static_cast<int>(rows) - 1) / 2;
 
     // --- the seats, one per row ------------------------------------------
     Elements seat_rows;
-    for (std::size_t i = 0; i < order.size(); ++i) {
-        const Subject          subject = order[i];
-        const SeatState&       state   = snapshot.seats[static_cast<std::size_t>(subject)];
-        const SubjectInfo&     info    = subject_info(subject);
-        const bool             lit     = to_row == static_cast<int>(i);
+    for (std::size_t i = 0; i < rows; ++i) {
+        const Expert&    expert = roster.at(i);
+        const SeatState& state  = i < snapshot.seats.size() ? snapshot.seats[i] : SeatState{};
+        const bool       lit    = to_row == static_cast<int>(i);
 
-        std::string label = std::string(info.name);
+        std::string label = expert.name;
         if (state.phase == SeatPhase::Loading) {
             label += " " + std::to_string(static_cast<int>(state.progress * 100.0F)) + "%";
         }
@@ -224,7 +230,7 @@ Element roundtable(const Snapshot& snapshot, const CrucibleSprite& sprite, std::
     // it, so its horizontal run meets the diamond's right vertex rather than
     // starting somewhere out in the gap.
     Elements dot_column;
-    for (int row = 0; row < static_cast<int>(order.size()); ++row) {
+    for (int row = 0; row < static_cast<int>(rows); ++row) {
         if (row == sprite_row - 1) {
             dot_column.push_back(
                 hbox({filler(), text("Crucible") | color(theme::kFlame) | bold}));
@@ -239,7 +245,10 @@ Element roundtable(const Snapshot& snapshot, const CrucibleSprite& sprite, std::
     Element table = hbox({
         vbox({filler(), std::move(vessel), filler()}),
         text("  "),
-        vbox(std::move(dot_column)) | size(WIDTH, EQUAL, 6),
+        // Wide enough for the name above the dot. It was six when the name was
+        // six characters long; "Crucible" is eight, and a column sized to the
+        // old name silently clipped it to "Crucib".
+        vbox(std::move(dot_column)) | size(WIDTH, EQUAL, 9),
         vbox(std::move(seat_rows)),
     });
 
@@ -254,19 +263,23 @@ Element roundtable(const Snapshot& snapshot, const CrucibleSprite& sprite, std::
 }
 
 Element roundtable_strip(const Snapshot& snapshot, std::size_t tick) {
+    const Roster& roster = snapshot.roster ? *snapshot.roster : *kEmptyRoster();
+
     Elements chips;
-    for (const SubjectInfo& info : all_subjects()) {
+    for (std::size_t i = 0; i < roster.size(); ++i) {
         if (!chips.empty()) {
             chips.push_back(text("  "));
         }
-        chips.push_back(seat(info.subject, snapshot.seats[static_cast<std::size_t>(info.subject)],
-                             tick, /*narrow=*/true));
+        const SeatState& state = i < snapshot.seats.size() ? snapshot.seats[i] : SeatState{};
+        chips.push_back(seat(roster.at(i), state, tick, /*narrow=*/true));
     }
 
     // Ten narrow chips come to about 76 columns, which leaves the mood very
     // little on an 80-column terminal -- and the seats are what the strip is
     // for. So the mood shrinks first: better a clipped mood than a clipped
-    // roundtable.
+    // roundtable. A roster with twenty seats on it will overflow, and the strip
+    // is already the fallback layout for a terminal with no room; the ring
+    // above is where a large roundtable is meant to be read.
     const std::string bubble = thought_bubble(snapshot.mood, snapshot.status, tick);
     chips.push_back(filler());
     chips.push_back(text(" "));  // never let the mood touch the last chip

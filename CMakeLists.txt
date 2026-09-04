@@ -83,8 +83,8 @@ add_library(crucible_core STATIC
     src/session/usage.cpp
     src/session/store.cpp
 
-    # routing: the subject table, the two routers, and the command list
-    src/routing/subject.cpp
+    # routing: the expert roster, the two routers, and the command list
+    src/routing/expert.cpp
     src/routing/router.cpp
     src/routing/benchmark.cpp
     src/routing/completion.cpp
@@ -137,6 +137,7 @@ add_executable(crucible
     src/ui/widgets/markdown_view.cpp
     src/ui/widgets/scroll.cpp
     src/ui/widgets/resource_meter.cpp
+    src/ui/widgets/expert_form.cpp
     src/ui/settings/settings_view.cpp
     src/ui/settings/line_editor.cpp
     src/ui/settings/model_picker.cpp

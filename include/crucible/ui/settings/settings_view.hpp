@@ -116,9 +116,6 @@ private:
         int*         integer = nullptr;
         float*       real    = nullptr;
         bool*        flag    = nullptr;
-        /// For ModelRef rows: which seat, as an index into Config::experts.
-        /// kSubjectCount means the delegator.
-        std::size_t  seat = 0;
         std::vector<std::string> options;  ///< for Enum rows
         ActionId     action = ActionId::None;  ///< for Action rows
         PanelId      panel  = PanelId::None;   ///< for Panel rows

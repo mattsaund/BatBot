@@ -6,7 +6,7 @@
 // and the renderer takes a Snapshot under the same lock. Nothing else crosses.
 #pragma once
 
-#include <array>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -15,7 +15,7 @@
 #include "crucible/config/config.hpp"
 #include "crucible/llm/model_host.hpp"
 #include "crucible/routing/router.hpp"
-#include "crucible/routing/subject.hpp"
+#include "crucible/routing/expert.hpp"
 #include "crucible/session/usage.hpp"
 
 namespace crucible {
@@ -77,16 +77,27 @@ struct Turn {
 
 /// A consistent copy of everything the renderer needs for one frame.
 struct Snapshot {
-    Mood                                mood = Mood::Idle;
-    std::string                         status;
-    std::array<SeatState, kSubjectCount> seats;
-    std::optional<Subject>              resident;
+    Mood        mood = Mood::Idle;
+    std::string status;
+
+    /// Who the seats are, for this frame.
+    ///
+    /// A shared pointer rather than a copy: the roster is a dozen structs of
+    /// strings, and copying it into every frame at eleven frames a second to
+    /// draw ten labels would be pure waste. It is immutable once published, so
+    /// the renderer can read it without a lock, and `/newexpert` publishes a
+    /// new one rather than editing this.
+    std::shared_ptr<const Roster>       roster;
+
+    /// Parallel to `roster->experts()`.
+    std::vector<SeatState>              seats;
+    std::optional<ExpertId>             resident;
 
     /// The expert this turn is flowing to, from the moment the delegator names
     /// it until the answer is finished. What the roundtable draws the line to,
     /// and what makes a seat's dot light up -- residency is a different
     /// question, and the status bar is where that is answered.
-    std::optional<Subject>              linked;
+    std::optional<ExpertId>             linked;
 
     /// Is the delegator in memory and ready to route?
     ///
@@ -119,13 +130,23 @@ public:
     void set_mood(Mood mood, std::string status = {});
     Mood mood() const;
 
-    void set_seat(Subject subject, SeatPhase phase, float progress = 0.0F);
-    void set_seat_progress(Subject subject, float progress);
-    /// Recompute every seat from the config, distinguishing a seat with no
-    /// model from one whose file has gone missing. Touches the filesystem, so
-    /// call it on a config change rather than per frame.
+    void set_seat(const ExpertId& id, SeatPhase phase, float progress = 0.0F);
+    void set_seat_progress(const ExpertId& id, float progress);
+
+    /// Adopt the config's roster and recompute every seat from it,
+    /// distinguishing a seat with no model from one whose file has gone
+    /// missing. Touches the filesystem, so call it on a config change rather
+    /// than per frame.
+    ///
+    /// This is also the only way the roster the UI draws is replaced, which is
+    /// what makes `/newexpert` a config change like any other.
     void configure_seats(const Config& config);
-    void set_resident(std::optional<Subject> subject);
+
+    /// The roster currently on screen, for callers that need to resolve an id
+    /// without taking a whole snapshot.
+    std::shared_ptr<const Roster> roster() const;
+
+    void set_resident(std::optional<ExpertId> id);
 
     /// Open a new turn and return its index.
     std::size_t begin_turn(std::string prompt);
@@ -148,7 +169,7 @@ public:
     void add_search(std::size_t turn, std::string line);
 
     /// The expert work is flowing to, or nothing between turns.
-    void set_linked(std::optional<Subject> subject);
+    void set_linked(std::optional<ExpertId> id);
 
     /// Whether the delegator is loaded and able to route.
     void set_delegator_ready(bool ready);
@@ -172,12 +193,19 @@ public:
     bool busy() const;
 
 private:
+    /// Index of `id` in the current roster, or nullopt. Call with the lock
+    /// held; it does not take one.
+    std::optional<std::size_t> seat_index(const ExpertId& id) const;
+
     mutable std::mutex                   mutex_;
     Mood                                 mood_ = Mood::Idle;
     std::string                          status_;
-    std::array<SeatState, kSubjectCount>  seats_{};
-    std::optional<Subject>               resident_;
-    std::optional<Subject>               linked_;
+    std::shared_ptr<const Roster>        roster_ =
+        std::make_shared<const Roster>(Roster::defaults());
+    std::vector<SeatState>               seats_ =
+        std::vector<SeatState>(roster_->size());
+    std::optional<ExpertId>              resident_;
+    std::optional<ExpertId>              linked_;
     bool                                 delegator_ready_ = false;
     std::vector<Turn>                    turns_;
     std::vector<std::string>             notices_;

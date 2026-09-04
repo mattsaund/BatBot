@@ -14,7 +14,7 @@
 
 #include "crucible/config/config.hpp"
 #include "crucible/llm/loaded_model.hpp"
-#include "crucible/routing/subject.hpp"
+#include "crucible/routing/expert.hpp"
 
 struct llama_model;
 struct llama_context;
@@ -42,12 +42,12 @@ public:
                                 const ProgressCallback& progress,
                                 std::string& error);
 
-    /// Make `subject`'s expert the loaded one, freeing whichever expert was
+    /// Make `id`'s expert the loaded one, freeing whichever expert was
     /// loaded before. This is the JIT swap, and the cost the design accepts in
     /// exchange for experts far larger than RAM would otherwise allow.
-    /// Returns the already-loaded model without doing any work if `subject` is
+    /// Returns the already-loaded model without doing any work if `id` is
     /// already resident.
-    LoadedModel* acquire_expert(Subject subject,
+    LoadedModel* acquire_expert(const ExpertId& id,
                                 const ModelParams& params,
                                 const ProgressCallback& progress,
                                 std::string& error);
@@ -70,7 +70,7 @@ public:
     /// never resident together.
     std::uint64_t resident_bytes() const;
 
-    std::optional<Subject> loaded_expert() const { return loaded_expert_; }
+    std::optional<ExpertId> loaded_expert() const { return loaded_expert_; }
     LoadedModel*           router()        const { return router_.get(); }
     LoadedModel*           expert()        const { return expert_.get(); }
 
@@ -90,7 +90,7 @@ private:
     GpuConfig                    gpu_;
     std::unique_ptr<LoadedModel> router_;
     std::unique_ptr<LoadedModel> expert_;
-    std::optional<Subject>       loaded_expert_;
+    std::optional<ExpertId>      loaded_expert_;
 
     /// How the resident expert was loaded, so a second seat naming the same
     /// file the same way can be given it rather than reloading it.

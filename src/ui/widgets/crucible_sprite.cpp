@@ -53,9 +53,15 @@ constexpr std::array<const char*, 11> kFullCrucible{{
 // The compact crucible is a crop to the vessel: at this size the stand costs
 // four rows and says nothing the pot does not already say, and the flame is
 // what the sprite is for.
+//
+// It keeps the flame's lower two rows rather than its upper two. Idle burns
+// only in the base row, so cropping from the top would leave an idle compact
+// crucible with no fire in it at all -- which is the state it spends most of
+// its life in, and the one where "is this thing on" most needs answering.
+// The cost is the tip, which only Talking ever lights.
 constexpr std::array<const char*, 5> kCompactCrucible{{
-    R"(       A       )",
     R"(      BBB      )",
+    R"(     CCCCC     )",
     R"(  ,---------,  )",
     R"(  \  NNNNN  /  )",
     R"(   \_______/   )",

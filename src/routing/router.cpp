@@ -7,9 +7,13 @@
 // subject rather than by generating one: an invalid answer is not merely
 // unlikely, there is nowhere for it to come from.
 //
-// The keyword table below matches whole words only. Substring matching sounds
-// harmless until "ion" fires inside "function" and sends every programming
-// question to Chemistry.
+// Both read their seats from the live roster rather than from a table compiled
+// in, so an expert the user added a minute ago competes on equal terms with the
+// nine that ship.
+//
+// Keyword matching is whole-word only. Substring matching sounds harmless until
+// "ion" fires inside "function" and sends every programming question to
+// Chemistry.
 #include "crucible/routing/router.hpp"
 
 #include <algorithm>
@@ -20,74 +24,6 @@
 
 namespace crucible {
 namespace {
-
-/// Keyword sets for the model-free router. Deliberately weighted towards terms
-/// that are unambiguous markers of a field -- "integral" is maths, "titration"
-/// is chemistry -- because a word that appears everywhere ("energy", "model")
-/// costs more in false positives than it earns in recall.
-struct KeywordSet {
-    Subject                       subject;
-    std::array<std::string_view, 24> words;
-};
-
-constexpr std::array<KeywordSet, kSubjectCount> kKeywords{{
-    {Subject::Mathematics, {"integral","derivative","theorem","proof","matrix","algebra",
-        "calculus","equation","polynomial","topology","geometry","probability","modulo",
-        "eigenvalue","factorial","logarithm","prime","vector space","summation","limit",
-        "differential","combinatorics","cardinality","isomorphism"}},
-    {Subject::Programming, {"code","function","compile","debug","refactor","python","c++",
-        "rust","javascript","algorithm","segfault","repository","git","api","pointer",
-        "recursion","runtime","syntax","framework","typescript","kernel","binary",
-        "linked list","stack trace"}},
-    {Subject::Physics, {"quantum","relativity","momentum","thermodynamics","entropy",
-        "electromagnetic","photon","lagrangian","hamiltonian","velocity","acceleration",
-        "gravity","particle","wavelength","voltage","kinetic","newton","tensor field",
-        "spacetime","fermion","boson","optics","friction","orbital mechanics"}},
-    {Subject::Chemistry, {"molecule","reaction","atom","bond","stoichiometry","titration",
-        "catalyst","organic","ion","ph","enthalpy","reagent","solvent","isotope",
-        "periodic table","valence","oxidation","polymer","acid","alkane","molarity",
-        "chromatography","electrolysis","compound"}},
-    {Subject::Biology, {"cell","dna","protein","enzyme","gene","evolution","organism",
-        "mitochondria","neuron","bacteria","virus","photosynthesis","chromosome",
-        "ecosystem","species","metabolism","antibody","tissue","rna","physiology",
-        "genome","receptor","hormone","allele"}},
-    {Subject::Engineering, {"circuit","torque","stress","beam","cad","tolerance","bearing",
-        "hydraulic","actuator","load bearing","weld","gear","pcb","transistor","chassis",
-        "structural","machining","alloy","fastener","turbine","thermal design","cnc",
-        "schematic","manufacturing"}},
-    {Subject::Philosophy, {"ethics","epistemology","metaphysics","ontology","kant","stoic",
-        "morality","consciousness","free will","utilitarian","existential","dialectic",
-        "nietzsche","aristotle","virtue","phenomenology","determinism","socratic",
-        "meaning of life","normative","a priori","solipsism","teleology","nihilism"}},
-    {Subject::Sociology, {"society","culture","class","institution","survey","demographic",
-        "inequality","norms","capitalism","policy","election","market","psychology",
-        "behaviour","behavior","community","migration","ethnography","bureaucracy",
-        "socialization","urbanization","gdp","labor","kinship"}},
-    {Subject::Language, {"grammar","translate","essay","sentence","rhetoric","poem",
-        "metaphor","etymology","syntax rules","proofread","paragraph","literature",
-        "novel","tone","phonetic","vocabulary","idiom","narrative","rewrite","spelling",
-        "linguistic","prose","dialogue","summarize"}},
-    // Fallback carries no keywords on purpose: it is reached by the no-match
-    // path, not by competing for scores. The entry still has to exist -- this
-    // array is sized by kSubjectCount, and a missing one would be
-    // value-initialised with subject 0, whose score it would then clobber.
-    {Subject::Fallback, {}},
-}};
-
-// Every subject must appear exactly once, at its own index. Getting this wrong
-// is silent: a missing entry is value-initialised to subject 0 and wipes that
-// subject's score.
-static_assert(kKeywords.size() == kSubjectCount, "one keyword set per subject");
-
-constexpr bool keywords_are_index_aligned() {
-    for (std::size_t i = 0; i < kKeywords.size(); ++i) {
-        if (static_cast<std::size_t>(kKeywords[i].subject) != i) {
-            return false;
-        }
-    }
-    return true;
-}
-static_assert(keywords_are_index_aligned(), "keyword sets must be in Subject order");
 
 std::string to_lower(std::string_view text) {
     std::string out(text);
@@ -158,40 +94,63 @@ std::string answer_prefix(std::string_view rendered) {
 // KeywordRouter
 // ---------------------------------------------------------------------------
 
+KeywordRouter::KeywordRouter(std::shared_ptr<const Roster> roster)
+    : roster_(std::move(roster)) {
+    if (!roster_) {
+        roster_ = std::make_shared<const Roster>(Roster::defaults());
+    }
+}
+
 RouteDecision KeywordRouter::route(const std::string& prompt, const CancelCallback& /*cancel*/) {
     const std::string haystack = to_lower(prompt);
+    const std::vector<Expert>& experts = roster_->experts();
 
-    std::array<int, kSubjectCount> scores{};
+    // Scored per seat rather than per subject-enum slot. The fallback carries
+    // no keywords, so it scores zero and is reached by the no-match path below
+    // rather than by competing -- which is the same behaviour the old fixed
+    // table had, now for the structural reason rather than by a hand-written
+    // empty entry.
+    std::vector<int> scores(experts.size(), 0);
     int total = 0;
-    for (const KeywordSet& set : kKeywords) {
+    for (std::size_t i = 0; i < experts.size(); ++i) {
+        if (!experts[i].routable) {
+            continue;
+        }
         int score = 0;
-        for (const std::string_view word : set.words) {
+        for (const std::string& word : experts[i].keywords) {
             if (word.empty()) {
                 continue;
             }
-            score += count_occurrences(haystack, word);
+            score += count_occurrences(haystack, to_lower(word));
         }
-        scores[static_cast<std::size_t>(set.subject)] = score;
+        scores[i] = score;
         total += score;
+    }
+
+    RouteDecision decision;
+    if (scores.empty()) {
+        decision.detail = "no experts configured";
+        return decision;
     }
 
     const auto best = std::max_element(scores.begin(), scores.end());
     const int best_score = *best;
 
-    RouteDecision decision;
     if (best_score == 0) {
-        // Nothing matched, so there is no decision to report. Fallback is the
-        // seat for exactly this, and the engine will substitute if it is empty.
-        decision.subject    = Subject::Fallback;
+        // Nothing matched, so there is no decision to report. The fallback is
+        // the seat for exactly this, and the engine will substitute if it is
+        // empty.
+        decision.expert     = ExpertId(kFallbackId);
         decision.confidence = 0.0F;
         decision.source     = RouteSource::Fallback;
-        decision.detail     = "no subject keywords matched";
+        decision.detail     = "no expert keywords matched";
         return decision;
     }
 
-    decision.subject = static_cast<Subject>(std::distance(scores.begin(), best));
-    decision.source  = RouteSource::Keyword;
-    // Confidence is this subject's share of all matches, so a prompt that hits
+    decision.expert = experts[static_cast<std::size_t>(
+        std::distance(scores.begin(), best))].id;
+    decision.source = RouteSource::Keyword;
+    // Confidence is this seat's share of all matches, so a prompt that hits
     // three fields at once reports the genuine ambiguity instead of false
     // certainty. Capped below 1.0 -- keywords are never proof.
     decision.confidence = total > 0
@@ -207,14 +166,24 @@ RouteDecision KeywordRouter::route(const std::string& prompt, const CancelCallba
 // ---------------------------------------------------------------------------
 
 ModelRouter::ModelRouter(LoadedModel& model, ModelParams params,
+                         std::shared_ptr<const Roster> roster,
                          std::string system_prompt_override)
     : model_(model),
       params_(std::move(params)),
-      system_prompt_(system_prompt_override.empty() ? router_system_prompt()
-                                                    : std::move(system_prompt_override)),
-      examples_(router_examples()) {
-    subjects_ = routable_subjects();
-    labels_   = router_labels();
+      roster_(roster ? std::move(roster)
+                     : std::make_shared<const Roster>(Roster::defaults())),
+      fallback_(roster_) {
+    system_prompt_ = system_prompt_override.empty() ? roster_->router_system_prompt()
+                                                    : std::move(system_prompt_override);
+    examples_ = roster_->router_examples();
+    labels_   = roster_->router_labels();
+
+    // Parallel to labels_, and built in the same pass over the same list, so
+    // the index the scorer returns cannot name a different seat than the label
+    // it scored.
+    for (const std::size_t index : roster_->routable()) {
+        ids_.push_back(roster_->at(index).id);
+    }
 }
 
 std::string ModelRouter::conversation(const std::string& question) const {
@@ -312,7 +281,7 @@ RouteDecision ModelRouter::route(const std::string& prompt, const CancelCallback
     }
 
     RouteDecision decision;
-    decision.subject    = subjects_[best];
+    decision.expert     = ids_[best];
     decision.confidence = sum > 0.0F ? std::clamp(1.0F / sum, 0.0F, 1.0F) : 0.0F;
     decision.source     = RouteSource::Model;
     decision.detail     = std::to_string(elapsed.count()) + "ms";

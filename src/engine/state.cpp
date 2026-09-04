@@ -30,6 +30,7 @@ Snapshot AppState::snapshot() const {
     Snapshot copy;
     copy.mood     = mood_;
     copy.status   = status_;
+    copy.roster   = roster_;
     copy.seats    = seats_;
     copy.resident        = resident_;
     copy.linked          = linked_;
@@ -54,50 +55,71 @@ Mood AppState::mood() const {
     return mood_;
 }
 
-void AppState::set_seat(Subject subject, SeatPhase phase, float progress) {
-    const auto index = static_cast<std::size_t>(subject);
-    if (index >= kSubjectCount) {
-        return;
-    }
-    const std::lock_guard<std::mutex> lock(mutex_);
-    seats_[index].phase    = phase;
-    seats_[index].progress = progress;
+std::optional<std::size_t> AppState::seat_index(const ExpertId& id) const {
+    return roster_ ? roster_->find(id) : std::nullopt;
 }
 
-void AppState::set_seat_progress(Subject subject, float progress) {
-    const auto index = static_cast<std::size_t>(subject);
-    if (index >= kSubjectCount) {
+std::shared_ptr<const Roster> AppState::roster() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return roster_;
+}
+
+void AppState::set_seat(const ExpertId& id, SeatPhase phase, float progress) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const std::optional<std::size_t> index = seat_index(id);
+    // An id that is not on the roster is silently ignored rather than clamped
+    // to a seat that does exist. It means a seat was ejected while work was in
+    // flight, and lighting up whoever is at that index now would be a lie.
+    if (!index || *index >= seats_.size()) {
         return;
     }
+    seats_[*index].phase    = phase;
+    seats_[*index].progress = progress;
+}
+
+void AppState::set_seat_progress(const ExpertId& id, float progress) {
     const std::lock_guard<std::mutex> lock(mutex_);
-    seats_[index].progress = progress;
+    const std::optional<std::size_t> index = seat_index(id);
+    if (!index || *index >= seats_.size()) {
+        return;
+    }
+    seats_[*index].progress = progress;
 }
 
 void AppState::configure_seats(const Config& config) {
-    // Resolve existence outside the lock: stat-ing nine files while holding the
-    // mutex would block the render thread for no reason.
-    std::array<SeatPhase, kSubjectCount> phases{};
-    for (const SubjectInfo& info : all_subjects()) {
-        const auto index = static_cast<std::size_t>(info.subject);
-        const ModelParams& params = config.experts[index];
+    // Resolve existence outside the lock: stat-ing a dozen files while holding
+    // the mutex would block the render thread for no reason.
+    auto roster = std::make_shared<const Roster>(config.roster);
+    std::vector<SeatState> seats(roster->size());
+    for (std::size_t i = 0; i < roster->size(); ++i) {
+        const ModelParams& params = config.expert(roster->at(i).id);
         if (params.model.empty()) {
-            phases[index] = SeatPhase::Unconfigured;
+            seats[i].phase = SeatPhase::Unconfigured;
         } else if (std::filesystem::exists(params.path)) {
-            phases[index] = SeatPhase::Dormant;
+            seats[i].phase = SeatPhase::Dormant;
         } else {
             // Assigned but absent. Saying so is better than showing a seat as
             // ready and only failing when someone routes a prompt to it.
-            phases[index] = SeatPhase::Missing;
+            seats[i].phase = SeatPhase::Missing;
         }
     }
 
     const std::lock_guard<std::mutex> lock(mutex_);
-    for (std::size_t i = 0; i < kSubjectCount; ++i) {
-        seats_[i] = SeatState{phases[i], 0.0F};
+    roster_ = std::move(roster);
+    seats_  = std::move(seats);
+
+    // A seat that was lit may not exist any more. Dropping the reference is
+    // what stops the roundtable drawing a connector to a row that is no longer
+    // there after an /ejectexpert.
+    if (resident_ && !seat_index(*resident_)) {
+        resident_.reset();
+    }
+    if (linked_ && !seat_index(*linked_)) {
+        linked_.reset();
     }
 }
 
-void AppState::set_resident(std::optional<Subject> subject) {
+void AppState::set_resident(std::optional<ExpertId> id) {
     const std::lock_guard<std::mutex> lock(mutex_);
     // Demote whoever was previously lit; only one expert is ever resident.
     for (SeatState& seat : seats_) {
@@ -105,19 +127,19 @@ void AppState::set_resident(std::optional<Subject> subject) {
             seat.phase = SeatPhase::Dormant;
         }
     }
-    resident_ = subject;
-    if (subject) {
-        const auto index = static_cast<std::size_t>(*subject);
-        if (index < kSubjectCount) {
-            seats_[index].phase    = SeatPhase::Active;
-            seats_[index].progress = 1.0F;
+    resident_ = std::move(id);
+    if (resident_) {
+        if (const std::optional<std::size_t> index = seat_index(*resident_);
+            index && *index < seats_.size()) {
+            seats_[*index].phase    = SeatPhase::Active;
+            seats_[*index].progress = 1.0F;
         }
     }
 }
 
-void AppState::set_linked(std::optional<Subject> subject) {
+void AppState::set_linked(std::optional<ExpertId> id) {
     const std::lock_guard<std::mutex> lock(mutex_);
-    linked_ = subject;
+    linked_ = std::move(id);
     // A seat is lit while work is flowing to it and dark the moment it stops.
     // Whether the weights are still in memory afterwards is a separate fact,
     // and one the status bar already reports.
@@ -126,10 +148,10 @@ void AppState::set_linked(std::optional<Subject> subject) {
             seat.phase = SeatPhase::Dormant;
         }
     }
-    if (subject) {
-        const auto index = static_cast<std::size_t>(*subject);
-        if (index < kSubjectCount && seats_[index].phase == SeatPhase::Dormant) {
-            seats_[index].phase = SeatPhase::Active;
+    if (linked_) {
+        if (const std::optional<std::size_t> index = seat_index(*linked_);
+            index && *index < seats_.size() && seats_[*index].phase == SeatPhase::Dormant) {
+            seats_[*index].phase = SeatPhase::Active;
         }
     }
 }

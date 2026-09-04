@@ -136,7 +136,7 @@ App::TableView App::table_view() const {
 Element App::render_status(const Snapshot& snapshot) const {
     std::string left = "● " + std::string(mood_label(snapshot.mood));
     if (snapshot.resident) {
-        left += "  │  resident: " + std::string(subject_name(*snapshot.resident));
+        left += "  │  resident: " + expert_label(config_.roster, *snapshot.resident);
     } else {
         left += "  │  no expert loaded";
     }
@@ -203,8 +203,18 @@ Element App::render() {
             return table;
         }
         Element meter = resource_meter(resources_.snapshot());
-        return dbox({std::move(table),
-                     vbox({hbox({filler(), std::move(meter), text(" ")}), filler()})});
+        // Its own column, not a dbox overlay.
+        //
+        // Composited, the meter sat on top of whatever the centred roundtable
+        // happened to reach underneath it, and on a wide terminal that is the
+        // seat names: "Mathematics" rendered as "MatRTX 4070". Laid out beside
+        // the table instead, the roundtable centres in what is left over and
+        // the two cannot collide however many seats the roster grows.
+        return hbox({
+            std::move(table) | flex,
+            vbox({std::move(meter), filler()}),
+            text(" "),
+        });
     };
 
     switch (table_view()) {
@@ -240,6 +250,9 @@ Element App::render() {
     if (sessions_.active()) {
         screen = dbox({std::move(screen), sessions_.render() | center});
     }
+    if (expert_form_.active()) {
+        screen = dbox({std::move(screen), expert_form_.render() | center});
+    }
     return screen;
 }
 
@@ -253,7 +266,7 @@ Element App::render() {
 // ---------------------------------------------------------------------------
 
 void App::update_completion() {
-    completions_      = command_matches(input_text_);
+    completions_      = command_matches(input_text_, config_.roster);
     completion_index_ = 0;
     // Dismissal lasts until the line changes, so escape closes the menu for
     // the command being typed rather than for the rest of the session.
@@ -373,6 +386,39 @@ Element App::render_prompt() const {
 // ---------------------------------------------------------------------------
 // Input
 // ---------------------------------------------------------------------------
+
+void App::absorb_written_examples() {
+    if (!engine_) {
+        return;
+    }
+    const std::vector<std::pair<ExpertId, std::vector<std::string>>> written =
+        engine_->take_written_examples();
+    if (written.empty()) {
+        return;
+    }
+
+    // One save for however many arrived. update_config() writes the file and
+    // hands the result back to the engine, and doing that once per expert would
+    // mean a config write and a delegator rebuild each time.
+    update_config([&written](Config& config) {
+        for (const auto& [id, examples] : written) {
+            const std::optional<std::size_t> seat = config.roster.find(id);
+            if (!seat) {
+                continue;  // ejected while the delegator was writing for it
+            }
+            Expert expert = config.roster.at(*seat);
+            expert.examples = examples;
+            config.roster.update(id, expert);
+        }
+    });
+
+    for (const auto& [id, examples] : written) {
+        say(expert_label(config_.roster, id) + ": the delegator wrote "
+            + std::to_string(examples.size())
+            + (examples.size() == 1 ? " example question" : " example questions")
+            + " to route on");
+    }
+}
 
 void App::open_settings() {
     // Start from what the engine is actually running, not from the copy this
@@ -548,6 +594,7 @@ int App::run() {
         // persist_session() returns immediately when nothing has finished.
         if (event == Event::Custom && !state_.busy()) {
             persist_session();
+            absorb_written_examples();
         }
 
         // A runtime that just finished building is already registered with
@@ -630,6 +677,17 @@ int App::run() {
                     break;
                 case ModelManagerAction::None:
                     break;
+            }
+            return true;
+        }
+
+        // The new-expert form takes the keyboard while it is up: it is two
+        // text boxes, so every printable key belongs to it.
+        if (expert_form_.active()) {
+            if (const std::optional<ExpertForm::Result> filled = expert_form_.handle(event)) {
+                if (commit_new_expert(*filled)) {
+                    expert_form_.close();
+                }
             }
             return true;
         }

@@ -36,7 +36,7 @@ Element App::render_turn(const Turn& turn) const {
     // expert took this turn, how sure Crucible was, and what the swap cost.
     if (turn.route) {
         const RouteDecision& route = *turn.route;
-        std::string line = "⟶ " + std::string(subject_name(route.subject));
+        std::string line = "⟶ " + expert_label(config_.roster, route.expert);
         line += " · " + format::number(route.confidence, 2);
         line += " · " + std::string(route_source_name(route.source));
         if (!route.detail.empty()) {
@@ -102,7 +102,7 @@ Element App::render_turn(const Turn& turn) const {
 }
 
 Element App::render_welcome() const {
-    const std::vector<Subject> configured = config_.configured_experts();
+    const std::vector<ExpertId> configured = config_.configured_experts();
     if (!configured.empty()) {
         // Just "ready". The seat count that used to be here read "10 of 9
         // expert seats are filled" once a custom subject was added, which is

@@ -7,18 +7,20 @@
 #include <cctype>
 #include <optional>
 
-#include "crucible/routing/subject.hpp"
+#include "crucible/routing/expert.hpp"
 
 namespace crucible::ui {
 namespace {
 
-std::vector<CommandInfo> build_commands() {
+std::vector<CommandInfo> build_commands(const Roster& roster) {
     std::vector<CommandInfo> commands{
         {"help",     "this list", false},
         {"resume",   "reopen an earlier conversation about this project", false},
         {"new",      "start a fresh conversation, keeping this one on disk", false},
         {"usage",    "tokens spent this session and on this project", false},
         {"experts",  "which seats are filled", false},
+        {"newexpert", "add an expert: a name, and what it is trained in", false},
+        {"ejectexpert", "remove an expert from the roundtable", true},
         {"runtimes", "install or remove CUDA / Vulkan / CPU backends", false},
         {"devices",  "compute devices llama.cpp found", false},
         {"search",   "look something up on the internet", true},
@@ -33,10 +35,10 @@ std::vector<CommandInfo> build_commands() {
     };
 
     // The experts, so "/phy<tab>" reaches Physics. Their summaries come from
-    // the subject table rather than being written again here.
-    for (const SubjectInfo& info : all_subjects()) {
-        commands.push_back({std::string(info.id),
-                            "send straight to " + std::string(info.name), true});
+    // the roster rather than being written again here, which is what makes a
+    // seat added a minute ago completable without a restart.
+    for (const Expert& seat : roster.experts()) {
+        commands.push_back({seat.id, "send straight to " + seat.name, true});
     }
     return commands;
 }
@@ -62,19 +64,18 @@ std::optional<std::string> typed_word(std::string_view input) {
 
 }  // namespace
 
-const std::vector<CommandInfo>& all_commands() {
-    static const std::vector<CommandInfo> commands = build_commands();
-    return commands;
+std::vector<CommandInfo> all_commands(const Roster& roster) {
+    return build_commands(roster);
 }
 
-std::vector<CommandInfo> command_matches(std::string_view input) {
+std::vector<CommandInfo> command_matches(std::string_view input, const Roster& roster) {
     const std::optional<std::string> word = typed_word(input);
     if (!word) {
         return {};
     }
 
     std::vector<CommandInfo> matches;
-    for (const CommandInfo& command : all_commands()) {
+    for (const CommandInfo& command : all_commands(roster)) {
         if (command.name.rfind(*word, 0) == 0) {
             matches.push_back(command);
         }

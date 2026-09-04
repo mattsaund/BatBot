@@ -40,7 +40,7 @@ public:
 
     /// Queue a prompt. `pinned` skips routing and sends it straight to that
     /// expert, which is how `/physics ...` works.
-    void submit(std::string prompt, std::optional<Subject> pinned = std::nullopt);
+    void submit(std::string prompt, std::optional<ExpertId> pinned = std::nullopt);
 
     /// Ask the current generation to stop at the next token boundary.
     void cancel();
@@ -64,6 +64,29 @@ public:
     /// it will answer the next question with no idea what came before.
     void restore_history(std::vector<ChatMessage> history);
 
+    /// Ask the delegator to write worked examples for a seat that has none.
+    ///
+    /// Two example questions per expert are worth seven points of routing
+    /// accuracy on the benchmark (89% to 96%), and they are the one thing
+    /// `/newexpert` cannot ask a person for: a description is something you can
+    /// write about your own field, two questions phrased the way a delegator
+    /// needs them is not. So the delegator writes its own.
+    ///
+    /// Queued like any other request, so it runs between prompts and never
+    /// competes with one. Silently does nothing when there is no delegator
+    /// loaded -- the seat still routes on its blurb and its keywords, just less
+    /// sharply, and a machine with no delegator has bigger gaps than this.
+    void write_examples(ExpertId id);
+
+    /// Examples the delegator has written since this was last called, and
+    /// clears them.
+    ///
+    /// An outbox rather than a callback: the engine produces these on its
+    /// worker thread, and folding them into the config means touching the
+    /// settings screen's copy, which belongs to the UI thread. The UI drains
+    /// this when it is woken, the same way it drains a finished runtime build.
+    std::vector<std::pair<ExpertId, std::vector<std::string>>> take_written_examples();
+
     /// Replace the running configuration, as the settings screen does.
     ///
     /// Applied on the worker thread between requests, never mid-generation.
@@ -80,13 +103,15 @@ private:
     /// One unit of work for the engine thread. `kind` keeps config changes and
     /// expert releases on the same queue as prompts, so they are applied in
     /// order and never race with a generation in flight.
-    enum class RequestKind { Prompt, ReleaseExpert, ReloadModels, ApplyConfig };
+    enum class RequestKind { Prompt, ReleaseExpert, ReloadModels, ApplyConfig,
+                             WriteExamples };
 
     struct Request {
-        RequestKind            kind = RequestKind::Prompt;
-        std::string            prompt;
-        std::optional<Subject> pinned;
-        Config                 config;
+        RequestKind             kind = RequestKind::Prompt;
+        std::string             prompt;
+        std::optional<ExpertId> pinned;
+        Config                  config;
+        ExpertId                expert;  ///< for WriteExamples
     };
 
     void run();
@@ -102,6 +127,7 @@ private:
     /// loaded" off.
     void release_router();
     void do_apply_config(Config config);
+    void do_write_examples(const ExpertId& id);
 
     /// Pick the expert that will actually answer. The router names a subject;
     /// this decides what to do when that subject has no model configured.
@@ -122,6 +148,11 @@ private:
     std::string                router_bias_for_;
 
     std::vector<ChatMessage> history_;
+
+    /// See take_written_examples. Guarded by its own mutex rather than by
+    /// `mutex_`, which the worker holds while it waits for work.
+    std::mutex written_mutex_;
+    std::vector<std::pair<ExpertId, std::vector<std::string>>> written_examples_;
 
     std::thread             worker_;
     std::mutex              mutex_;

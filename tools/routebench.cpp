@@ -13,6 +13,8 @@
 
 #include <chrono>
 #include <cstdio>
+#include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -75,7 +77,13 @@ int main(int argc, char** argv) {
 
     // Fallback is not in the grammar, so it can never appear here. This
     // measures the delegator's job -- picking a specialist -- and nothing else.
-    ModelRouter router(*model, params);
+    // Measured against the shipped roster, which is what the benchmark cases
+    // are written for. A user's own config may have added seats or taken some
+    // away; scoring against that would be measuring their roundtable, not the
+    // delegator.
+    const auto roster = std::make_shared<const Roster>(Roster::defaults());
+
+    ModelRouter router(*model, params, roster);
     router.set_calibration(calibration);
 
     // --explain dumps the arithmetic behind one decision, which is the only way
@@ -85,15 +93,14 @@ int main(int argc, char** argv) {
         router.route("warm up so the bias is measured", {});
         const std::vector<float> raw  = router.raw_scores(explain);
         const std::vector<float> bias = router.bias();
-        const std::vector<Subject> subjects = routable_subjects();
-        std::printf("%-14s %9s %9s %9s\n", "subject", "raw", "bias", "calibrated");
-        for (std::size_t i = 0; i < subjects.size() && i < raw.size(); ++i) {
+        const std::vector<std::string> labels = roster->router_labels();
+        std::printf("%-14s %9s %9s %9s\n", "expert", "raw", "bias", "calibrated");
+        for (std::size_t i = 0; i < labels.size() && i < raw.size(); ++i) {
             const double adjusted =
                 static_cast<double>(raw[i]) -
                 static_cast<double>(calibration) *
                     (i < bias.size() ? static_cast<double>(bias[i]) : 0.0);
-            std::printf("%-14s %9.2f %9.2f %9.2f\n",
-                        std::string(subject_name(subjects[i])).c_str(),
+            std::printf("%-14s %9.2f %9.2f %9.2f\n", labels[i].c_str(),
                         static_cast<double>(raw[i]),
                         i < bias.size() ? static_cast<double>(bias[i]) : 0.0, adjusted);
         }
@@ -104,10 +111,12 @@ int main(int argc, char** argv) {
     int    correct  = 0;
     double total_ms = 0.0;
 
-    // [wanted][got], plus the margins, for the breakdown below.
-    std::array<std::array<int, kSubjectCount>, kSubjectCount> confusion{};
-    std::array<int, kSubjectCount> expected{};
-    std::array<int, kSubjectCount> chosen{};
+    // [wanted][got], plus the margins, for the breakdown below. Keyed by id
+    // rather than sized by an enum, because there is no longer a compile-time
+    // count of seats to size it by.
+    std::map<ExpertId, std::map<ExpertId, int>> confusion;
+    std::map<ExpertId, int> expected;
+    std::map<ExpertId, int> chosen;
 
     for (const RouteCase& test : benchmark_cases()) {
         const auto start = std::chrono::steady_clock::now();
@@ -116,48 +125,48 @@ int main(int argc, char** argv) {
                               std::chrono::steady_clock::now() - start).count();
         total_ms += ms;
 
-        const bool ok = decision.subject == test.expect;
+        const ExpertId want(test.expect);
+        const bool ok = decision.expert == want;
         correct += ok ? 1 : 0;
-        ++expected[static_cast<std::size_t>(test.expect)];
-        ++chosen[static_cast<std::size_t>(decision.subject)];
-        ++confusion[static_cast<std::size_t>(test.expect)][static_cast<std::size_t>(decision.subject)];
+        ++expected[want];
+        ++chosen[decision.expert];
+        ++confusion[want][decision.expert];
         if (!quiet) {
             std::printf("%s  %-12s (want %-12s) conf %.2f  %4.0fms  %.44s\n",
                         ok ? "ok  " : "MISS",
-                        std::string(subject_name(decision.subject)).c_str(),
-                        std::string(subject_name(test.expect)).c_str(),
+                        expert_label(*roster, decision.expert).c_str(),
+                        expert_label(*roster, want).c_str(),
                         static_cast<double>(decision.confidence), ms, std::string(test.prompt).c_str());
         }
     }
 
-    // Per subject, because an average hides the failure that matters. A
+    // Per expert, because an average hides the failure that matters. A
     // delegator can score 85% while never once choosing one of the nine, and
     // that seat is then unreachable however good the model is.
-    std::printf("\n%-14s %-8s %-8s  where the misses went\n", "subject", "found", "chosen");
-    for (const Subject subject : routable_subjects()) {
-        const auto index = static_cast<std::size_t>(subject);
+    std::printf("\n%-14s %-8s %-8s  where the misses went\n", "expert", "found", "chosen");
+    for (const std::size_t index : roster->routable()) {
+        const ExpertId& id = roster->at(index).id;
         std::string went;
-        for (const Subject other : routable_subjects()) {
-            const auto to = static_cast<std::size_t>(other);
-            if (other != subject && confusion[index][to] > 0) {
+        for (const std::size_t other_index : roster->routable()) {
+            const ExpertId& other = roster->at(other_index).id;
+            const int count = confusion[id][other];
+            if (other != id && count > 0) {
                 if (!went.empty()) {
                     went += ", ";
                 }
-                went += std::string(subject_name(other)) + " x"
-                      + std::to_string(confusion[index][to]);
+                went += roster->at(other_index).name + " x" + std::to_string(count);
             }
         }
-        // "chosen" counts how often the delegator picked this subject for
+        // "chosen" counts how often the delegator picked this expert for
         // anything at all. A zero there is a seat nothing can reach.
-        std::printf("%-14s %d/%-6d %-8d  %s\n",
-                    std::string(subject_name(subject)).c_str(),
-                    confusion[index][index], expected[index], chosen[index], went.c_str());
+        std::printf("%-14s %d/%-6d %-8d  %s\n", roster->at(index).name.c_str(),
+                    confusion[id][id], expected[id], chosen[id], went.c_str());
     }
 
     std::printf("\n%d/%zu correct (%.0f%%), %.0fms per route\n", correct, benchmark_cases().size(),
                 100.0 * static_cast<double>(correct) / static_cast<double>(benchmark_cases().size()),
                 total_ms / static_cast<double>(benchmark_cases().size()));
-    // Nine subjects, so anything near 11% is a model that is not reading the
+    // Nine seats, so anything near 11% is a model that is not reading the
     // prompt at all -- usually a chat template or prompt problem, not the model.
     return correct * 2 >= static_cast<int>(benchmark_cases().size()) ? 0 : 1;
 }

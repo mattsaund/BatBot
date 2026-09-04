@@ -54,7 +54,7 @@ bool App::handle_command(const std::string& text) {
         state_.clear_notices();
         // Printed from the same list the completion menu offers, so a command
         // cannot exist in one and be missing from the other.
-        for (const CommandInfo& entry : all_commands()) {
+        for (const CommandInfo& entry : all_commands(config_.roster)) {
             if (entry.takes_prompt) {
                 continue;  // the experts are summarised in one line below
             }
@@ -62,7 +62,7 @@ bool App::handle_command(const std::string& text) {
             line.resize(22, ' ');
             say(line + entry.summary);
         }
-        say("/<subject> <prompt>   send straight to one expert, e.g. /physics why is the sky blue");
+        say("/<expert> <prompt>    send straight to one expert, e.g. /physics why is the sky blue");
         say("                      tab completes any of these");
         return true;
     }
@@ -163,16 +163,64 @@ bool App::handle_command(const std::string& text) {
     if (command == "experts") {
         state_.clear_notices();
         say("models directory: " + config_.resolved_models_dir().string());
-        for (const SubjectInfo& info : all_subjects()) {
-            const ModelParams& params = config_.experts[static_cast<std::size_t>(info.subject)];
+        for (const Expert& seat : config_.roster.experts()) {
+            const ModelParams& params = config_.expert(seat.id);
+            // The tag is what the roundtable chip shows and what the delegator
+            // reads in its menu, so it belongs in the listing that answers
+            // "which seats are filled".
+            std::string line = seat.name + " [" + seat.tag + "]";
             if (params.model.empty()) {
-                say(std::string(info.name) + ": (no model assigned)");
+                line += ": (no model assigned)";
             } else if (!std::filesystem::exists(params.path)) {
-                say(std::string(info.name) + ": " + params.model + "  -- MISSING at " + params.path);
+                line += ": " + params.model + "  -- MISSING at " + params.path;
             } else {
-                say(std::string(info.name) + ": " + params.model);
+                line += ": " + params.model;
             }
+            say(line);
         }
+        say("/newexpert adds a seat, /ejectexpert <name> removes one");
+        return true;
+    }
+
+    if (command == "newexpert") {
+        state_.clear_notices();
+        expert_form_.open();
+        return true;
+    }
+
+    if (command == "ejectexpert") {
+        state_.clear_notices();
+        if (rest.empty()) {
+            say("usage: /ejectexpert <name>  -- e.g. /ejectexpert chemistry");
+            return true;
+        }
+
+        // Resolved before the edit so the message can name the seat properly
+        // even though it is about to stop existing.
+        const std::optional<std::size_t> found = config_.roster.find(rest);
+        if (!found) {
+            say("no expert called \"" + rest + "\"  (/experts lists them)");
+            return true;
+        }
+        const Expert seat = config_.roster.at(*found);
+
+        std::string error;
+        Config edited = settings_.config();
+        if (!edited.roster.remove(seat.id, error)) {
+            say(error);
+            return true;
+        }
+        // The model assignment goes with the seat. Leaving it behind would mean
+        // an expert added back under the same name silently inherited whatever
+        // GGUF the old one pointed at, which is a surprise nobody asked for.
+        edited.experts.erase(seat.id);
+        settings_.set_config(std::move(edited));
+        save_settings(/*announce=*/false);
+
+        say(seat.name + " has left the roundtable"
+            + (seat.builtin ? " -- it was one of the built-in nine, and /settings "
+                              "cannot bring it back; re-add it with /newexpert"
+                            : ""));
         return true;
     }
 
@@ -268,19 +316,55 @@ bool App::handle_command(const std::string& text) {
         return true;
     }
 
-    // Anything else that names a subject pins that expert for this prompt.
-    if (const std::optional<Subject> subject = subject_from_string(command)) {
+    // Anything else that names a seat pins that expert for this prompt.
+    if (const std::optional<std::size_t> found = config_.roster.find(command)) {
         if (rest.empty()) {
             say("usage: /" + command + " <prompt>");
             return true;
         }
         state_.clear_notices();
-        engine_->submit(rest, subject);
+        engine_->submit(rest, config_.roster.at(*found).id);
         follow_ = true;
         return true;
     }
 
     say("unknown command: /" + command + "  (try /help)");
+    return true;
+}
+
+bool App::commit_new_expert(const ExpertForm::Result& form) {
+    Expert expert;
+    expert.name  = form.name;
+    expert.blurb = form.blurb;
+    // id, tag and keywords are all filled in by Roster::add. The two boxes are
+    // the whole of what a person is asked for.
+
+    Config edited = settings_.config();
+    std::string error;
+    if (!edited.roster.add(std::move(expert), error)) {
+        expert_form_.set_error(error);
+        return false;
+    }
+
+    // The new seat starts with no model. It appears on the roundtable
+    // immediately, drawn hollow, which is the honest picture: the delegator can
+    // route to it as soon as it reloads, and until a GGUF is assigned that
+    // route lands on the fallback.
+    const ExpertId id = make_expert_id(form.name);
+    edited.experts[id] = ModelParams{};
+    settings_.set_config(std::move(edited));
+    save_settings(/*announce=*/false);
+
+    const std::optional<std::size_t> seat = config_.roster.find(id);
+    const std::string tag = seat ? config_.roster.at(*seat).tag : std::string();
+
+    state_.clear_notices();
+    say(form.name + " has joined the roundtable" + (tag.empty() ? "" : " as [" + tag + "]"));
+    say("assign it a model with /settings, or pin a prompt to it with /" + id + " ...");
+
+    // The one thing the two boxes could not ask for. Queued behind whatever the
+    // engine is doing, so adding an expert mid-answer does not interrupt it.
+    engine_->write_examples(id);
     return true;
 }
 

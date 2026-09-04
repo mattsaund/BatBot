@@ -121,7 +121,7 @@ json turn_to_json(const Turn& turn) {
     };
     if (turn.route) {
         entry["route"] = json{
-            {"subject", std::string(subject_id(turn.route->subject))},
+            {"expert", turn.route->expert},
             {"confidence", turn.route->confidence},
             {"source", std::string(route_source_name(turn.route->source))},
             {"detail", turn.route->detail},
@@ -142,10 +142,12 @@ Turn turn_from_json(const json& entry) {
 
     if (const auto route = entry.find("route"); route != entry.end() && route->is_object()) {
         RouteDecision decision;
-        if (const std::optional<Subject> subject =
-                subject_from_string(route->value("subject", ""))) {
-            decision.subject = *subject;
-        }
+        // The id is stored verbatim and read back verbatim, with no check
+        // that it still names a seat. A conversation with an expert that has
+        // since been ejected is history, and history is what it was, not what
+        // the roundtable happens to hold today; the transcript falls back to
+        // showing the id when the name is gone.
+        decision.expert = route->value("expert", std::string(kFallbackId));
         decision.confidence = route->value("confidence", 0.0F);
         decision.detail     = route->value("detail", "");
         // Restore how it was actually routed. Defaulting this to Fallback

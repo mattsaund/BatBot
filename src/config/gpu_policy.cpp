@@ -132,7 +132,7 @@ std::string apply_gpu_policy(Config& config) {
 
     stamp_memory(config.router, config.gpu, have_gpu);
     stamp_memory(config.defaults, config.gpu, have_gpu);
-    for (ModelParams& expert : config.experts) {
+    for (auto& [id, expert] : config.experts) {
         stamp_memory(expert, config.gpu, have_gpu);
     }
 
@@ -172,7 +172,7 @@ std::string apply_gpu_policy(Config& config) {
     GpuPlan       described;
     std::uint64_t described_bytes = 0;
     std::string   described_model;
-    for (ModelParams& expert : config.experts) {
+    for (auto& [id, expert] : config.experts) {
         const GpuPlan plan = plan_for(expert);
         if (plan.split.empty()) {
             continue;

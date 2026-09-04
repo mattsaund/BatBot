@@ -63,6 +63,80 @@ void read_model_params(const json& obj, ModelParams& params,
     read_field(obj, "seed",           params.seed,           context, warnings);
 }
 
+
+/// The shipped definition for `id`, or nullptr if `id` is not one of them.
+///
+/// A built-in seat whose identity has not been retuned is written to disk as
+/// just its id, so it has to be reconstructible from here on the way back in.
+/// That keeps the common config file short -- nine seats with twenty-four
+/// keywords each would otherwise be two hundred lines nobody wrote.
+const Expert* shipped_expert(const ExpertId& id) {
+    static const Roster kDefaults = Roster::defaults();
+    for (const Expert& expert : kDefaults.experts()) {
+        if (expert.id == id) {
+            return &expert;
+        }
+    }
+    return nullptr;
+}
+
+/// True when this seat is exactly as it shipped, and therefore needs no
+/// identity written out.
+bool matches_shipped(const Expert& expert) {
+    const Expert* shipped = shipped_expert(expert.id);
+    return shipped != nullptr && expert.builtin &&
+           shipped->name == expert.name && shipped->tag == expert.tag &&
+           shipped->blurb == expert.blurb && shipped->examples == expert.examples &&
+           shipped->keywords == expert.keywords;
+}
+
+/// Identity fields for one seat. Omitted entirely for an untouched built-in.
+void write_expert_identity(json& entry, const Expert& expert) {
+    if (matches_shipped(expert)) {
+        entry["builtin"] = true;
+        return;
+    }
+    entry["name"]     = expert.name;
+    entry["tag"]      = expert.tag;
+    entry["blurb"]    = expert.blurb;
+    entry["examples"] = expert.examples;
+    entry["keywords"] = expert.keywords;
+    if (expert.builtin) {
+        entry["builtin"] = true;
+    }
+}
+
+/// Rebuild one seat from its entry. Returns false when there is not enough to
+/// work with, which is reported as a warning and skips that seat only.
+bool read_expert_identity(const json& entry, const ExpertId& id, Expert& expert,
+                          std::vector<std::string>& warnings) {
+    const Expert* shipped = shipped_expert(id);
+    if (shipped != nullptr) {
+        expert = *shipped;  // a starting point every field below may override
+    } else {
+        expert.id      = id;
+        expert.builtin = false;
+    }
+    expert.id = id;
+
+    read_field(entry, "name",     expert.name,     id, warnings);
+    read_field(entry, "tag",      expert.tag,      id, warnings);
+    read_field(entry, "blurb",    expert.blurb,    id, warnings);
+    read_field(entry, "examples", expert.examples, id, warnings);
+    read_field(entry, "keywords", expert.keywords, id, warnings);
+    read_field(entry, "builtin",  expert.builtin,  id, warnings);
+
+    if (expert.name.empty()) {
+        expert.name = id;
+    }
+    if (expert.blurb.empty()) {
+        warnings.emplace_back(id + ": no \"blurb\", so the delegator has nothing to "
+                                   "route on -- this expert was skipped");
+        return false;
+    }
+    return true;
+}
+
 /// Round a float before serialising it.
 ///
 /// A float widened to double prints as 0.05000000074505806, which is correct
@@ -99,14 +173,19 @@ json model_params_to_json(const ModelParams& params, bool include_model = true) 
 }  // namespace
 
 bool save_config(const Config& config, const std::filesystem::path& file) {
-    json experts = json::object();
-    for (const SubjectInfo& info : all_subjects()) {
-        const ModelParams& params = config.experts[static_cast<std::size_t>(info.subject)];
+    // An array, not an object: the order seats are drawn in is the order they
+    // are listed here, and a JSON object has no order to preserve.
+    json experts = json::array();
+    for (const Expert& seat : config.roster.experts()) {
         json entry = json::object();
+        entry["id"] = seat.id;
+        write_expert_identity(entry, seat);
+
+        const ModelParams& params = config.expert(seat.id);
         entry["model"] = params.model;
 
         // Only write fields that differ from `defaults`. Round-tripping every
-        // field would turn a nine-line config into a hundred-line one the first
+        // field would turn a ten-line config into a hundred-line one the first
         // time the user saved from the settings screen.
         const ModelParams& base = config.defaults;
         if (params.n_ctx          != base.n_ctx)          { entry["n_ctx"]          = params.n_ctx; }
@@ -124,17 +203,18 @@ bool save_config(const Config& config, const std::filesystem::path& file) {
         if (params.repeat_last_n  != base.repeat_last_n)  { entry["repeat_last_n"]  = params.repeat_last_n; }
         if (params.max_tokens     != base.max_tokens)     { entry["max_tokens"]     = params.max_tokens; }
 
-        experts[std::string(info.id)] = std::move(entry);
+        experts.push_back(std::move(entry));
     }
 
     const json doc{
         {"$schema_note",
          "Crucible config. Models live in \"models_dir\"; each expert names a file "
          "inside it. An absolute or ~-path is also accepted. Anything an expert "
-         "leaves out is inherited from \"defaults\". Editable in the app with ctrl-s."},
+         "leaves out is inherited from \"defaults\". Experts are listed in the order "
+         "they are drawn; add one with /newexpert or by writing an entry with an "
+         "\"id\", a \"name\" and a \"blurb\". Editable in the app with /settings."},
         {"models_dir",    config.models_dir},
         {"system_prompt", config.system_prompt},
-        {"reasoning_effort", config.reasoning_effort},
         {"reasoning_effort", config.reasoning_effort},
         {"router",        model_params_to_json(config.router)},
         {"defaults",      model_params_to_json(config.defaults, /*include_model=*/false)},
@@ -207,11 +287,18 @@ bool save_config(const Config& config) {
 void write_default_config(const std::filesystem::path& file) {
     Config defaults;
 
-    json experts = json::object();
-    for (const SubjectInfo& info : all_subjects()) {
-        // Only `model` per expert: everything else inherits from "defaults",
-        // so filling a seat is a one-line edit.
-        experts[std::string(info.id)] = json{{"model", ""}};
+    // Only the id and an empty model per shipped expert: their identity is
+    // reconstructed from the built-in table, and everything about how they load
+    // inherits from "defaults", so filling a seat is a one-line edit.
+    json experts = json::array();
+    for (const Expert& seat : defaults.roster.experts()) {
+        json entry = json::object();
+        entry["id"] = seat.id;
+        if (seat.builtin) {
+            entry["builtin"] = true;
+        }
+        entry["model"] = "";
+        experts.push_back(std::move(entry));
     }
 
     ModelParams router_defaults;
@@ -223,10 +310,11 @@ void write_default_config(const std::filesystem::path& file) {
         {"$schema_note",
          "Crucible config. Drop your GGUF files in \"models_dir\" and name one per "
          "expert below. An absolute or ~-path also works. Anything an expert "
-         "leaves out is inherited from \"defaults\". Editable in the app with ctrl-s."},
+         "leaves out is inherited from \"defaults\". Experts are listed in the order "
+         "they are drawn; add one with /newexpert or by writing an entry with an "
+         "\"id\", a \"name\" and a \"blurb\". Editable in the app with /settings."},
         {"models_dir", paths::models_dir().string()},
         {"system_prompt", defaults.system_prompt},
-        {"reasoning_effort", defaults.reasoning_effort},
         {"reasoning_effort", defaults.reasoning_effort},
         {"router", model_params_to_json(router_defaults)},
         {"defaults", model_params_to_json(defaults.defaults, /*include_model=*/false)},
@@ -315,15 +403,62 @@ Config load_config(const std::filesystem::path& file, std::vector<std::string>& 
         read_model_params(*it, config.router, "router", warnings);
     }
 
-    if (const auto experts = doc.find("experts"); experts != doc.end() && experts->is_object()) {
-        for (const SubjectInfo& info : all_subjects()) {
-            const auto entry = experts->find(std::string(info.id));
-            if (entry == experts->end() || !entry->is_object()) {
+    // The roster comes from the file when the file has one, and from the
+    // built-in defaults when it does not. An "experts" key that is present but
+    // empty is taken at its word: someone who deleted every seat wanted every
+    // seat deleted, and silently restoring nine of them would be worse than a
+    // roundtable with only a fallback on it.
+    if (const auto experts = doc.find("experts"); experts != doc.end()) {
+        config.roster = Roster::bare();
+
+        // An array is the format Crucible writes, because it preserves the
+        // order the seats are drawn in. An object is accepted too: it is what a
+        // hand-written file most naturally looks like, and it costs four lines
+        // to read.
+        std::vector<std::pair<ExpertId, const json*>> entries;
+        if (experts->is_array()) {
+            for (const json& entry : *experts) {
+                if (!entry.is_object()) {
+                    continue;
+                }
+                ExpertId id;
+                read_field(entry, "id", id, "experts", warnings);
+                if (id.empty()) {
+                    warnings.emplace_back("experts: an entry with no \"id\" was skipped");
+                    continue;
+                }
+                entries.emplace_back(std::move(id), &entry);
+            }
+        } else if (experts->is_object()) {
+            for (const auto& [id, entry] : experts->items()) {
+                if (entry.is_object()) {
+                    entries.emplace_back(id, &entry);
+                }
+            }
+        } else {
+            warnings.emplace_back("experts: expected a list of experts -- using the "
+                                  "built-in ones");
+            config.roster = Roster::defaults();
+        }
+
+        for (const auto& [id, entry] : entries) {
+            ModelParams params = config.defaults;
+            params.model.clear();
+            read_model_params(*entry, params, id, warnings);
+            params.inherit_from(config.defaults);
+            config.experts[id] = std::move(params);
+
+            if (id == kFallbackId) {
+                continue;  // planted by Roster::bare(); only its model is read
+            }
+            Expert expert;
+            if (!read_expert_identity(*entry, id, expert, warnings)) {
                 continue;
             }
-            ModelParams& params = config.experts[static_cast<std::size_t>(info.subject)];
-            read_model_params(*entry, params, info.id, warnings);
-            params.inherit_from(config.defaults);
+            std::string error;
+            if (!config.roster.add(std::move(expert), error)) {
+                warnings.emplace_back("experts: " + error);
+            }
         }
     }
 
@@ -381,8 +516,8 @@ Config load_config(const std::filesystem::path& file, std::vector<std::string>& 
         }
     };
     check(config.router, "router");
-    for (const SubjectInfo& info : all_subjects()) {
-        check(config.experts[static_cast<std::size_t>(info.subject)], info.id);
+    for (const Expert& seat : config.roster.experts()) {
+        check(config.expert(seat.id), seat.id);
     }
 
     return config;

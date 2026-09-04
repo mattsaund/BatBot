@@ -32,16 +32,29 @@ void ModelParams::inherit_from(const ModelParams& base) {
     if (seed           == pristine.seed)           { seed           = base.seed; }
 }
 
-bool Config::has_expert(Subject s) const {
-    const auto index = static_cast<std::size_t>(s);
-    return index < kSubjectCount && !experts[index].model.empty();
+const ModelParams& Config::expert(const ExpertId& id) const {
+    // A seat with nothing assigned reads as an unfilled entry rather than as an
+    // absent one, so every caller can ask for parameters without first asking
+    // whether there are any. `model` is empty in that entry, which is the same
+    // test `has_expert` makes.
+    static const ModelParams kUnfilled;
+    const auto found = experts.find(id);
+    return found == experts.end() ? kUnfilled : found->second;
 }
 
-std::vector<Subject> Config::configured_experts() const {
-    std::vector<Subject> found;
-    for (const SubjectInfo& info : all_subjects()) {
-        if (has_expert(info.subject)) {
-            found.push_back(info.subject);
+bool Config::has_expert(const ExpertId& id) const {
+    return !expert(id).model.empty();
+}
+
+std::vector<ExpertId> Config::configured_experts() const {
+    // Roster order, not map order. The map is sorted by id, and a list of
+    // experts that reads "Biology, Chemistry, Engineering..." when the
+    // roundtable draws them in a different order is a small but constant
+    // friction.
+    std::vector<ExpertId> found;
+    for (const Expert& seat : roster.experts()) {
+        if (has_expert(seat.id)) {
+            found.push_back(seat.id);
         }
     }
     return found;
@@ -61,8 +74,8 @@ std::filesystem::path Config::resolved_models_dir() const {
 void Config::resolve_models() {
     const std::filesystem::path dir = resolved_models_dir();
     router.path = resolve_model_ref(dir, router.model).string();
-    for (ModelParams& expert : experts) {
-        expert.path = resolve_model_ref(dir, expert.model).string();
+    for (auto& [id, params] : experts) {
+        params.path = resolve_model_ref(dir, params.model).string();
     }
 }
 

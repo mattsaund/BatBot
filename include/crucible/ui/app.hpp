@@ -20,6 +20,7 @@
 #include "crucible/routing/completion.hpp"
 #include "crucible/ui/session_picker.hpp"
 #include "crucible/ui/widgets/crucible_sprite.hpp"
+#include "crucible/ui/widgets/expert_form.hpp"
 #include "crucible/ui/settings/runtime_view.hpp"
 #include "crucible/ui/settings/gpu_order_view.hpp"
 #include "crucible/ui/settings/model_manager_view.hpp"
@@ -88,6 +89,17 @@ private:
     bool handle_command(const std::string& text);
     void say(std::string message);
 
+    /// Fold any examples the delegator has written into the config and save
+    /// them. Called when the screen wakes; returns at once when there are none.
+    void absorb_written_examples();
+
+    /// Take the filled-in `/newexpert` form and put a seat on the roster.
+    ///
+    /// Returns false with the form left open and an error on it when the name
+    /// collides with a seat that already exists -- which is fixed by editing
+    /// the name, not by typing the description again.
+    bool commit_new_expert(const ExpertForm::Result& form);
+
     TableView table_view() const;
     void start_ticker();
     void stop_ticker();
@@ -100,6 +112,7 @@ private:
     GpuOrderView            gpu_order_;
     ModelManagerView        models_;
     SessionPicker           sessions_;
+    ExpertForm              expert_form_;
     SessionStore            store_;
     bool                    in_settings_ = false;
     std::unique_ptr<Engine> engine_;

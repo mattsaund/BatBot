@@ -445,11 +445,11 @@ bool same_load(const ModelParams& a, const ModelParams& b) {
         && a.direct_io    == b.direct_io;
 }
 
-LoadedModel* ModelHost::acquire_expert(Subject subject,
+LoadedModel* ModelHost::acquire_expert(const ExpertId& id,
                                        const ModelParams& params,
                                        const ProgressCallback& progress,
                                        std::string& error) {
-    if (expert_ && loaded_expert_ == subject && expert_->path() == params.path) {
+    if (expert_ && loaded_expert_ == id && expert_->path() == params.path) {
         return expert_.get();
     }
 
@@ -461,7 +461,7 @@ LoadedModel* ModelHost::acquire_expert(Subject subject,
     // -- which is what happened on every route change for anyone who has not
     // yet found nine different models to fill the table with.
     if (expert_ && expert_params_ && same_load(*expert_params_, params)) {
-        loaded_expert_ = subject;
+        loaded_expert_ = id;
         return expert_.get();
     }
 
@@ -471,7 +471,7 @@ LoadedModel* ModelHost::acquire_expert(Subject subject,
 
     expert_ = load(params, Role::Expert, progress, error);
     if (expert_) {
-        loaded_expert_ = subject;
+        loaded_expert_ = id;
         expert_params_ = params;
     } else {
         expert_params_.reset();

@@ -9,7 +9,8 @@ namespace crucible {
 
 RouteDecision apply_route_policy(const RouteDecision& proposed, const Config& config) {
     RouteDecision decision = proposed;
-    const bool has_fallback = config.has_expert(Subject::Fallback);
+    const ExpertId fallback_id{kFallbackId};
+    const bool has_fallback = config.has_expert(fallback_id);
 
     // The delegator answered, but not confidently. Treat that as "no decision"
     // and let the Fallback expert take it rather than committing to a subject on
@@ -17,24 +18,24 @@ RouteDecision apply_route_policy(const RouteDecision& proposed, const Config& co
     if (decision.source == RouteSource::Model && has_fallback
         && config.routing.min_confidence > 0.0F
         && decision.confidence < config.routing.min_confidence) {
-        const std::string wanted(subject_name(decision.subject));
+        const std::string wanted = expert_label(config.roster, decision.expert);
         decision.detail  = "undecided (" + wanted + " at "
                          + std::to_string(static_cast<int>(decision.confidence * 100))
                          + "%); used Fallback";
-        decision.subject = Subject::Fallback;
+        decision.expert  = fallback_id;
         decision.source  = RouteSource::Fallback;
         return decision;
     }
 
-    if (config.has_expert(decision.subject)) {
+    if (config.has_expert(decision.expert)) {
         return decision;
     }
 
-    // The routed subject has no model behind it. Fallback is the designated
+    // The routed expert has no model behind it. Fallback is the designated
     // place for that, so prefer it over silently substituting some other seat.
-    const std::string wanted(subject_name(decision.subject));
+    const std::string wanted = expert_label(config.roster, decision.expert);
     if (has_fallback && config.routing.use_fallback_expert) {
-        decision.subject = Subject::Fallback;
+        decision.expert  = fallback_id;
         decision.source  = RouteSource::Fallback;
         decision.detail  = wanted + " has no model; used Fallback";
         return decision;
@@ -42,14 +43,15 @@ RouteDecision apply_route_policy(const RouteDecision& proposed, const Config& co
 
     // No Fallback expert either. Use any filled seat rather than failing, and
     // say plainly what happened.
-    const std::vector<Subject> available = config.configured_experts();
+    const std::vector<ExpertId> available = config.configured_experts();
     if (available.empty()) {
         decision.detail = "no experts configured";
         return decision;
     }
-    decision.subject = available.front();
-    decision.source  = RouteSource::Fallback;
-    decision.detail  = wanted + " has no model; used " + std::string(subject_name(decision.subject));
+    decision.expert = available.front();
+    decision.source = RouteSource::Fallback;
+    decision.detail = wanted + " has no model; used "
+                    + expert_label(config.roster, decision.expert);
     return decision;
 }
 

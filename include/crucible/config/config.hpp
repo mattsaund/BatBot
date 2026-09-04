@@ -3,12 +3,12 @@
 // one should be loaded and sampled.
 #pragma once
 
-#include <array>
 #include <filesystem>
+#include <map>
 #include <string>
 #include <vector>
 
-#include "crucible/routing/subject.hpp"
+#include "crucible/routing/expert.hpp"
 
 namespace crucible {
 
@@ -188,9 +188,28 @@ struct Config {
     /// ~/.local/share/crucible/models. May be moved anywhere on the system.
     std::string models_dir;
 
-    ModelParams router;                              ///< the always-resident delegator
-    ModelParams defaults;                            ///< inherited by every expert
-    std::array<ModelParams, kSubjectCount> experts;  ///< indexed by Subject
+    ModelParams router;    ///< the always-resident delegator
+    ModelParams defaults;  ///< inherited by every expert
+
+    /// Who the experts are: the nine that ship plus whatever `/newexpert`
+    /// added. Part of the config because a user-made expert has to survive a
+    /// restart -- it is the user's list, not the program's.
+    ///
+    /// Defaulted rather than left empty so that every path which builds a
+    /// Config without reading a file -- the tests, the parse-failure fallback,
+    /// a first run -- gets a working roundtable rather than a program with
+    /// nowhere to route to.
+    Roster roster = Roster::defaults();
+
+    /// Which GGUF backs each seat, keyed by `Expert::id`.
+    ///
+    /// A map rather than an array parallel to the roster: the two are edited
+    /// independently -- ejecting an expert must not renumber the model
+    /// assignments of the seats after it -- and a key that no longer names a
+    /// seat is simply an entry nothing reads, which is the right outcome for a
+    /// config file someone hand-edited.
+    std::map<ExpertId, ModelParams> experts;
+
     RoutingConfig routing;
     GpuConfig     gpu;
     ToolsConfig   tools;
@@ -214,11 +233,15 @@ struct Config {
         "You are Crucible, a focused local expert. Answer precisely and completely, "
         "showing your reasoning when it helps. Prefer concrete detail over hedging.";
 
-    /// True when a GGUF is configured for this seat.
-    bool has_expert(Subject s) const;
+    /// The parameters for one seat, with `defaults` already inherited. Returns
+    /// an unfilled entry for a seat with nothing assigned.
+    const ModelParams& expert(const ExpertId& id) const;
 
-    /// Subjects that currently have a model file configured.
-    std::vector<Subject> configured_experts() const;
+    /// True when a GGUF is configured for this seat.
+    bool has_expert(const ExpertId& id) const;
+
+    /// Seats that currently have a model file configured, in roster order.
+    std::vector<ExpertId> configured_experts() const;
 
     /// True when no expert and no router model is configured at all -- the
     /// state a first run lands in, which the UI explains rather than crashing on.

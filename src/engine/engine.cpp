@@ -65,18 +65,41 @@ void Engine::stop() {
     }
 }
 
-void Engine::submit(std::string prompt, std::optional<Subject> pinned) {
+void Engine::submit(std::string prompt, std::optional<ExpertId> pinned) {
     {
         const std::lock_guard<std::mutex> lock(mutex_);
-        pending_.push_back(Request{RequestKind::Prompt, std::move(prompt), pinned, {}});
+        Request request;
+        request.kind   = RequestKind::Prompt;
+        request.prompt = std::move(prompt);
+        request.pinned = std::move(pinned);
+        pending_.push_back(std::move(request));
     }
     queued_.notify_one();
+}
+
+void Engine::write_examples(ExpertId id) {
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        Request request;
+        request.kind   = RequestKind::WriteExamples;
+        request.expert = std::move(id);
+        pending_.push_back(std::move(request));
+    }
+    queued_.notify_one();
+}
+
+std::vector<std::pair<ExpertId, std::vector<std::string>>> Engine::take_written_examples() {
+    const std::lock_guard<std::mutex> lock(written_mutex_);
+    return std::exchange(written_examples_, {});
 }
 
 void Engine::apply_config(Config config) {
     {
         const std::lock_guard<std::mutex> lock(mutex_);
-        pending_.push_back(Request{RequestKind::ApplyConfig, {}, std::nullopt, std::move(config)});
+        Request request;
+        request.kind   = RequestKind::ApplyConfig;
+        request.config = std::move(config);
+        pending_.push_back(std::move(request));
     }
     queued_.notify_one();
 }
@@ -95,7 +118,9 @@ void Engine::release_expert() {
     // reaching into it from the UI thread mid-generation would be a data race.
     {
         const std::lock_guard<std::mutex> lock(mutex_);
-        pending_.push_back(Request{RequestKind::ReleaseExpert, {}, std::nullopt, {}});
+        Request request;
+        request.kind = RequestKind::ReleaseExpert;
+        pending_.push_back(std::move(request));
     }
     queued_.notify_one();
 }
@@ -103,7 +128,9 @@ void Engine::release_expert() {
 void Engine::reload_models() {
     {
         const std::lock_guard<std::mutex> lock(mutex_);
-        pending_.push_back(Request{RequestKind::ReloadModels, {}, std::nullopt, {}});
+        Request request;
+        request.kind = RequestKind::ReloadModels;
+        pending_.push_back(std::move(request));
     }
     queued_.notify_one();
 }
@@ -215,6 +242,23 @@ void Engine::run() {
             continue;
         }
 
+        if (request.kind == RequestKind::WriteExamples) {
+            // Wrapped for the same reason a prompt is: llama.cpp reports a
+            // corrupt GGUF by throwing, and a new expert failing to get its
+            // examples must not take the session down with it.
+            try {
+                do_write_examples(request.expert);
+            } catch (const std::exception& e) {
+                state_.add_notice(std::string("could not write examples: ") + e.what());
+            } catch (...) {
+                state_.add_notice("could not write examples");
+            }
+            if (wake_) {
+                wake_();
+            }
+            continue;
+        }
+
         if (request.prompt.empty()) {
             continue;
         }
@@ -251,7 +295,8 @@ void Engine::run() {
 
 void Engine::load_router() {
     if (config_.router.model.empty()) {
-        router_ = std::make_unique<KeywordRouter>();
+        router_ = std::make_unique<KeywordRouter>(
+            std::make_shared<const Roster>(config_.roster));
         state_.add_notice("no delegator model assigned");
         state_.set_delegator_ready(true);  // keywords need nothing loaded
         return;
@@ -276,13 +321,15 @@ void Engine::load_router() {
         error);
 
     if (model == nullptr) {
-        router_ = std::make_unique<KeywordRouter>();
+        router_ = std::make_unique<KeywordRouter>(
+            std::make_shared<const Roster>(config_.roster));
         state_.add_notice("router: " + error + " -- falling back to keyword routing");
         state_.set_delegator_ready(true);
         return;
     }
 
-    auto routed = std::make_unique<ModelRouter>(*model, config_.router);
+    auto routed = std::make_unique<ModelRouter>(
+        *model, config_.router, std::make_shared<const Roster>(config_.roster));
     if (router_bias_for_ == config_.router.path) {
         routed->set_bias(router_bias_);
     }
@@ -296,7 +343,8 @@ void Engine::ensure_router() {
     }
     if (config_.router.model.empty()) {
         if (!router_) {
-            router_ = std::make_unique<KeywordRouter>();
+            router_ = std::make_unique<KeywordRouter>(
+            std::make_shared<const Roster>(config_.roster));
         }
         return;
     }
@@ -333,12 +381,12 @@ void Engine::do_apply_config(Config config) {
 
     std::string previous_router;
     std::string previous_expert;
-    std::optional<Subject> resident = host_->loaded_expert();
+    std::optional<ExpertId> resident = host_->loaded_expert();
     {
         const std::lock_guard<std::mutex> lock(config_mutex_);
         previous_router = config_.router.path;
         if (resident) {
-            previous_expert = config_.experts[static_cast<std::size_t>(*resident)].path;
+            previous_expert = config_.expert(*resident).path;
         }
         config_ = std::move(config);
         host_->set_gpu_config(config_.gpu);
@@ -349,7 +397,12 @@ void Engine::do_apply_config(Config config) {
     // Drop the resident expert if the file behind its seat changed, so the next
     // prompt loads what the user just chose rather than the old weights.
     if (resident) {
-        const std::string now = current.experts[static_cast<std::size_t>(*resident)].path;
+        // An expert whose seat has been ejected outright reads as an empty
+        // path here, which takes the same branch as one whose file changed:
+        // drop it. That is what makes /ejectexpert free the weights of the
+        // expert it just removed rather than leaving them resident and
+        // unreachable.
+        const std::string now = current.expert(*resident).path;
         if (now != previous_expert || now.empty()) {
             host_->release_expert();
             state_.set_resident(std::nullopt);
@@ -370,6 +423,73 @@ void Engine::do_apply_config(Config config) {
     state_.set_mood(Mood::Idle, "settings applied");
 }
 
+void Engine::do_write_examples(const ExpertId& id) {
+    const std::optional<std::size_t> seat = config_.roster.find(id);
+    if (!seat) {
+        return;  // ejected again before this ran, which is a perfectly good answer
+    }
+    const Expert expert = config_.roster.at(*seat);
+    if (!expert.examples.empty()) {
+        return;  // already has them; this is not a rewrite
+    }
+
+    ensure_router();
+    LoadedModel* model = host_->router();
+    if (model == nullptr) {
+        return;  // no delegator: the seat still routes on its blurb and keywords
+    }
+
+    state_.set_mood(Mood::Thinking, "writing examples for " + expert.name);
+    if (wake_) {
+        wake_();
+    }
+
+    // Sampled rather than scored, and warmer than routing: two questions that
+    // are near-copies of each other teach the delegator nothing, and greedy
+    // decoding on a short prompt produces exactly that.
+    ModelParams params = config_.router;
+    params.temperature = 0.6F;
+    params.max_tokens  = 128;
+
+    const std::vector<ChatMessage> messages{
+        {"user", example_request_prompt(expert.name, expert.blurb)}};
+
+    std::string reply;
+    const CancelCallback cancel = [this] { return cancel_.load(std::memory_order_relaxed); };
+    model->generate(model->format_chat(messages, true), params,
+                    [&reply](std::string_view chunk) { reply += chunk; }, cancel);
+
+    std::vector<std::string> examples = parse_examples(reply);
+    state_.set_mood(Mood::Idle);
+    if (examples.empty()) {
+        // A small delegator can fail to follow the format, and that is not
+        // worth a warning: the seat works, it is simply routed to by blurb and
+        // keyword alone.
+        return;
+    }
+
+    {
+        const std::lock_guard<std::mutex> lock(written_mutex_);
+        written_examples_.emplace_back(id, examples);
+    }
+
+    // Folded into the engine's own copy as well, so the delegator built for the
+    // next prompt already has them -- the UI's copy is updated separately when
+    // it drains the outbox, and waiting for that round trip would mean the
+    // first prompt after adding an expert routed without the examples that were
+    // just written for it.
+    Expert updated = expert;
+    updated.examples = std::move(examples);
+    {
+        const std::lock_guard<std::mutex> lock(config_mutex_);
+        config_.roster.update(id, updated);
+    }
+    // The router holds a snapshot of the roster taken when it was built, so it
+    // has to be rebuilt for the new examples to reach it.
+    router_.reset();
+    load_router_if_resident();
+}
+
 RouteDecision Engine::resolve(const Request& request) {
     const CancelCallback cancel = [this] { return cancel_.load(std::memory_order_relaxed); };
 
@@ -377,7 +497,7 @@ RouteDecision Engine::resolve(const Request& request) {
     // with "keep delegator loaded" off, a slash command costs nothing to route.
     RouteDecision decision;
     if (request.pinned) {
-        decision.subject    = *request.pinned;
+        decision.expert     = *request.pinned;
         decision.confidence = 1.0F;
         decision.source     = RouteSource::Forced;
         decision.detail     = "pinned by slash command";
@@ -412,7 +532,7 @@ void Engine::handle(const Request& request) {
     const RouteDecision decision = resolve(request);
     state_.set_route(turn, decision);
     // From here the roundtable draws a line from Crucible to this seat.
-    state_.set_linked(decision.subject);
+    state_.set_linked(decision.expert);
     if (wake_) {
         wake_();
     }
@@ -424,7 +544,7 @@ void Engine::handle(const Request& request) {
         return;
     }
 
-    if (!config_.has_expert(decision.subject)) {
+    if (!config_.has_expert(decision.expert)) {
         state_.fail_turn(turn,
             "No expert model is configured yet. Edit " + paths::config_file().string()
             + " and point at least one expert at a GGUF file.");
@@ -434,15 +554,19 @@ void Engine::handle(const Request& request) {
     }
 
     // --- JIT swap ----------------------------------------------------------
-    const ModelParams& params = config_.experts[static_cast<std::size_t>(decision.subject)];
-    const bool already_resident = host_->loaded_expert() == decision.subject;
+    const ModelParams& params = config_.expert(decision.expert);
+    const bool already_resident = host_->loaded_expert() == decision.expert;
+
+    // The display name, resolved once. Every status line below wants it, and a
+    // seat ejected mid-turn would otherwise make each of them fall back to the
+    // raw id independently.
+    const std::string expert_name = expert_label(config_.roster, decision.expert);
 
     long load_ms = 0;
     if (!already_resident) {
         state_.set_resident(std::nullopt);
-        state_.set_seat(decision.subject, SeatPhase::Loading, 0.0F);
-        state_.set_mood(Mood::Loading,
-                        "swapping in " + std::string(subject_name(decision.subject)));
+        state_.set_seat(decision.expert, SeatPhase::Loading, 0.0F);
+        state_.set_mood(Mood::Loading, "swapping in " + expert_name);
         if (wake_) {
             wake_();
         }
@@ -451,9 +575,9 @@ void Engine::handle(const Request& request) {
     const auto load_start = Clock::now();
     std::string error;
     LoadedModel* expert = host_->acquire_expert(
-        decision.subject, params,
+        decision.expert, params,
         [this, &decision](float progress) {
-            state_.set_seat_progress(decision.subject, progress);
+            state_.set_seat_progress(decision.expert, progress);
             if (wake_) {
                 wake_();
             }
@@ -462,21 +586,20 @@ void Engine::handle(const Request& request) {
     load_ms = already_resident ? 0 : ms_since(load_start);
 
     if (expert == nullptr) {
-        state_.set_seat(decision.subject, SeatPhase::Dormant);
+        state_.set_seat(decision.expert, SeatPhase::Dormant);
         state_.set_linked(std::nullopt);
         state_.fail_turn(turn, error);
         state_.set_mood(Mood::Error, error);
         return;
     }
 
-    state_.set_resident(decision.subject);
+    state_.set_resident(decision.expert);
     if (wake_) {
         wake_();
     }
 
     // --- generate ----------------------------------------------------------
-    state_.set_mood(Mood::Thinking,
-                    std::string(subject_name(decision.subject)) + " is reading");
+    state_.set_mood(Mood::Thinking, expert_name + " is reading");
     if (wake_) {
         wake_();
     }
@@ -532,7 +655,7 @@ void Engine::handle(const Request& request) {
                     first_token    = false;
                     first_token_at = std::chrono::steady_clock::now();
                     state_.set_mood(Mood::Thinking,
-                                    std::string(subject_name(decision.subject)) + " is thinking");
+                                    expert_name + " is thinking");
                 }
                 // A reasoning model writes its working before its answer, and
                 // on some of them the markers between the two are ordinary
@@ -546,7 +669,7 @@ void Engine::handle(const Request& request) {
                     if (first_answer) {
                         first_answer = false;
                         state_.set_mood(Mood::Talking,
-                                        std::string(subject_name(decision.subject))
+                                        expert_name
                                             + " is answering");
                     }
                     answer += chunk.answer;
@@ -720,7 +843,7 @@ void Engine::handle(const Request& request) {
     if (!config_.routing.keep_delegator_loaded) {
         if (host_->loaded_expert()) {
             host_->release_expert();
-            state_.set_seat(decision.subject, SeatPhase::Dormant);
+            state_.set_seat(decision.expert, SeatPhase::Dormant);
             state_.set_resident(std::nullopt);
         }
         if (host_->router() == nullptr && !config_.router.model.empty()) {
