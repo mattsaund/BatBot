@@ -36,8 +36,38 @@ struct ComputeDevice {
 /// Every device ggml knows about. Empty until a runtime has been loaded.
 std::vector<ComputeDevice> compute_devices();
 
-/// Just the GPUs, in ggml index order.
+/// Just the GPUs, in ggml index order, de-duplicated the way llama.cpp does.
+///
+/// Two backends can see the same card -- install CUDA and Vulkan and every
+/// NVIDIA GPU appears twice. llama.cpp keeps the first of each and Crucible has
+/// to agree with it exactly, because a split is handed over as an array indexed
+/// by position in that list: disagree by one entry and every card gets the
+/// share meant for its neighbour.
 std::vector<ComputeDevice> gpu_devices();
+
+/// The `tensor_split` array llama.cpp reads, from a plan indexed by ggml device
+/// index.
+///
+/// Two translations in one, and both are load-bearing.
+///
+/// llama.cpp indexes tensor_split by *position among the GPUs it selected*, not
+/// by ggml device index. Those agree only when the GPUs occupy the first
+/// indices with nothing else before them -- true with CUDA alone on most
+/// machines, and false the moment a BLAS device registers first or a second
+/// backend adds cards of its own. Crucible plans in device-index space because
+/// that is what `/devices` prints and what the priority order is written in, so
+/// the conversion happens here, once, at the boundary.
+///
+/// And the array is sized to `llama_max_devices()`, because that is how many
+/// floats llama.cpp copies out of the pointer it is given -- a shorter buffer
+/// is read past the end.
+std::vector<float> llama_tensor_split(const std::vector<ComputeDevice>& gpus,
+                                      const std::vector<float>& split);
+
+/// The `main_gpu` llama.cpp expects: the same translation, for the same reason.
+/// It bounds-checks this against its own device count, so a ggml index that is
+/// past the end of that list would fail the load outright.
+int llama_main_gpu(const std::vector<ComputeDevice>& gpus, int main_gpu);
 
 /// How work is divided between GPUs.
 enum class GpuSplitMode {

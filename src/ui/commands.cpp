@@ -15,6 +15,7 @@
 #include "crucible/config/paths.hpp"
 #include "crucible/cook/journal.hpp"
 #include "crucible/llm/model_catalog.hpp"
+#include "crucible/config/gpu_policy.hpp"
 #include "crucible/runtime/devices.hpp"
 #include "crucible/tools/web_search.hpp"
 #include "crucible/session/usage.hpp"
@@ -388,6 +389,34 @@ bool App::handle_command(const std::string& text) {
         for (const ComputeDevice& device : devices) {
             say("[" + std::to_string(device.index) + "] " + device.label() +
                 "   " + device.backend + (device.is_gpu ? "" : "  (cpu)"));
+        }
+
+        // And what that comes to for the model that is actually loaded next.
+        //
+        // "Why is my slowest card doing the most work?" is the question this
+        // listing gets asked, and free memory is almost always the answer: a
+        // card driving a desktop has two gigabytes less to give than an idle
+        // one of the same size, and no priority order can put layers where
+        // there is no room for them. Printing the plan beside the free figures
+        // is what makes that visible instead of inferred.
+        const std::vector<ComputeDevice> gpus = gpu_devices();
+        if (gpus.size() > 1) {
+            const GpuSplitMode mode = gpu_split_mode_from_id(config_.gpu.mode);
+            say("split mode: " + config_.gpu.mode);
+            if (mode == GpuSplitMode::Priority) {
+                std::string order;
+                for (const ComputeDevice& gpu : apply_priority_order(gpus, config_.gpu.priority)) {
+                    order += (order.empty() ? "" : "  >  ") + gpu.description;
+                }
+                say("  order: " + order);
+            }
+            for (const ExpertId& id : config_.configured_experts()) {
+                ModelParams params = config_.expert(id);
+                if (const std::string layout = refresh_gpu_split(params, config_.gpu);
+                    !layout.empty()) {
+                    say("  " + expert_label(config_.roster, id) + ": " + layout);
+                }
+            }
         }
         return true;
     }

@@ -35,6 +35,8 @@
 #include "crucible/routing/expert.hpp"
 #include "crucible/runtime/backend.hpp"
 #include "crucible/runtime/builder.hpp"
+#include <llama.h>
+
 #include "crucible/runtime/devices.hpp"
 #include "crucible/runtime/registry.hpp"
 #include "crucible/session/store.hpp"
@@ -3266,6 +3268,118 @@ float sum_of(const std::vector<float>& split) {
 }
 
 }  // namespace
+
+TEST(the_lowest_priority_card_never_holds_more_than_a_higher_one) {
+    // The property a user checks by watching nvidia-smi, on three equal cards
+    // with a model that needs about half of them.
+    //
+    // The card last in the order does inherit the rounding slack the earlier
+    // ones leave -- at most one unit each, because they are filled to capacity
+    // and a layer cannot be split -- so this is "never more", not "exactly the
+    // least by target".
+    const std::vector<ComputeDevice> gpus{
+        fake_gpu(0, "first",  10 * kGb),
+        fake_gpu(1, "second", 10 * kGb),
+        fake_gpu(2, "third",  10 * kGb),
+    };
+
+    // Twenty-one units of a gigabyte each: not a whole number of cards, so
+    // there is slack to misplace.
+    ModelFit fit;
+    fit.units.assign(21, kGb);
+    fit.resident = 21 * kGb;
+
+    const std::vector<int> counts =
+        plan_gpu_split(GpuSplitMode::Priority, gpus, {0, 1, 2}, 0, fit).units;
+    CHECK_EQ(counts.size(), std::size_t{3});
+    if (counts.size() != 3) {
+        return;
+    }
+
+    // Priority means the cards named first are filled first, so the last one
+    // must not end up with more than either of them.
+    CHECK(counts[2] <= counts[0]);
+    CHECK(counts[2] <= counts[1]);
+
+    // And every unit is still placed, and no card is over what it can hold.
+    CHECK_EQ(counts[0] + counts[1] + counts[2], 21);
+    for (const int on_card : counts) {
+        CHECK(static_cast<std::uint64_t>(on_card) * kGb
+              <= usable_memory(gpus[0], kCardHeadroom));
+    }
+}
+
+TEST(reversing_the_priority_order_reverses_the_split) {
+    // The property a user actually checks: put a card last and it should hold
+    // less than when you put it first. Before honour_targets these two calls
+    // returned the same answer.
+    const std::vector<ComputeDevice> gpus{
+        fake_gpu(0, "first",  10 * kGb),
+        fake_gpu(1, "second", 10 * kGb),
+        fake_gpu(2, "third",  10 * kGb),
+    };
+    ModelFit fit;
+    fit.units.assign(21, kGb);
+    fit.resident = 21 * kGb;
+
+    const std::vector<int> forwards =
+        plan_gpu_split(GpuSplitMode::Priority, gpus, {0, 1, 2}, 0, fit).units;
+    const std::vector<int> backwards =
+        plan_gpu_split(GpuSplitMode::Priority, gpus, {2, 1, 0}, 0, fit).units;
+
+    CHECK_EQ(forwards.size(), std::size_t{3});
+    CHECK_EQ(backwards.size(), std::size_t{3});
+    if (forwards.size() != 3 || backwards.size() != 3) {
+        return;
+    }
+    CHECK(backwards[2] >= forwards[2]);
+    CHECK(backwards[0] <= forwards[0]);
+}
+
+TEST(the_split_handed_to_llama_is_indexed_by_gpu_position) {
+    // llama.cpp indexes tensor_split by position among the GPUs it selected,
+    // not by ggml device index. Those agree only when the GPUs occupy the first
+    // indices -- true with CUDA alone, and false the moment something else
+    // registers first. Crucible plans in device-index space because that is
+    // what /devices prints, so the conversion happens once, at the boundary.
+    const std::vector<ComputeDevice> gpus{
+        fake_gpu(3, "first",  8 * kGb),
+        fake_gpu(5, "second", 8 * kGb),
+    };
+    // A plan in device-index space: index 3 gets a quarter, index 5 the rest.
+    std::vector<float> planned(6, 0.0F);
+    planned[3] = 0.25F;
+    planned[5] = 0.75F;
+
+    const std::vector<float> handed = llama_tensor_split(gpus, planned);
+
+    // Sized to what llama.cpp reads out of the pointer, not to what we planned.
+    // It copies llama_max_devices() floats, and a shorter buffer is read past
+    // its end.
+    CHECK_EQ(handed.size(), static_cast<std::size_t>(llama_max_devices()));
+    CHECK(std::abs(handed[0] - 0.25F) < 0.001F);
+    CHECK(std::abs(handed[1] - 0.75F) < 0.001F);
+    for (std::size_t i = 2; i < handed.size(); ++i) {
+        CHECK(handed[i] == 0.0F);
+    }
+
+    // An empty plan stays empty: that is llama.cpp's own default, which is to
+    // divide across every GPU itself.
+    CHECK(llama_tensor_split(gpus, {}).empty());
+}
+
+TEST(the_main_gpu_handed_to_llama_is_a_position_too) {
+    const std::vector<ComputeDevice> gpus{
+        fake_gpu(3, "first",  8 * kGb),
+        fake_gpu(5, "second", 8 * kGb),
+    };
+    CHECK_EQ(llama_main_gpu(gpus, 3), 0);
+    CHECK_EQ(llama_main_gpu(gpus, 5), 1);
+    // A card that is no longer there falls back to the first, which is what
+    // llama.cpp would have used anyway. An out-of-range value makes it refuse
+    // the load outright.
+    CHECK_EQ(llama_main_gpu(gpus, 9), 0);
+}
 
 TEST(auto_split_leaves_the_decision_to_llama_cpp) {
     const std::vector<ComputeDevice> gpus{fake_gpu(0, "A", 8 * kGb), fake_gpu(1, "B", 8 * kGb)};

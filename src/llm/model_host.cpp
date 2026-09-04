@@ -341,13 +341,22 @@ std::unique_ptr<LoadedModel> ModelHost::load(const ModelParams& requested,
 
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = params.n_gpu_layers;
-    model_params.main_gpu     = params.main_gpu;
     model_params.split_mode   = split_mode_from_string(params.split_mode);
     model_params.progress_callback = progress_trampoline;
     model_params.progress_callback_user_data = &bridge;
-    if (!params.tensor_split.empty()) {
-        model_params.tensor_split = params.tensor_split.data();
+    // Translated at the boundary: Crucible plans in ggml device-index space --
+    // what /devices prints and what the priority order names -- and llama.cpp
+    // reads an array indexed by position among the GPUs it selected, sized to
+    // llama_max_devices(). See llama_tensor_split.
+    //
+    // The vector has to outlive the load call, which is why it is here rather
+    // than in the expression.
+    const std::vector<ComputeDevice> gpus  = gpu_devices();
+    const std::vector<float>         split = llama_tensor_split(gpus, params.tensor_split);
+    if (!split.empty()) {
+        model_params.tensor_split = split.data();
     }
+    model_params.main_gpu = llama_main_gpu(gpus, params.main_gpu);
 
     // Keep the weights off the host. `no_host` drops the pinned staging buffer
     // llama.cpp would otherwise keep in RAM for transfers to the card, and

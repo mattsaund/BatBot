@@ -7,6 +7,7 @@
 #include <numeric>
 
 #include <ggml-backend.h>
+#include <llama.h>
 
 #include "crucible/runtime/backend.hpp"
 #include "crucible/util/format.hpp"
@@ -73,11 +74,52 @@ std::vector<ComputeDevice> compute_devices() {
 std::vector<ComputeDevice> gpu_devices() {
     std::vector<ComputeDevice> gpus;
     for (ComputeDevice& device : compute_devices()) {
-        if (device.is_gpu) {
+        if (!device.is_gpu) {
+            continue;
+        }
+        // De-duplicated by description, the way llama.cpp de-duplicates by the
+        // driver's device id. Install CUDA and Vulkan together and every NVIDIA
+        // card is reported twice; llama.cpp keeps the first of each, and a
+        // split planned against a list it does not share would give every card
+        // the share meant for its neighbour.
+        const bool seen = std::any_of(gpus.begin(), gpus.end(),
+                                      [&device](const ComputeDevice& other) {
+                                          return !device.description.empty() &&
+                                                 other.description == device.description;
+                                      });
+        if (!seen) {
             gpus.push_back(std::move(device));
         }
     }
     return gpus;
+}
+
+std::vector<float> llama_tensor_split(const std::vector<ComputeDevice>& gpus,
+                                      const std::vector<float>& split) {
+    if (split.empty()) {
+        return {};  // llama.cpp's own default: divide across every GPU
+    }
+    // Sized to what llama.cpp reads, not to what we planned. It copies
+    // llama_max_devices() floats out of this pointer, and a shorter buffer is
+    // read past its end.
+    std::vector<float> out(static_cast<std::size_t>(llama_max_devices()), 0.0F);
+    for (std::size_t slot = 0; slot < gpus.size() && slot < out.size(); ++slot) {
+        const auto index = static_cast<std::size_t>(gpus[slot].index);
+        out[slot] = index < split.size() ? split[index] : 0.0F;
+    }
+    return out;
+}
+
+int llama_main_gpu(const std::vector<ComputeDevice>& gpus, int main_gpu) {
+    for (std::size_t slot = 0; slot < gpus.size(); ++slot) {
+        if (gpus[slot].index == main_gpu) {
+            return static_cast<int>(slot);
+        }
+    }
+    // A main GPU that is not on the list any more. Zero is the first card,
+    // which is what llama.cpp would have used anyway, and is in range -- an
+    // out-of-range value makes it refuse the load.
+    return 0;
 }
 
 std::string_view gpu_split_mode_id(GpuSplitMode mode) {
@@ -253,6 +295,15 @@ std::vector<int> place_units(const std::vector<ComputeDevice>& gpus,
         }
     }
 
+    // Capacity is the only correction there is room for.
+    //
+    // It is tempting to add a second pass that nudges units towards the byte
+    // targets as well, and it would be dead code: in priority mode every card
+    // that receives anything is filled to its capacity, so the slack it leaves
+    // behind is by construction less than one unit and there is never room for
+    // a whole one to move back. The last card in index order inherits that
+    // slack -- at most one unit per earlier card -- and nothing can be done
+    // about it without splitting a layer.
     rebalance(counts, units, capacity);
     return counts;
 }
