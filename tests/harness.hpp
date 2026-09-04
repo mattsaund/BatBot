@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // A deliberately tiny test harness.
 //
-// BatBot already fetches three dependencies; a test framework would be a
+// Crucible already fetches three dependencies; a test framework would be a
 // fourth, for something that fits in fifty lines. Tests self-register, report
 // every failure in a case rather than stopping at the first, and the binary
 // exits non-zero if anything failed, which is all CTest needs.

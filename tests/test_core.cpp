@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Tests for the parts of BatBot that need no model loaded: the subject table,
+// Tests for the parts of Crucible that need no model loaded: the subject table,
 // the router grammar, keyword routing, config inheritance, the trust store,
 // path expansion, and UTF-8 chunking.
 
@@ -15,39 +15,39 @@
 #include <gguf.h>
 #include <nlohmann/json.hpp>
 
-#include "batbot/config/config.hpp"
-#include "batbot/config/gpu_policy.hpp"
-#include "batbot/routing/benchmark.hpp"
-#include "batbot/routing/completion.hpp"
-#include "batbot/engine/route_policy.hpp"
-#include "batbot/llm/model_catalog.hpp"
-#include "batbot/llm/model_shape.hpp"
-#include "batbot/llm/response_filter.hpp"
-#include "batbot/tools/web_search.hpp"
-#include "batbot/util/markdown.hpp"
-#include "batbot/util/resources.hpp"
-#include "batbot/config/paths.hpp"
-#include "batbot/routing/router.hpp"
-#include "batbot/engine/state.hpp"
-#include "batbot/routing/subject.hpp"
-#include "batbot/runtime/backend.hpp"
-#include "batbot/runtime/builder.hpp"
-#include "batbot/runtime/devices.hpp"
-#include "batbot/runtime/registry.hpp"
-#include "batbot/session/store.hpp"
-#include "batbot/session/usage.hpp"
-#include "batbot/util/subprocess.hpp"
-#include "batbot/util/text.hpp"
-#include "batbot/config/trust.hpp"
+#include "crucible/config/config.hpp"
+#include "crucible/config/gpu_policy.hpp"
+#include "crucible/routing/benchmark.hpp"
+#include "crucible/routing/completion.hpp"
+#include "crucible/engine/route_policy.hpp"
+#include "crucible/llm/model_catalog.hpp"
+#include "crucible/llm/model_shape.hpp"
+#include "crucible/llm/response_filter.hpp"
+#include "crucible/tools/web_search.hpp"
+#include "crucible/util/markdown.hpp"
+#include "crucible/util/resources.hpp"
+#include "crucible/config/paths.hpp"
+#include "crucible/routing/router.hpp"
+#include "crucible/engine/state.hpp"
+#include "crucible/routing/subject.hpp"
+#include "crucible/runtime/backend.hpp"
+#include "crucible/runtime/builder.hpp"
+#include "crucible/runtime/devices.hpp"
+#include "crucible/runtime/registry.hpp"
+#include "crucible/session/store.hpp"
+#include "crucible/session/usage.hpp"
+#include "crucible/util/subprocess.hpp"
+#include "crucible/util/text.hpp"
+#include "crucible/config/trust.hpp"
 #include "harness.hpp"
 
-using namespace batbot;
+using namespace crucible;
 
 namespace {
 
 /// A directory that cleans itself up, so tests never leave files behind.
 /// Point the XDG data directory at a temporary place, so a test that reads or
-/// writes a real BatBot directory cannot touch the one belonging to whoever is
+/// writes a real Crucible directory cannot touch the one belonging to whoever is
 /// running the suite.
 class ScopedDataHome {
 public:
@@ -77,7 +77,7 @@ class TempDir {
 public:
     TempDir() {
         path_ = std::filesystem::temp_directory_path()
-              / ("batbot-test-" + std::to_string(::getpid()) + "-"
+              / ("crucible-test-" + std::to_string(::getpid()) + "-"
                  + std::to_string(counter()++));
         std::filesystem::create_directories(path_);
     }
@@ -176,7 +176,7 @@ TEST(a_card_that_reports_no_sensor_is_not_a_parse_failure) {
 }
 
 TEST(memory_is_measured_as_available_not_free) {
-    // The distinction that matters on a machine running BatBot: after reading a
+    // The distinction that matters on a machine running Crucible: after reading a
     // 30 GB model, nearly all of "free" memory is page cache. Reporting 98%
     // used would be true of nothing anybody cares about.
     const std::string meminfo =
@@ -1087,7 +1087,7 @@ TEST(split_codepoints_are_held_back_until_complete) {
 }
 
 TEST(a_four_byte_emoji_arriving_one_byte_at_a_time) {
-    const std::string emoji = "\xF0\x9F\xA6\x87";  // 🦇, which BatBot has earned
+    const std::string emoji = "\xF0\x9F\xA6\x87";  // 🦇, which Crucible has earned
     std::string buffer;
     std::string emitted;
     for (const char byte : emoji) {
@@ -1464,7 +1464,7 @@ TEST(tilde_expands_to_the_home_directory) {
 TEST(xdg_config_home_is_honoured_when_absolute) {
     const auto file = paths::config_file();
     CHECK_EQ(file.filename().string(), std::string("config.json"));
-    CHECK_EQ(file.parent_path().filename().string(), std::string("batbot"));
+    CHECK_EQ(file.parent_path().filename().string(), std::string("crucible"));
     CHECK(file.is_absolute());
 }
 
@@ -1597,7 +1597,7 @@ TEST(ggml_registry_names_map_onto_backends_whatever_their_case) {
 }
 
 TEST(a_runtime_built_against_another_llama_cpp_is_reported_as_stale) {
-    // Runtimes outlive the BatBot that built them: they survive an uninstall
+    // Runtimes outlive the Crucible that built them: they survive an uninstall
     // that keeps your data, and a reinstall from newer source lands on top of
     // them. ggml is not ABI-stable across releases, so one built for a
     // different tag loads and then crashes on the first tensor.
@@ -1718,7 +1718,7 @@ TEST(a_configured_gpu_order_is_laid_over_the_cards_present) {
 
 TEST(an_unmentioned_gpu_goes_to_the_end_rather_than_vanishing) {
     // A card added since the order was written. Dropping it would quietly stop
-    // BatBot using hardware the machine has.
+    // Crucible using hardware the machine has.
     const std::vector<ComputeDevice> gpus{gpu_at(0, "A"), gpu_at(1, "B"), gpu_at(2, "C")};
     CHECK_EQ(indices_of(apply_priority_order(gpus, {2})), std::string{"2,0,1"});
 }
@@ -2504,7 +2504,7 @@ TEST(the_memory_settings_survive_a_round_trip_through_the_config_file) {
 // ---------------------------------------------------------------------------
 // Module naming
 //
-// ggml opens a backend module by an exact file name, so BatBot's idea of what
+// ggml opens a backend module by an exact file name, so Crucible's idea of what
 // one is called has to agree with ggml's own down to the character.
 // ---------------------------------------------------------------------------
 
@@ -3017,7 +3017,7 @@ TEST(resuming_a_session_does_not_double_count_what_it_already_spent) {
         CHECK_EQ(store.project_usage().output_tokens, std::uint64_t{200});
     }
 
-    // A second run of BatBot resumes it. Its tokens are already in the total.
+    // A second run of Crucible resumes it. Its tokens are already in the total.
     SessionStore resumed(Project::current());
     resumed.adopt(id);
     CHECK(resumed.save({finished_turn("q", "a", 200)}, usage, error));
@@ -3086,7 +3086,7 @@ TEST(a_child_process_reports_its_output_and_status) {
 TEST(a_command_that_does_not_exist_fails_rather_than_hanging) {
     util::Subprocess child;
     std::string error;
-    CHECK(child.start({"batbot-no-such-program"}, {}, {}, error));
+    CHECK(child.start({"crucible-no-such-program"}, {}, {}, error));
 
     std::string line;
     while (child.read_line(line)) {
@@ -3098,13 +3098,13 @@ TEST(a_command_that_does_not_exist_fails_rather_than_hanging) {
 
 TEST(on_path_finds_real_programs_and_not_invented_ones) {
     CHECK(util::on_path("sh"));
-    CHECK(!util::on_path("batbot-definitely-not-a-program"));
+    CHECK(!util::on_path("crucible-definitely-not-a-program"));
     // An empty requirement means "nothing needed", which is how a backend with
     // no SDK says so.
     CHECK(util::on_path(""));
 }
 
 int main() {
-    std::cout << "BatBot core tests\n\n";
+    std::cout << "Crucible core tests\n\n";
     return harness::run_all();
 }

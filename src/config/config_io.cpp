@@ -9,16 +9,16 @@
 // Loading is forgiving on purpose: a single mistyped field costs that field,
 // not the other eight experts, and every problem is collected as a warning the
 // UI can show rather than thrown.
-#include "batbot/config/config.hpp"
+#include "crucible/config/config.hpp"
 
 #include <cmath>
 #include <fstream>
 #include <nlohmann/json.hpp>
 
-#include "batbot/llm/model_catalog.hpp"
-#include "batbot/config/paths.hpp"
+#include "crucible/llm/model_catalog.hpp"
+#include "crucible/config/paths.hpp"
 
-namespace batbot {
+namespace crucible {
 namespace {
 
 using json = nlohmann::json;
@@ -129,7 +129,7 @@ bool save_config(const Config& config, const std::filesystem::path& file) {
 
     const json doc{
         {"$schema_note",
-         "BatBot config. Models live in \"models_dir\"; each expert names a file "
+         "Crucible config. Models live in \"models_dir\"; each expert names a file "
          "inside it. An absolute or ~-path is also accepted. Anything an expert "
          "leaves out is inherited from \"defaults\". Editable in the app with ctrl-s."},
         {"models_dir",    config.models_dir},
@@ -221,7 +221,7 @@ void write_default_config(const std::filesystem::path& file) {
 
     const json doc{
         {"$schema_note",
-         "BatBot config. Drop your GGUF files in \"models_dir\" and name one per "
+         "Crucible config. Drop your GGUF files in \"models_dir\" and name one per "
          "expert below. An absolute or ~-path also works. Anything an expert "
          "leaves out is inherited from \"defaults\". Editable in the app with ctrl-s."},
         {"models_dir", paths::models_dir().string()},
@@ -392,4 +392,4 @@ Config load_config(std::vector<std::string>& warnings) {
     return load_config(paths::config_file(), warnings);
 }
 
-}  // namespace batbot
+}  // namespace crucible

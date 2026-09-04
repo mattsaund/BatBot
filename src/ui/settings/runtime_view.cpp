@@ -1,20 +1,20 @@
 // SPDX-License-Identifier: MIT
 //
 // The Runtimes panel. See runtime_view.hpp for what it is for.
-#include "batbot/ui/settings/runtime_view.hpp"
+#include "crucible/ui/settings/runtime_view.hpp"
 
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
 
-#include "batbot/config/paths.hpp"
-#include "batbot/ui/theme.hpp"
-#include "batbot/util/format.hpp"
+#include "crucible/config/paths.hpp"
+#include "crucible/ui/theme.hpp"
+#include "crucible/util/format.hpp"
 
 using namespace ftxui;  // NOLINT(google-build-using-namespace)
 
-namespace batbot::ui {
+namespace crucible::ui {
 namespace {
 
 /// A short phrase for the state a runtime is in, and the colour to say it in.
@@ -123,7 +123,7 @@ void RuntimeView::start_install() {
     const bool also_cpu = runtime.kind != BackendKind::Cpu && !cpu_installed();
     status_ = "building " + std::string(info.name) +
               (also_cpu ? ", and CPU with it -- every runtime needs CPU" : "") +
-              ".  You can keep using BatBot";
+              ".  You can keep using Crucible";
 }
 
 void RuntimeView::start_remove() {
@@ -144,7 +144,7 @@ void RuntimeView::start_remove() {
 
     // ggml cannot unload a backend that a loaded model may still be using, so
     // removal only takes effect on the next start -- which makes it the one
-    // place where the list on screen and what BatBot can actually do come
+    // place where the list on screen and what Crucible can actually do come
     // apart, and the one place worth saying so.
     const bool nothing_left =
         std::none_of(runtimes_.begin(), runtimes_.end(),
@@ -275,7 +275,7 @@ Element RuntimeView::render_build() const {
     if (build.phase == BuildProgress::Phase::Compiling) {
         lines.push_back(hbox({
             text(" "),
-            gauge(build.percent) | flex | color(theme::kBatBusy),
+            gauge(build.percent) | flex | color(theme::kFlameBusy),
             text(" " + build.step) | color(theme::kMeta) | dim,
         }));
     } else if (build.running()) {
@@ -303,7 +303,7 @@ Element RuntimeView::render_build() const {
             lines.push_back(text(" ready to use") | color(theme::kSeatActive) | bold);
         } else {
             lines.push_back(text(" built, but " + build.error) | color(theme::kNotice));
-            lines.push_back(text(" restart BatBot to load it") | color(theme::kNotice));
+            lines.push_back(text(" restart Crucible to load it") | color(theme::kNotice));
         }
         lines.push_back(text(" enter dismisses this") | color(theme::kMeta));
     }
@@ -348,7 +348,7 @@ Element RuntimeView::render() const {
         hbox({
             // Pinned: without a fixed width FTXUI shrinks both children when
             // the path is long, and the first thing to go is the title.
-            text(" runtimes ") | bold | color(theme::kBat) | size(WIDTH, EQUAL, 10),
+            text(" runtimes ") | bold | color(theme::kFlame) | size(WIDTH, EQUAL, 10),
             text("· " + format::short_path(paths::runtimes_dir())) | color(theme::kMeta)
                 | flex_shrink,
         }),
@@ -388,7 +388,7 @@ Element RuntimeView::render() const {
     body.push_back(separator());
     body.push_back(text(hint) | color(hint_color) | dim);
 
-    return vbox(std::move(body)) | border | bgcolor(Color::Black) | clear_under;
+    return vbox(std::move(body)) | border | bgcolor(theme::kPanel) | clear_under;
 }
 
-}  // namespace batbot::ui
+}  // namespace crucible::ui

@@ -9,20 +9,20 @@
 //
 // Config changes and expert releases ride the same queue as prompts, so they
 // are applied in order and can never land in the middle of a generation.
-#include "batbot/engine/engine.hpp"
+#include "crucible/engine/engine.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <exception>
 
-#include "batbot/config/gpu_policy.hpp"
-#include "batbot/config/paths.hpp"
-#include "batbot/engine/route_policy.hpp"
-#include "batbot/llm/response_filter.hpp"
-#include "batbot/tools/web_search.hpp"
-#include "batbot/runtime/registry.hpp"
+#include "crucible/config/gpu_policy.hpp"
+#include "crucible/config/paths.hpp"
+#include "crucible/engine/route_policy.hpp"
+#include "crucible/llm/response_filter.hpp"
+#include "crucible/tools/web_search.hpp"
+#include "crucible/runtime/registry.hpp"
 
-namespace batbot {
+namespace crucible {
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -404,14 +404,14 @@ void Engine::handle(const Request& request) {
     const CancelCallback cancel = [this] { return cancel_.load(std::memory_order_relaxed); };
 
     // --- route -------------------------------------------------------------
-    state_.set_mood(Mood::Routing, "BatBot is reading the prompt");
+    state_.set_mood(Mood::Routing, "Crucible is reading the prompt");
     if (wake_) {
         wake_();
     }
 
     const RouteDecision decision = resolve(request);
     state_.set_route(turn, decision);
-    // From here the roundtable draws a line from BatBot to this seat.
+    // From here the roundtable draws a line from Crucible to this seat.
     state_.set_linked(decision.subject);
     if (wake_) {
         wake_();
@@ -665,7 +665,7 @@ void Engine::handle(const Request& request) {
     // turn -- or one that spent its whole budget thinking -- does not poison
     // the context of the next one. Read before the placeholder below is put in
     // its place: what goes into history has to be what the model said, not what
-    // BatBot said about it.
+    // Crucible said about it.
     if (!stats.cancelled && stats.output_tokens > 0) {
         const Snapshot current = state_.snapshot();
         if (turn < current.turns.size() && !current.turns[turn].reply.empty()) {
@@ -739,4 +739,4 @@ void Engine::handle(const Request& request) {
     state_.set_mood(Mood::Idle, stats.cancelled ? "cancelled" : "");
 }
 
-}  // namespace batbot
+}  // namespace crucible

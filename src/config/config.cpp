@@ -4,12 +4,12 @@
 // model references against the models directory.
 //
 // Anything to do with the file on disk lives in config_io.cpp.
-#include "batbot/config/config.hpp"
+#include "crucible/config/config.hpp"
 
-#include "batbot/config/paths.hpp"
-#include "batbot/llm/model_catalog.hpp"
+#include "crucible/config/paths.hpp"
+#include "crucible/llm/model_catalog.hpp"
 
-namespace batbot {
+namespace crucible {
 
 void ModelParams::inherit_from(const ModelParams& base) {
     const ModelParams pristine;  // a field still equal to this was never set
@@ -67,4 +67,4 @@ void Config::resolve_models() {
 }
 
 
-}  // namespace batbot
+}  // namespace crucible

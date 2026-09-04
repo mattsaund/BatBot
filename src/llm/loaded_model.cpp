@@ -6,7 +6,7 @@
 // then sample a token at a time. Re-feeding the conversation each turn is
 // wasteful, but an expert swap invalidates the cache anyway, and correctness
 // here is worth more than the saving. Prefix reuse is a later optimisation.
-#include "batbot/llm/loaded_model.hpp"
+#include "crucible/llm/loaded_model.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -15,10 +15,10 @@
 
 #include <llama.h>
 
-#include "batbot/llm/sampling.hpp"
-#include "batbot/util/text.hpp"
+#include "crucible/llm/sampling.hpp"
+#include "crucible/util/text.hpp"
 
-namespace batbot {
+namespace crucible {
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -397,4 +397,4 @@ GenerationStats LoadedModel::generate(const std::string& prompt,
 }
 
 
-}  // namespace batbot
+}  // namespace crucible

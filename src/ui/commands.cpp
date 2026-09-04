@@ -4,7 +4,7 @@
 //
 // Kept apart from the application shell so adding a command means editing one
 // list in one file, rather than picking through the render and event loops.
-#include "batbot/ui/app.hpp"
+#include "crucible/ui/app.hpp"
 
 #include <algorithm>
 #include <array>
@@ -12,17 +12,17 @@
 #include <filesystem>
 #include <sstream>
 
-#include "batbot/config/paths.hpp"
-#include "batbot/llm/model_catalog.hpp"
-#include "batbot/runtime/devices.hpp"
-#include "batbot/tools/web_search.hpp"
-#include "batbot/session/usage.hpp"
-#include "batbot/ui/theme.hpp"
-#include "batbot/util/format.hpp"
+#include "crucible/config/paths.hpp"
+#include "crucible/llm/model_catalog.hpp"
+#include "crucible/runtime/devices.hpp"
+#include "crucible/tools/web_search.hpp"
+#include "crucible/session/usage.hpp"
+#include "crucible/ui/theme.hpp"
+#include "crucible/util/format.hpp"
 
 using namespace ftxui;  // NOLINT(google-build-using-namespace)
 
-namespace batbot::ui {
+namespace crucible::ui {
 
 void App::say(std::string message) {
     state_.add_notice(std::move(message));
@@ -219,7 +219,7 @@ bool App::handle_command(const std::string& text) {
             return true;
         }
 
-        batbot::tools::SearchSettings settings;
+        crucible::tools::SearchSettings settings;
         settings.enabled         = tools.web_search;
         settings.provider        = tools.search_provider;
         settings.endpoint        = tools.search_endpoint;
@@ -230,15 +230,15 @@ bool App::handle_command(const std::string& text) {
         // Runs on the UI thread, which is why it is bounded by a timeout: this
         // is the one command that waits on something outside the machine.
         std::string error;
-        const std::vector<batbot::tools::SearchResult> results =
-            batbot::tools::search(rest, settings, error);
+        const std::vector<crucible::tools::SearchResult> results =
+            crucible::tools::search(rest, settings, error);
         state_.clear_notices();
         if (results.empty()) {
             say(error.empty() ? "nothing found" : error);
             return true;
         }
         say("\"" + rest + "\" via " + settings.provider);
-        for (const batbot::tools::SearchResult& result : results) {
+        for (const crucible::tools::SearchResult& result : results) {
             say("  " + result.title);
             say("    " + result.url);
             if (!result.snippet.empty()) {
@@ -284,4 +284,4 @@ bool App::handle_command(const std::string& text) {
     return true;
 }
 
-}  // namespace batbot::ui
+}  // namespace crucible::ui

@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT
 //
 // Applying the GPU split policy to every model that will be loaded.
-#include "batbot/config/gpu_policy.hpp"
+#include "crucible/config/gpu_policy.hpp"
 
 #include <filesystem>
 #include <map>
 #include <string>
 
-#include "batbot/llm/model_shape.hpp"
-#include "batbot/runtime/devices.hpp"
+#include "crucible/llm/model_shape.hpp"
+#include "crucible/runtime/devices.hpp"
 
-namespace batbot {
+namespace crucible {
 namespace {
 
 /// GGUF headers already read during this call.
@@ -90,7 +90,7 @@ int delegator_device(const std::vector<ComputeDevice>& gpus, const GpuConfig& gp
 void place_delegator(ModelParams& params, const GpuConfig& gpu) {
     if (gpu_split_mode_from_id(gpu.mode) == GpuSplitMode::Auto) {
         // "Auto" is the user saying llama.cpp decides how models are divided.
-        // Pinning the delegator would be BatBot overriding that for one model
+        // Pinning the delegator would be Crucible overriding that for one model
         // and not the other, which is exactly the kind of hidden policy the
         // mode exists to switch off.
         return;
@@ -212,4 +212,4 @@ std::string apply_gpu_policy(Config& config) {
     return described_model.empty() ? layout : described_model + " -- " + layout;
 }
 
-}  // namespace batbot
+}  // namespace crucible

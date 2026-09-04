@@ -5,14 +5,14 @@
 // Deliberately forgiving: a missing or corrupt store means "nothing is trusted
 // yet", never an error. The worst case is one extra prompt, whereas refusing to
 // start over a malformed JSON file would be unforgivable.
-#include "batbot/config/trust.hpp"
+#include "crucible/config/trust.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <nlohmann/json.hpp>
 
-namespace batbot {
+namespace crucible {
 namespace {
 
 using json = nlohmann::json;
@@ -108,4 +108,4 @@ bool TrustStore::save() const {
     return out.good();
 }
 
-}  // namespace batbot
+}  // namespace crucible

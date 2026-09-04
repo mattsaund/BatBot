@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT
 //
 // Rendering and driving the `/resume` list.
-#include "batbot/ui/session_picker.hpp"
+#include "crucible/ui/session_picker.hpp"
 
 #include <algorithm>
 
-#include "batbot/session/usage.hpp"
-#include "batbot/ui/theme.hpp"
+#include "crucible/session/usage.hpp"
+#include "crucible/ui/theme.hpp"
 
 using namespace ftxui;  // NOLINT(google-build-using-namespace)
 
-namespace batbot::ui {
+namespace crucible::ui {
 
 void SessionPicker::open(const SessionStore& store) {
     open_              = true;
@@ -132,14 +132,14 @@ Element SessionPicker::render() const {
 
     return vbox({
         hbox({
-            text(" resume ") | bold | color(theme::kBat),
+            text(" resume ") | bold | color(theme::kFlame),
             text("· " + project_name_) | color(theme::kMeta),
         }),
         separator(),
         vbox(std::move(rows)) | vscroll_indicator | yframe | flex,
         separator(),
         text(hint) | color(confirming_delete_ ? theme::kError : theme::kMeta) | dim,
-    }) | border | bgcolor(Color::Black) | clear_under;
+    }) | border | bgcolor(theme::kPanel) | clear_under;
 }
 
-}  // namespace batbot::ui
+}  // namespace crucible::ui

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 //
-// Removing BatBot.
+// Removing Crucible.
 //
 // The three questions are separate on purpose, so a partial uninstall is
 // possible -- but answering yes to all of them must leave nothing behind, which
 // is what a clean reinstall test depends on.
-#include "batbot/app/uninstall.hpp"
+#include "crucible/app/uninstall.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -15,11 +15,11 @@
 #include <system_error>
 #include <vector>
 
-#include "batbot/llm/model_catalog.hpp"
-#include "batbot/config/paths.hpp"
-#include "batbot/util/format.hpp"
+#include "crucible/llm/model_catalog.hpp"
+#include "crucible/config/paths.hpp"
+#include "crucible/util/format.hpp"
 
-namespace batbot {
+namespace crucible {
 namespace {
 
 /// The path of the running executable. Uninstalling the binary that is asking
@@ -72,41 +72,41 @@ bool remove_path(const std::filesystem::path& target) {
     return true;
 }
 
-/// $XDG_CACHE_HOME/batbot -- build trees left by install.sh when the checkout
+/// $XDG_CACHE_HOME/crucible -- build trees left by install.sh when the checkout
 /// was on a filesystem that cannot hold them. Pure cache, but it can be a
 /// gigabyte, so it goes with the binary rather than being left behind.
 std::filesystem::path cache_dir() {
     if (const char* value = std::getenv("XDG_CACHE_HOME"); value != nullptr && *value != '\0') {
         if (const std::filesystem::path candidate(value); candidate.is_absolute()) {
-            return candidate / "batbot";
+            return candidate / "crucible";
         }
     }
     if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
-        return std::filesystem::path(home) / ".cache" / "batbot";
+        return std::filesystem::path(home) / ".cache" / "crucible";
     }
     return {};
 }
 
 /// The developer tool installed beside the binary. It is part of the same
-/// install, so it goes with it -- leaving a stray batbot-routebench on PATH
+/// install, so it goes with it -- leaving a stray crucible-routebench on PATH
 /// after an uninstall is exactly the kind of litter that makes a clean
 /// reinstall test lie.
 std::filesystem::path tool_path(const std::filesystem::path& binary) {
     if (binary.empty()) {
         return {};
     }
-    const std::filesystem::path candidate = binary.parent_path() / "batbot-routebench";
+    const std::filesystem::path candidate = binary.parent_path() / "crucible-routebench";
     return std::filesystem::exists(candidate) ? candidate : std::filesystem::path{};
 }
 
-/// <prefix>/lib/batbot -- llama.cpp's shared libraries and the runtimes that
+/// <prefix>/lib/crucible -- llama.cpp's shared libraries and the runtimes that
 /// shipped with the install. The binary alone is not the whole program any
 /// more, so removing it without these would leave most of the bytes behind.
 std::filesystem::path library_dir(const std::filesystem::path& binary) {
     if (binary.empty()) {
         return {};
     }
-    const std::filesystem::path candidate = binary.parent_path().parent_path() / "lib" / "batbot";
+    const std::filesystem::path candidate = binary.parent_path().parent_path() / "lib" / "crucible";
     return std::filesystem::exists(candidate) ? candidate : std::filesystem::path{};
 }
 
@@ -121,7 +121,7 @@ int run_uninstall(bool assume_yes) {
     const std::filesystem::path cache   = cache_dir();
     const std::filesystem::path tool    = tool_path(binary);
 
-    std::cout << "\n  Uninstalling BatBot\n\n";
+    std::cout << "\n  Uninstalling Crucible\n\n";
 
     if (!binary.empty()) {
         std::cout << "  binary   " << binary.string() << "\n";
@@ -155,7 +155,7 @@ int run_uninstall(bool assume_yes) {
     // --- the binary --------------------------------------------------------
     bool removed_binary = false;
     if (!binary.empty() && std::filesystem::exists(binary)) {
-        if (assume_yes || ask("Remove the batbot binary?", true)) {
+        if (assume_yes || ask("Remove the crucible binary?", true)) {
             // Unlinking a running executable is fine on Linux: the kernel keeps
             // the inode alive until this process exits.
             removed_binary = remove_path(binary);
@@ -189,7 +189,7 @@ int run_uninstall(bool assume_yes) {
     }
 
     // --- models and data ---------------------------------------------------
-    // BatBot ships no models. Everything in this directory was downloaded or
+    // Crucible ships no models. Everything in this directory was downloaded or
     // placed by the user, so it is never removed on a default or -y run.
     if (std::filesystem::exists(data)) {
         if (!found.empty()) {
@@ -216,4 +216,4 @@ int run_uninstall(bool assume_yes) {
     return 0;
 }
 
-}  // namespace batbot
+}  // namespace crucible

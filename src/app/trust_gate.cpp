@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
-#include "batbot/app/trust_gate.hpp"
+#include "crucible/app/trust_gate.hpp"
 
 #include <iostream>
 #include <string>
 
-#include "batbot/app/cli.hpp"
-#include "batbot/config/paths.hpp"
-#include "batbot/config/trust.hpp"
+#include "crucible/app/cli.hpp"
+#include "crucible/config/paths.hpp"
+#include "crucible/config/trust.hpp"
 
-namespace batbot::app {
+namespace crucible::app {
 
 bool ensure_trusted(const std::filesystem::path& directory) {
     TrustStore store(paths::trust_file());
@@ -17,9 +17,9 @@ bool ensure_trusted(const std::filesystem::path& directory) {
     }
 
     std::cout << banner() << '\n'
-              << "  BatBot is about to open in:\n\n"
+              << "  Crucible is about to open in:\n\n"
               << "    " << directory.string() << "\n\n"
-              << "  Trusting a folder lets BatBot work with the files in it and\n"
+              << "  Trusting a folder lets Crucible work with the files in it and\n"
               << "  everything below it. Only trust folders whose contents you know.\n\n"
               << "  Trust this folder? [y/N] " << std::flush;
 
@@ -43,4 +43,4 @@ bool ensure_trusted(const std::filesystem::path& directory) {
     return true;
 }
 
-}  // namespace batbot::app
+}  // namespace crucible::app

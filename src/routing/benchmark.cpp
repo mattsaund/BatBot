@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 //
 // See benchmark.hpp.
-#include "batbot/routing/benchmark.hpp"
+#include "crucible/routing/benchmark.hpp"
 
-namespace batbot {
+namespace crucible {
 
 const std::vector<RouteCase>& benchmark_cases() {
     static const std::vector<RouteCase> kCases{
@@ -73,4 +73,4 @@ const std::vector<RouteCase>& benchmark_cases() {
     return kCases;
 }
 
-}  // namespace batbot
+}  // namespace crucible

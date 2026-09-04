@@ -1,36 +1,41 @@
 // SPDX-License-Identifier: MIT
-#include "batbot/app/cli.hpp"
+#include "crucible/app/cli.hpp"
 
 #include <iostream>
 
-#include "batbot/config/paths.hpp"
+#include "crucible/config/paths.hpp"
 
-namespace batbot::app {
+namespace crucible::app {
 namespace {
 
+// The same vessel the TUI draws, at its liveliest frame. One shape for the
+// program, whether you meet it in `--help` or in the corner of the screen.
 constexpr const char* kBanner = R"(
-   /\           /\
-  /  \_________/  \      BatBot )" BATBOT_VERSION R"(
- |   ___________   |     a local roundtable of experts
- |  |           |  |
- |  |  o     o  |  |
- |  |    \_/    |  |
- |  |___________|  |
- |_________________|
+         ^
+        (^)
+       (/^\)
+   ,-----------,     Crucible )" CRUCIBLE_VERSION R"(
+   \ ~~~~~~~~~ /     a local forge: experts on demand, projects that cook
+    \         /
+     \_______/
+      /|   |\
+     / |___| \
+    /         \
+   '-----------'
 )";
 
 void print_usage() {
     std::cout << kBanner << R"(
-usage: batbot [options]
+usage: crucible [options]
 
   -h, --help       show this and exit
   -v, --version    print the version and exit
       --config     print the config file path and exit
-      --uninstall  remove BatBot, its config, and its data
+      --uninstall  remove Crucible, its config, and its data
       --no-trust   skip the folder trust prompt for this run
   -y, --yes        with --uninstall, answer yes to everything
 
-BatBot reads its configuration from:
+Crucible reads its configuration from:
 )" << "  " << paths::config_file().string() << "\n\n";
 }
 
@@ -52,7 +57,7 @@ Options parse_arguments(int argc, char** argv) {
             return options;
         }
         if (argument == "-v" || argument == "--version") {
-            std::cout << "batbot " BATBOT_VERSION "\n";
+            std::cout << "crucible " CRUCIBLE_VERSION "\n";
             options.should_exit = true;
             return options;
         }
@@ -65,7 +70,7 @@ Options parse_arguments(int argc, char** argv) {
         if (argument == "--uninstall") { options.uninstall = true;  continue; }
         if (argument == "-y" || argument == "--yes") { options.assume_yes = true; continue; }
 
-        std::cerr << "batbot: unknown option '" << argument << "' (try --help)\n";
+        std::cerr << "crucible: unknown option '" << argument << "' (try --help)\n";
         options.should_exit = true;
         options.exit_code   = 2;
         return options;
@@ -74,4 +79,4 @@ Options parse_arguments(int argc, char** argv) {
     return options;
 }
 
-}  // namespace batbot::app
+}  // namespace crucible::app

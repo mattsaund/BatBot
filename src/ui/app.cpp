@@ -8,7 +8,7 @@
 //
 // Slash commands live in commands.cpp and the conversation in transcript.cpp,
 // so what remains is the shell itself.
-#include "batbot/ui/app.hpp"
+#include "crucible/ui/app.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -20,24 +20,24 @@
 #include <ftxui/component/event.hpp>
 #include <ftxui/screen/terminal.hpp>
 
-#include "batbot/config/paths.hpp"
-#include "batbot/session/usage.hpp"
-#include "batbot/ui/widgets/roundtable.hpp"
-#include "batbot/ui/settings/settings_view.hpp"
-#include "batbot/ui/theme.hpp"
-#include "batbot/ui/widgets/resource_meter.hpp"
-#include "batbot/util/format.hpp"
+#include "crucible/config/paths.hpp"
+#include "crucible/session/usage.hpp"
+#include "crucible/ui/widgets/roundtable.hpp"
+#include "crucible/ui/settings/settings_view.hpp"
+#include "crucible/ui/theme.hpp"
+#include "crucible/ui/widgets/resource_meter.hpp"
+#include "crucible/util/format.hpp"
 
 using namespace ftxui;  // NOLINT(google-build-using-namespace)
 
-namespace batbot::ui {
+namespace crucible::ui {
 namespace {
 
 }  // namespace
 
 App::App(Config config, const std::vector<std::string>& warnings)
     : config_(std::move(config)),
-      bat_(config_.ui.unicode),
+      sprite_(config_.ui.unicode),
       settings_(config_),
       // The runtime panel builds on a thread of its own and pokes the screen
       // when progress moves, exactly as the engine does.
@@ -52,7 +52,7 @@ App::App(Config config, const std::vector<std::string>& warnings)
     state_.configure_seats(config_);
 
     // What this project has spent before today, so the counter continues
-    // rather than restarting at zero each time BatBot opens.
+    // rather than restarting at zero each time Crucible opens.
     state_.set_project_usage(store_.project_usage());
 
     // The engine runs on its own thread and pokes the screen when the state
@@ -67,7 +67,7 @@ App::App(Config config, const std::vector<std::string>& warnings)
     // Bound so the completion can see the caret and move it after a Tab.
     option.cursor_position = &caret_;
     option.on_change = [this] { update_completion(); };
-    input_ = Input(&input_text_, "ask BatBot anything, or /help", option);
+    input_ = Input(&input_text_, "ask Crucible anything, or /help", option);
 }
 
 App::~App() {
@@ -91,8 +91,8 @@ void App::start_ticker() {
     ticking_.store(true, std::memory_order_relaxed);
     ticker_ = std::thread([this] {
         while (ticking_.load(std::memory_order_relaxed)) {
-            // Animate briskly while BatBot is working, and slowly when he is
-            // idle -- an idle bat still blinks, but should not cost a redraw
+            // Animate briskly while Crucible is working, and slowly when he is
+            // idle -- an idle crucible still flickers, but should not cost a redraw
             // ten times a second forever.
             const bool busy = state_.busy();
             const auto interval = std::chrono::milliseconds(
@@ -193,7 +193,7 @@ Element App::render() {
     Elements rows;
 
     // Overlaid on the roundtable rather than given a column: a panel beside the
-    // ring would push BatBot off the centre it is arranged around, and the
+    // ring would push Crucible off the centre it is arranged around, and the
     // space to the right of the table is empty anyway.
     // Only where there is room beside the table. Narrower than that and the two
     // would be drawn on top of each other, which is worse than not having it.
@@ -209,11 +209,11 @@ Element App::render() {
 
     switch (table_view()) {
         case TableView::Full:
-            rows.push_back(with_meter(roundtable(snapshot, bat_, tick, /*compact=*/false)));
+            rows.push_back(with_meter(roundtable(snapshot, sprite_, tick, /*compact=*/false)));
             rows.push_back(separator());
             break;
         case TableView::Compact:
-            rows.push_back(with_meter(roundtable(snapshot, bat_, tick, /*compact=*/true)));
+            rows.push_back(with_meter(roundtable(snapshot, sprite_, tick, /*compact=*/true)));
             rows.push_back(separator());
             break;
         case TableView::Strip:
@@ -234,7 +234,7 @@ Element App::render() {
     }
     rows.push_back(render_prompt());
 
-    Element screen = window(text(" BatBot " BATBOT_VERSION " ") | bold | color(theme::kBat),
+    Element screen = window(text(" Crucible " CRUCIBLE_VERSION " ") | bold | color(theme::kFlame),
                             vbox(std::move(rows)));
 
     if (sessions_.active()) {
@@ -435,9 +435,9 @@ void App::save_settings(bool announce) {
     }
 
     // The engine applies it between requests; the UI-side copy is updated here
-    // so the roundtable and the bat pick up cosmetic changes immediately.
+    // so the roundtable and the crucible pick up cosmetic changes immediately.
     config_ = edited;
-    bat_ = BatSprite(config_.ui.unicode);
+    sprite_ = CrucibleSprite(config_.ui.unicode);
     show_roundtable_ = config_.ui.show_roundtable;
     state_.configure_seats(config_);
     engine_->apply_config(std::move(edited));
@@ -529,7 +529,7 @@ void App::on_submit() {
 
 int App::run() {
     // FTXUI handles Ctrl-C itself by default *even when a component catches the
-    // event*, and does so by re-raising SIGINT -- which would kill BatBot the
+    // event*, and does so by re-raising SIGINT -- which would kill Crucible the
     // moment the user tried to interrupt a long answer. Taking ownership of the
     // key is what makes "Ctrl-C cancels, Ctrl-C again quits" possible.
     screen_.ForceHandleCtrlC(false);
@@ -713,7 +713,7 @@ int App::run() {
         }
 
         if (event == Event::CtrlC) {
-            // While BatBot is working, Ctrl-C stops the work rather than the
+            // While Crucible is working, Ctrl-C stops the work rather than the
             // program -- the same contract every other REPL offers.
             if (state_.busy()) {
                 engine_->cancel();
@@ -771,4 +771,4 @@ int App::run() {
     return 0;
 }
 
-}  // namespace batbot::ui
+}  // namespace crucible::ui

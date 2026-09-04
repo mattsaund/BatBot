@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //
 // See resources.hpp.
-#include "batbot/util/resources.hpp"
+#include "crucible/util/resources.hpp"
 
 #include <algorithm>
 #include <array>
@@ -12,9 +12,9 @@
 #include <fstream>
 #include <sstream>
 
-#include "batbot/util/subprocess.hpp"
+#include "crucible/util/subprocess.hpp"
 
-namespace batbot::util {
+namespace crucible::util {
 namespace {
 
 /// How often the machine is read.
@@ -475,4 +475,4 @@ void ResourceMonitor::run() {
     }
 }
 
-}  // namespace batbot::util
+}  // namespace crucible::util

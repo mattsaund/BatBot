@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
-#include "batbot/util/format.hpp"
+#include "crucible/util/format.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <cstdio>
 
-namespace batbot::format {
+namespace crucible::format {
 
 std::string trim(std::string text) {
     const auto not_space = [](unsigned char c) { return std::isspace(c) == 0; };
@@ -45,9 +45,9 @@ std::string bytes(std::uintmax_t count) {
     return buffer.data();
 }
 
-}  // namespace batbot::format
+}  // namespace crucible::format
 
-namespace batbot::format {
+namespace crucible::format {
 
 std::string short_path(const std::filesystem::path& path) {
     const char* home = std::getenv("HOME");
@@ -62,4 +62,4 @@ std::string short_path(const std::filesystem::path& path) {
     return text;
 }
 
-}  // namespace batbot::format
+}  // namespace crucible::format

@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: MIT
 //
 // The Manage models panel. See model_manager_view.hpp for what it is for.
-#include "batbot/ui/settings/model_manager_view.hpp"
+#include "crucible/ui/settings/model_manager_view.hpp"
 
 #include <algorithm>
 #include <numeric>
 #include <system_error>
 
-#include "batbot/ui/theme.hpp"
-#include "batbot/util/format.hpp"
+#include "crucible/ui/theme.hpp"
+#include "crucible/util/format.hpp"
 
 using namespace ftxui;  // NOLINT(google-build-using-namespace)
 
-namespace batbot::ui {
+namespace crucible::ui {
 
 void ModelManagerView::open(std::filesystem::path models_dir, std::vector<std::string> in_use) {
     dir_    = std::move(models_dir);
@@ -244,7 +244,7 @@ Element ModelManagerView::render_confirm() const {
                     color(theme::kMeta) | dim);
 
     return vbox(std::move(lines)) | border | size(WIDTH, LESS_THAN, 72) |
-           color(Color::GrayLight) | bgcolor(Color::Black) | clear_under | center;
+           color(theme::kPanelText) | bgcolor(theme::kPanel) | clear_under | center;
 }
 
 Element ModelManagerView::render() const {
@@ -254,7 +254,7 @@ Element ModelManagerView::render() const {
             // arbitrarily long, and when something has to give it should be
             // the part that repeats what is already on the settings screen
             // behind this panel, not the word saying what the panel is.
-            text(" models ") | bold | color(theme::kBat) | size(WIDTH, EQUAL, 9),
+            text(" models ") | bold | color(theme::kFlame) | size(WIDTH, EQUAL, 9),
             text("· " + format::short_path(dir_)) | color(theme::kMeta) | flex_shrink,
         }),
         separator(),
@@ -286,7 +286,7 @@ Element ModelManagerView::render() const {
                    color(theme::kMeta) | dim);
 
     Element screen = vbox(std::move(body)) | border | size(WIDTH, LESS_THAN, 84) |
-                     size(HEIGHT, LESS_THAN, 26) | bgcolor(Color::Black) | clear_under;
+                     size(HEIGHT, LESS_THAN, 26) | bgcolor(theme::kPanel) | clear_under;
 
     if (pending_ != Pending::None) {
         return dbox({std::move(screen), render_confirm()});
@@ -294,4 +294,4 @@ Element ModelManagerView::render() const {
     return screen;
 }
 
-}  // namespace batbot::ui
+}  // namespace crucible::ui

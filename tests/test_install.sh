@@ -6,8 +6,8 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BATBOT_INSTALL_LIB=1
-export BATBOT_INSTALL_LIB
+CRUCIBLE_INSTALL_LIB=1
+export CRUCIBLE_INSTALL_LIB
 # shellcheck disable=SC1091
 source "$HERE/../install.sh"
 
@@ -147,7 +147,7 @@ check_eq  "the build tree sits beside the source" "$BUILD_DIR" "$SRC_DIR/build"
 # beside it, and neither exFAT nor NTFS can hold a symlink -- so a checkout on
 # an external drive shared with Windows could not be built in. The installer
 # used to detect that and move the build tree into the cache directory. It no
-# longer has to, because BatBot strips the version suffixes and the libraries
+# longer has to, because Crucible strips the version suffixes and the libraries
 # come out as plain files; these pin that the detection stays gone and the
 # stripping stays wired up, in both places that compile llama.cpp.
 # --------------------------------------------------------------------------
@@ -167,31 +167,31 @@ check_not "the installer no longer probes for symlink support" \
 check_not "and never relocates the build tree" \
           grep -q "no symlinks; building in" "$HERE/../install.sh"
 check     "the unversioning helper exists" \
-          test -f "$HERE/../cmake/BatBotUnversion.cmake"
+          test -f "$HERE/../cmake/CrucibleUnversion.cmake"
 check     "the dependency setup includes it" \
-          grep -q "BatBotUnversion.cmake" "$HERE/../cmake/BatBotDependencies.cmake"
+          grep -q "CrucibleUnversion.cmake" "$HERE/../cmake/CrucibleDependencies.cmake"
 check     "and sweeps llama.cpp's targets once they exist" \
-          grep -q 'batbot_unversion_directory("\${llama_SOURCE_DIR}")' \
-               "$HERE/../cmake/BatBotDependencies.cmake"
+          grep -q 'crucible_unversion_directory("\${llama_SOURCE_DIR}")' \
+               "$HERE/../cmake/CrucibleDependencies.cmake"
 check_not "configuring without symlinks is no longer a fatal error" \
-          grep -q "BATBOT_FS_HAS_SYMLINKS" "$HERE/../cmake/BatBotDependencies.cmake"
-# The in-app runtime builder runs cmake on llama.cpp directly, with no BatBot
+          grep -q "CRUCIBLE_FS_HAS_SYMLINKS" "$HERE/../cmake/CrucibleDependencies.cmake"
+# The in-app runtime builder runs cmake on llama.cpp directly, with no Crucible
 # CMakeLists in the picture, so it has to inject the same thing itself.
 check     "the runtime builder injects the same hook" \
           grep -q "CMAKE_PROJECT_INCLUDE" "$HERE/../src/runtime/builder.cpp"
 check     "and defines the sweep it points at" \
-          grep -q "batbot_unversion_directory" "$HERE/../src/runtime/builder.cpp"
+          grep -q "crucible_unversion_directory" "$HERE/../src/runtime/builder.cpp"
 
 echo
 echo "  llama tag"
 # A runtime built from a different llama.cpp tag would load and then crash on
 # the first tensor, so the installer's tag must match the one CMake pins.
-CMAKE_TAG="$(grep -oE 'BATBOT_LLAMA_TAG b[0-9]+' "$HERE/../cmake/BatBotDependencies.cmake" | awk '{print $2}')"
+CMAKE_TAG="$(grep -oE 'CRUCIBLE_LLAMA_TAG b[0-9]+' "$HERE/../cmake/CrucibleDependencies.cmake" | awk '{print $2}')"
 check_eq  "install.sh pins the tag CMake pins" "$LLAMA_TAG" "$CMAKE_TAG"
 
 # The same tag is compiled into the binary for the in-app runtime builder.
 check     "CMakeLists passes the tag to the compiler" \
-          grep -q 'BATBOT_LLAMA_TAG="\${BATBOT_LLAMA_TAG}"' "$HERE/../CMakeLists.txt"
+          grep -q 'CRUCIBLE_LLAMA_TAG="\${CRUCIBLE_LLAMA_TAG}"' "$HERE/../CMakeLists.txt"
 
 # --------------------------------------------------------------------------
 # Overall progress
@@ -297,26 +297,26 @@ STEP_NUM=0; STEP_PCT=0; PHASE_BASE=0; PHASE_SPAN=0
 #
 # llama.cpp and ggml install themselves into <prefix>/lib unconditionally,
 # which for a system-wide install means a libllama.so that can shadow someone
-# else's -- and files batbot --uninstall would leave behind. Installing only
-# BatBot's own component is what stops that, so the flag is pinned here.
+# else's -- and files crucible --uninstall would leave behind. Installing only
+# Crucible's own component is what stops that, so the flag is pinned here.
 # --------------------------------------------------------------------------
 echo
 echo "  install component"
 
-check     "CMakeLists puts BatBot's install rules in a component" \
-          grep -q "COMPONENT \${BATBOT_INSTALL_COMPONENT}" "$HERE/../CMakeLists.txt"
+check     "CMakeLists puts Crucible's install rules in a component" \
+          grep -q "COMPONENT \${CRUCIBLE_INSTALL_COMPONENT}" "$HERE/../CMakeLists.txt"
 check     "no install rule is left outside that component" \
           test "$(grep -c '^ *install(TARGETS' "$HERE/../CMakeLists.txt")" \
-               = "$(grep -c 'COMPONENT \${BATBOT_INSTALL_COMPONENT}' "$HERE/../CMakeLists.txt")"
+               = "$(grep -c 'COMPONENT \${CRUCIBLE_INSTALL_COMPONENT}' "$HERE/../CMakeLists.txt")"
 check     "the installer asks for that component" \
-          grep -q -- "--install .* --component batbot" "$HERE/../install.sh"
+          grep -q -- "--install .* --component crucible" "$HERE/../install.sh"
 check_eq  "every install invocation is scoped" \
           "$(grep -c 'CMAKE" --install' "$HERE/../install.sh")" \
-          "$(grep -c -- '--install .* --component batbot' "$HERE/../install.sh")"
+          "$(grep -c -- '--install .* --component crucible' "$HERE/../install.sh")"
 # GGML_BACKEND_DIR would bake an absolute search path into the binary and put
 # the runtimes outside the component; the path is passed at startup instead.
 check_not "GGML_BACKEND_DIR is not set" \
-          grep -q "^ *set(GGML_BACKEND_DIR" "$HERE/../cmake/BatBotDependencies.cmake"
+          grep -q "^ *set(GGML_BACKEND_DIR" "$HERE/../cmake/CrucibleDependencies.cmake"
 
 echo
 echo "  bars"
@@ -393,7 +393,7 @@ STEP_NUM=0; STEP_PCT=0
 # --------------------------------------------------------------------------
 # Runtimes
 #
-# BatBot installs with no compute backend at all -- not even CPU. The runtimes
+# Crucible installs with no compute backend at all -- not even CPU. The runtimes
 # directory is created empty and the settings screen fills it, which is what
 # makes the choice of backend reversible.
 # --------------------------------------------------------------------------
@@ -406,13 +406,13 @@ check_not "no backend modules are installed by CMake" \
           grep -q "GGML_AVAILABLE_BACKENDS" "$HERE/../CMakeLists.txt"
 check     "the CPU backend is not compiled into the build" \
           grep -q "set(GGML_CPU              OFF CACHE INTERNAL" \
-          "$HERE/../cmake/BatBotDependencies.cmake"
+          "$HERE/../cmake/CrucibleDependencies.cmake"
 # ggml sets GGML_METAL_DEFAULT and GGML_BLAS_DEFAULT to ON under APPLE, so
 # "no backend at all" is only true on a Mac if all three are named explicitly.
 for opt in GGML_METAL GGML_BLAS GGML_ACCELERATE; do
     check "the base build turns $opt off (ggml defaults it on for Apple)" \
           grep -q "set($opt *OFF CACHE INTERNAL" \
-          "$HERE/../cmake/BatBotDependencies.cmake"
+          "$HERE/../cmake/CrucibleDependencies.cmake"
 done
 
 # Same defaults, same problem, one layer down: a CPU runtime built on a Mac

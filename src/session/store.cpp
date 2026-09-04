@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //
 // Per-project session history on disk.
-#include "batbot/session/store.hpp"
+#include "crucible/session/store.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -13,10 +13,10 @@
 
 #include <nlohmann/json.hpp>
 
-#include "batbot/config/paths.hpp"
-#include "batbot/util/format.hpp"
+#include "crucible/config/paths.hpp"
+#include "crucible/util/format.hpp"
 
-namespace batbot {
+namespace crucible {
 namespace {
 
 using json = nlohmann::json;
@@ -424,4 +424,4 @@ TokenUsage SessionStore::project_usage() const {
     return usage_from_json(document.value("usage", json::object()));
 }
 
-}  // namespace batbot
+}  // namespace crucible

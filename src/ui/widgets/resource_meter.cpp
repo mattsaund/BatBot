@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT
 //
 // See resource_meter.hpp.
-#include "batbot/ui/widgets/resource_meter.hpp"
+#include "crucible/ui/widgets/resource_meter.hpp"
 
 #include <algorithm>
 #include <string>
 
-#include "batbot/ui/theme.hpp"
+#include "crucible/ui/theme.hpp"
 
 using namespace ftxui;  // NOLINT(google-build-using-namespace)
 
-namespace batbot::ui {
+namespace crucible::ui {
 namespace {
 
 /// Width of the name column. Long enough for "GeForce RTX 5060 Ti" once the
@@ -90,4 +90,4 @@ Element resource_meter(const util::ResourceSnapshot& snapshot) {
     return vbox(std::move(rows));
 }
 
-}  // namespace batbot::ui
+}  // namespace crucible::ui

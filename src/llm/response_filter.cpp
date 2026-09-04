@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 //
 // See response_filter.hpp for what this is for.
-#include "batbot/llm/response_filter.hpp"
+#include "crucible/llm/response_filter.hpp"
 
 #include <algorithm>
 #include <cassert>
 #include <array>
 #include <string_view>
 
-namespace batbot {
+namespace crucible {
 namespace {
 
 /// Every marker either convention uses, longest first so that scanning finds
@@ -177,4 +177,4 @@ ResponseFilter::Piece ResponseFilter::flush() {
     return piece;
 }
 
-}  // namespace batbot
+}  // namespace crucible

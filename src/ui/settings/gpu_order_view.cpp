@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT
 //
 // The GPU priority panel. See gpu_order_view.hpp for what it is for.
-#include "batbot/ui/settings/gpu_order_view.hpp"
+#include "crucible/ui/settings/gpu_order_view.hpp"
 
 #include <algorithm>
 
-#include "batbot/ui/theme.hpp"
-#include "batbot/util/format.hpp"
+#include "crucible/ui/theme.hpp"
+#include "crucible/util/format.hpp"
 
 using namespace ftxui;  // NOLINT(google-build-using-namespace)
 
-namespace batbot::ui {
+namespace crucible::ui {
 
 void GpuOrderView::open(const std::vector<int>& order) {
     // The rearranging itself lives in runtime/devices.cpp: it is a fact about
@@ -133,7 +133,7 @@ Element GpuOrderView::render_gpu(std::size_t position) const {
 Element GpuOrderView::render() const {
     Elements body{
         hbox({
-            text(" gpu priority order ") | bold | color(theme::kBat),
+            text(" gpu priority order ") | bold | color(theme::kFlame),
             text("· first card is filled first") | color(theme::kMeta) | dim,
         }),
         separator(),
@@ -168,7 +168,7 @@ Element GpuOrderView::render() const {
                             : "↑↓ choose   enter pick up   esc back") |
                    color(theme::kMeta) | dim);
 
-    return vbox(std::move(body)) | border | bgcolor(Color::Black) | clear_under;
+    return vbox(std::move(body)) | border | bgcolor(theme::kPanel) | clear_under;
 }
 
-}  // namespace batbot::ui
+}  // namespace crucible::ui

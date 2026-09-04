@@ -5,16 +5,16 @@
 // Only the file extension is checked, never the contents: validating every GGUF
 // would mean opening gigabytes of files to draw a list. A file that is not
 // really a model fails later, at load, with a clear message.
-#include "batbot/llm/model_catalog.hpp"
+#include "crucible/llm/model_catalog.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstdio>
 
-#include "batbot/config/paths.hpp"
-#include "batbot/util/format.hpp"
+#include "crucible/config/paths.hpp"
+#include "crucible/util/format.hpp"
 
-namespace batbot {
+namespace crucible {
 namespace {
 
 bool has_gguf_extension(const std::filesystem::path& path) {
@@ -88,4 +88,4 @@ std::vector<ModelFile> scan_models(const std::filesystem::path& dir) {
     return found;
 }
 
-}  // namespace batbot
+}  // namespace crucible

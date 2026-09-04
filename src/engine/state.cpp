@@ -6,12 +6,12 @@
 // takes the mutex for its whole body, and nothing calls out to unknown code
 // while holding it. Filesystem work is done before the lock is taken, so the
 // render thread is never blocked behind a stat() call.
-#include "batbot/engine/state.hpp"
+#include "crucible/engine/state.hpp"
 
 #include <algorithm>
 #include <filesystem>
 
-namespace batbot {
+namespace crucible {
 
 std::string_view mood_label(Mood mood) {
     switch (mood) {
@@ -273,4 +273,4 @@ bool AppState::busy() const {
     return busy_;
 }
 
-}  // namespace batbot
+}  // namespace crucible

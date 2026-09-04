@@ -2,7 +2,7 @@
 //
 // Reading a GGUF header. See model_shape.hpp for why this is read and not
 // estimated.
-#include "batbot/llm/model_shape.hpp"
+#include "crucible/llm/model_shape.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -14,7 +14,7 @@
 
 #include <gguf.h>
 
-namespace batbot {
+namespace crucible {
 namespace {
 
 /// Two bytes per element: llama.cpp's default KV cache is f16, and a quantised
@@ -332,7 +332,7 @@ ModelShape read_model_shape(const std::filesystem::path& file) {
 
             if (block.has_recurrent) {
                 // The convolution window, plus the SSM state itself. Both are
-                // f32 and both are per sequence, of which BatBot runs one.
+                // f32 and both are per sequence, of which Crucible runs one.
                 const std::uint64_t conv =
                     block.conv_width > 1 ? (block.conv_width - 1) * block.conv_channels : 0;
                 unit.state = (conv + ssm_inner * ssm_state) * kStateElementBytes;
@@ -357,4 +357,4 @@ ModelShape read_model_shape(const std::filesystem::path& file) {
     return shape;
 }
 
-}  // namespace batbot
+}  // namespace crucible

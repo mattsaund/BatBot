@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 //
 // Token arithmetic and how it is displayed.
-#include "batbot/session/usage.hpp"
+#include "crucible/session/usage.hpp"
 
 #include <cmath>
 
-#include "batbot/llm/loaded_model.hpp"
-#include "batbot/util/format.hpp"
+#include "crucible/llm/loaded_model.hpp"
+#include "crucible/util/format.hpp"
 
-namespace batbot {
+namespace crucible {
 
 void TokenUsage::add(const GenerationStats& stats) {
     input_tokens  += static_cast<std::uint64_t>(std::max(0, stats.prompt_tokens));
@@ -58,4 +58,4 @@ std::string usage_readout(const TokenUsage& usage, double live_tps, bool unicode
     return text;
 }
 
-}  // namespace batbot
+}  // namespace crucible

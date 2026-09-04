@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-#include "batbot/ui/settings/settings_view.hpp"
+#include "crucible/ui/settings/settings_view.hpp"
 
 #include <algorithm>
 #include <array>
@@ -8,13 +8,13 @@
 #include <filesystem>
 #include <system_error>
 
-#include "batbot/runtime/backend.hpp"
-#include "batbot/runtime/devices.hpp"
-#include "batbot/ui/theme.hpp"
+#include "crucible/runtime/backend.hpp"
+#include "crucible/runtime/devices.hpp"
+#include "crucible/ui/theme.hpp"
 
 using namespace ftxui;  // NOLINT(google-build-using-namespace)
 
-namespace batbot::ui {
+namespace crucible::ui {
 namespace {
 
 /// Width of the label column, in cells. Wide enough for the longest row label
@@ -72,12 +72,12 @@ void SettingsView::build_rows() {
 
     header("MODELS");
     rows_.push_back({Kind::Directory, "Models directory",
-                     "where BatBot looks for .gguf files", &config_.models_dir,
+                     "where Crucible looks for .gguf files", &config_.models_dir,
                      nullptr, nullptr, nullptr, 0, {}, ActionId::None});
     // The way back from a models directory that was moved somewhere awkward,
     // or onto a drive that is no longer plugged in.
     rows_.push_back({Kind::Action, "Reset model path to default",
-                     "put the models directory back where BatBot expects it",
+                     "put the models directory back where Crucible expects it",
                      nullptr, nullptr, nullptr, nullptr, 0, {},
                      ActionId::ResetModelsDir});
     rows_.push_back({Kind::Panel, "Manage models",
@@ -169,7 +169,7 @@ void SettingsView::build_rows() {
 
     header("TOOLS");
     rows_.push_back({Kind::Bool, "Web search",
-                     "let experts look things up -- the only thing BatBot sends off the machine",
+                     "let experts look things up -- the only thing Crucible sends off the machine",
                      nullptr, nullptr, nullptr, &config_.tools.web_search, 0, {}});
     rows_.push_back({Kind::Enum, "Search provider", "where the looking up happens",
                      &config_.tools.search_provider, nullptr, nullptr, nullptr, 0,
@@ -190,7 +190,7 @@ void SettingsView::build_rows() {
                      nullptr, nullptr, nullptr, &config_.ui.show_roundtable, 0, {}});
     rows_.push_back({Kind::Bool, "Show reasoning", "keep a thinking model's working on screen",
                      nullptr, nullptr, nullptr, &config_.ui.show_reasoning, 0, {}});
-    rows_.push_back({Kind::Bool, "Unicode glyphs", "off uses a pure-ASCII bat",
+    rows_.push_back({Kind::Bool, "Unicode glyphs", "off uses a pure-ASCII crucible",
                      nullptr, nullptr, nullptr, &config_.ui.unicode, 0, {}});
 
     // Last, so it sees the finished list.
@@ -695,7 +695,7 @@ Element SettingsView::render() const {
     }
 
     Element screen = window(
-        text(" Settings ") | bold | color(theme::kBat),
+        text(" Settings ") | bold | color(theme::kFlame),
         vbox({
             hbox({
                 text("  " + dir) | color(theme::kMeta),
@@ -715,4 +715,4 @@ Element SettingsView::render() const {
     return screen;
 }
 
-}  // namespace batbot::ui
+}  // namespace crucible::ui

@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: MIT
 //
 // See markdown_view.hpp.
-#include "batbot/ui/widgets/markdown_view.hpp"
+#include "crucible/ui/widgets/markdown_view.hpp"
 
 #include <string>
 
-#include "batbot/ui/theme.hpp"
+#include "crucible/ui/theme.hpp"
 #include <ftxui/dom/table.hpp>
 
-#include "batbot/util/markdown.hpp"
+#include "crucible/util/markdown.hpp"
 
 using namespace ftxui;  // NOLINT(google-build-using-namespace)
 
-namespace batbot::ui {
+namespace crucible::ui {
 namespace {
 
 /// One styled run.
@@ -220,4 +220,4 @@ std::vector<Element> render_markdown(const std::string& source, bool dim_all) {
     return lines;
 }
 
-}  // namespace batbot::ui
+}  // namespace crucible::ui

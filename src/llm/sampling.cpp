@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
-#include "batbot/llm/sampling.hpp"
+#include "crucible/llm/sampling.hpp"
 
 #include <random>
 
 #include <llama.h>
 
-namespace batbot::llm {
+namespace crucible::llm {
 
 llama_sampler* build_sampler_chain(const llama_vocab* vocab,
                                    const ModelParams& params,
@@ -47,4 +47,4 @@ llama_sampler* build_sampler_chain(const llama_vocab* vocab,
     return chain;
 }
 
-}  // namespace batbot::llm
+}  // namespace crucible::llm

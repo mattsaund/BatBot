@@ -4,24 +4,24 @@
 // first-run guidance when there is nothing to show yet.
 //
 // Every turn carries the route line -- which expert answered, how confident the
-// delegator was, and what the swap cost -- because that is the part of BatBot
+// delegator was, and what the swap cost -- because that is the part of Crucible
 // worth watching.
-#include "batbot/ui/app.hpp"
+#include "crucible/ui/app.hpp"
 
 #include <algorithm>
 #include <filesystem>
 #include <sstream>
 
-#include "batbot/config/paths.hpp"
-#include "batbot/llm/model_catalog.hpp"
-#include "batbot/ui/theme.hpp"
-#include "batbot/ui/widgets/markdown_view.hpp"
-#include "batbot/ui/widgets/scroll.hpp"
-#include "batbot/util/format.hpp"
+#include "crucible/config/paths.hpp"
+#include "crucible/llm/model_catalog.hpp"
+#include "crucible/ui/theme.hpp"
+#include "crucible/ui/widgets/markdown_view.hpp"
+#include "crucible/ui/widgets/scroll.hpp"
+#include "crucible/util/format.hpp"
 
 using namespace ftxui;  // NOLINT(google-build-using-namespace)
 
-namespace batbot::ui {
+namespace crucible::ui {
 
 Element App::render_turn(const Turn& turn) const {
     Elements block;
@@ -33,7 +33,7 @@ Element App::render_turn(const Turn& turn) const {
     }));
 
     // The route line is the whole point of the roundtable made textual: which
-    // expert took this turn, how sure BatBot was, and what the swap cost.
+    // expert took this turn, how sure Crucible was, and what the swap cost.
     if (turn.route) {
         const RouteDecision& route = *turn.route;
         std::string line = "⟶ " + std::string(subject_name(route.subject));
@@ -108,8 +108,8 @@ Element App::render_welcome() const {
         // expert seats are filled" once a custom subject was added, which is
         // both wrong and a number nobody was waiting for.
         return vbox({
-            text("BatBot is ready.") | color(theme::kMeta),
-            text("Ask anything; BatBot picks the expert. /help lists the commands.")
+            text("Crucible is ready.") | color(theme::kMeta),
+            text("Ask anything; Crucible picks the expert. /help lists the commands.")
                 | color(theme::kMeta) | dim,
             text(" "),
         });
@@ -167,4 +167,4 @@ Element App::render_transcript(const Snapshot& snapshot) const {
            });
 }
 
-}  // namespace batbot::ui
+}  // namespace crucible::ui

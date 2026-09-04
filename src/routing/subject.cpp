@@ -8,12 +8,12 @@
 // apart:
 // adding a subject here adds it everywhere, and the static assertions catch the
 // one place that must be kept in step by hand.
-#include "batbot/routing/subject.hpp"
+#include "crucible/routing/subject.hpp"
 
 #include <algorithm>
 #include <cctype>
 
-namespace batbot {
+namespace crucible {
 namespace {
 
 constexpr std::array<SubjectInfo, kSubjectCount> kSubjects{{
@@ -109,7 +109,7 @@ std::vector<Subject> routable_subjects() {
 std::vector<std::string> router_labels() {
     // The name, not the tag.
     //
-    // This is worth 39 points. Scored on BatBot's 54-prompt benchmark with
+    // This is worth 39 points. Scored on Crucible's 54-prompt benchmark with
     // LFM2.5-1.2B, answering with the four-letter tags gets 48% and answering
     // with the subject names gets 87%. The tags are not words: a delegator
     // choosing between "PHIL" and "PHYS" is comparing two spellings that share
@@ -174,4 +174,4 @@ std::vector<std::pair<std::string, std::string>> router_examples() {
     return examples;
 }
 
-}  // namespace batbot
+}  // namespace crucible

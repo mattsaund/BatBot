@@ -4,9 +4,9 @@
 //
 // Small, but load-bearing in two places: a model token can end mid-codepoint,
 // and a text cursor must not land inside one.
-#include "batbot/util/text.hpp"
+#include "crucible/util/text.hpp"
 
-namespace batbot::detail {
+namespace crucible::detail {
 
 std::size_t utf8_prev(const std::string& text, std::size_t index) {
     if (index == 0) {
@@ -60,4 +60,4 @@ std::string take_complete_utf8(std::string& buffer) {
     return complete;
 }
 
-}  // namespace batbot::detail
+}  // namespace crucible::detail

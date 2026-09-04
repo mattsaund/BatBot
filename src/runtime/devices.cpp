@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: MIT
 //
 // Device enumeration and the GPU split policy. See devices.hpp for the why.
-#include "batbot/runtime/devices.hpp"
+#include "crucible/runtime/devices.hpp"
 
 #include <algorithm>
 #include <numeric>
 
 #include <ggml-backend.h>
 
-#include "batbot/runtime/backend.hpp"
-#include "batbot/util/format.hpp"
+#include "crucible/runtime/backend.hpp"
+#include "crucible/util/format.hpp"
 
-namespace batbot {
+namespace crucible {
 
 std::uint64_t usable_memory(const ComputeDevice& gpu, std::uint64_t reserve) {
     // Free when the backend reports it, total when it does not. A backend that
@@ -480,7 +480,7 @@ GpuSettingSupport gpu_setting_support(const std::vector<ComputeDevice>& devices)
             can_split = can_split || backend_info(*kind).multi_device;
             backend   = backend_info(*kind).name;
         } else if (backend.empty()) {
-            // A backend BatBot does not manage still has a name worth using.
+            // A backend Crucible does not manage still has a name worth using.
             backend = device.backend;
         }
     }
@@ -539,4 +539,4 @@ std::string describe_split(const std::vector<ComputeDevice>& gpus, const GpuPlan
     return text.empty() ? "llama.cpp decides" : text;
 }
 
-}  // namespace batbot
+}  // namespace crucible

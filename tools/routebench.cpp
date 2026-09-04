@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
-// batbot-routebench -- measure how well a model does the delegator's job.
+// crucible-routebench -- measure how well a model does the delegator's job.
 //
-// Routing quality is the single thing that decides whether BatBot sends your
+// Routing quality is the single thing that decides whether Crucible sends your
 // question to the right expert, and it is not obvious from a model's size or
 // its benchmark scores. This loads one candidate delegator, routes a fixed set
 // of prompts whose subject is not in doubt, and reports how many it got right.
 //
-//   batbot-routebench ~/.local/share/batbot/models/LFM2-1.2B-Q8_0.gguf
+//   crucible-routebench ~/.local/share/crucible/models/LFM2-1.2B-Q8_0.gguf
 //
 // Sampling is greedy, so repeated runs give identical results and a change in
 // the score is a real change rather than sampling noise.
@@ -16,19 +16,19 @@
 #include <string>
 #include <vector>
 
-#include "batbot/config/config.hpp"
-#include "batbot/llm/model_host.hpp"
-#include "batbot/config/paths.hpp"
-#include "batbot/routing/benchmark.hpp"
-#include "batbot/routing/router.hpp"
+#include "crucible/config/config.hpp"
+#include "crucible/llm/model_host.hpp"
+#include "crucible/config/paths.hpp"
+#include "crucible/routing/benchmark.hpp"
+#include "crucible/routing/router.hpp"
 #include <array>
 #include <cstdlib>
 
-using namespace batbot;
+using namespace crucible;
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::printf("usage: batbot-routebench <router-model.gguf> [--gpu-layers N]\n");
+        std::printf("usage: crucible-routebench <router-model.gguf> [--gpu-layers N]\n");
         return 2;
     }
 

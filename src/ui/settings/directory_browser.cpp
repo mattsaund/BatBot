@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT
-#include "batbot/ui/settings/directory_browser.hpp"
+#include "crucible/ui/settings/directory_browser.hpp"
 
 #include <algorithm>
 #include <system_error>
 
-#include "batbot/config/paths.hpp"
-#include "batbot/llm/model_catalog.hpp"
-#include "batbot/ui/theme.hpp"
+#include "crucible/config/paths.hpp"
+#include "crucible/llm/model_catalog.hpp"
+#include "crucible/ui/theme.hpp"
 
 using namespace ftxui;  // NOLINT(google-build-using-namespace)
 
-namespace batbot::ui {
+namespace crucible::ui {
 
 void DirectoryBrowser::open(std::filesystem::path start) {
     active_             = true;
@@ -208,7 +208,7 @@ Element DirectoryBrowser::render() const {
                       }),
                   }))
         | size(WIDTH, LESS_THAN, 80) | size(HEIGHT, LESS_THAN, 24)
-        | color(Color::GrayLight) | bgcolor(Color::Black) | clear_under | center;
+        | color(theme::kPanelText) | bgcolor(theme::kPanel) | clear_under | center;
 }
 
-}  // namespace batbot::ui
+}  // namespace crucible::ui

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //
 // Scanning, loading and removing the runtimes directory.
-#include "batbot/runtime/registry.hpp"
+#include "crucible/runtime/registry.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -14,11 +14,11 @@
 
 #include <ggml-backend.h>
 
-#include "batbot/config/paths.hpp"
-#include "batbot/util/format.hpp"
-#include "batbot/util/subprocess.hpp"
+#include "crucible/config/paths.hpp"
+#include "crucible/util/format.hpp"
+#include "crucible/util/subprocess.hpp"
 
-namespace batbot {
+namespace crucible {
 namespace {
 
 using json = nlohmann::json;
@@ -40,7 +40,7 @@ std::optional<BackendKind> kind_of_module(const std::filesystem::path& file) {
     }
     // Only a file ending in exactly the module extension counts. Anything
     // else in the directory -- a half-copied ".new", a leftover versioned
-    // alias from an older BatBot -- is the same module under another name,
+    // alias from an older Crucible -- is the same module under another name,
     // and counting it would double every size shown in settings.
     if (name.size() <= prefix.size() + suffix.size() ||
         name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) {
@@ -150,12 +150,12 @@ json read_manifest(const std::filesystem::path& file) {
 
 /// The llama.cpp tag this binary was compiled against. CMake passes it in; the
 /// fallback keeps a hand-rolled build compiling rather than failing here.
-#ifndef BATBOT_LLAMA_TAG
-#define BATBOT_LLAMA_TAG "unknown"
+#ifndef CRUCIBLE_LLAMA_TAG
+#define CRUCIBLE_LLAMA_TAG "unknown"
 #endif
 
 std::string_view RuntimeStatus::required_llama_tag() {
-    return BATBOT_LLAMA_TAG;
+    return CRUCIBLE_LLAMA_TAG;
 }
 
 std::string RuntimeStatus::size_label() const {
@@ -208,7 +208,7 @@ bool RuntimeRegistry::activate(BackendKind kind, std::string& error) {
 
     if (ggml_backend_load(best.string().c_str()) == nullptr) {
         error = "could not load " + best.filename().string() +
-                " -- see the BatBot log";
+                " -- see the Crucible log";
         return false;
     }
     return true;
@@ -286,8 +286,8 @@ bool RuntimeRegistry::remove(BackendKind kind, std::string& error) {
 
     std::error_code ec;
     for (const std::filesystem::path& file : found->second) {
-        // Take any versioned aliases with it. BatBot no longer produces them
-        // (see cmake/BatBotUnversion.cmake), but a runtime built by an older
+        // Take any versioned aliases with it. Crucible no longer produces them
+        // (see cmake/CrucibleUnversion.cmake), but a runtime built by an older
         // one has libggml-cuda.so.0 and libggml-cuda.so.0.9.4 sitting beside
         // the module, and those would be left behind as several hundred
         // megabytes of orphan.
@@ -316,4 +316,4 @@ bool RuntimeRegistry::remove(BackendKind kind, std::string& error) {
     return true;
 }
 
-}  // namespace batbot
+}  // namespace crucible

@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 //
 // See markdown.hpp.
-#include "batbot/util/markdown.hpp"
+#include "crucible/util/markdown.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <utility>
 
-namespace batbot::markdown {
+namespace crucible::markdown {
 namespace {
 
 /// How many spaces a line begins with, counting a tab as four.
@@ -337,4 +337,4 @@ std::vector<Block> parse(std::string_view text) {
     return blocks;
 }
 
-}  // namespace batbot::markdown
+}  // namespace crucible::markdown

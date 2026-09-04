@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 //
 // See scroll.hpp.
-#include "batbot/ui/widgets/scroll.hpp"
+#include "crucible/ui/widgets/scroll.hpp"
 
 #include <utility>
 
 #include <ftxui/dom/node.hpp>
 
-namespace batbot::ui {
+namespace crucible::ui {
 
 ftxui::Element measure_height(ftxui::Element child, int* height) {
     // Derived from Node rather than FTXUI's own NodeDecorator, whose header is
@@ -38,4 +38,4 @@ ftxui::Element measure_height(ftxui::Element child, int* height) {
     return std::make_shared<Measure>(std::move(child), height);
 }
 
-}  // namespace batbot::ui
+}  // namespace crucible::ui

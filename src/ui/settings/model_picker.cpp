@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
-#include "batbot/ui/settings/model_picker.hpp"
+#include "crucible/ui/settings/model_picker.hpp"
 
-#include "batbot/ui/theme.hpp"
+#include "crucible/ui/theme.hpp"
 
 using namespace ftxui;  // NOLINT(google-build-using-namespace)
 
-namespace batbot::ui {
+namespace crucible::ui {
 
 void ModelPicker::open(std::vector<ModelFile> models, const std::string& current,
                        std::string title) {
@@ -94,7 +94,7 @@ Element ModelPicker::render(const std::string& models_dir) const {
                       text(" ↑↓ move   enter choose   esc cancel ") | color(theme::kMeta) | dim,
                   }))
         | size(WIDTH, LESS_THAN, 76) | size(HEIGHT, LESS_THAN, 22)
-        | color(Color::GrayLight) | bgcolor(Color::Black) | clear_under | center;
+        | color(theme::kPanelText) | bgcolor(theme::kPanel) | clear_under | center;
 }
 
-}  // namespace batbot::ui
+}  // namespace crucible::ui

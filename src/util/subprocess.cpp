@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //
 // fork/exec with a merged output pipe. See subprocess.hpp for why not popen.
-#include "batbot/util/subprocess.hpp"
+#include "crucible/util/subprocess.hpp"
 
 #include <cerrno>
 #include <cstdlib>
@@ -13,7 +13,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-namespace batbot::util {
+namespace crucible::util {
 namespace {
 
 /// A NULL-terminated char* array pointing into strings we keep alive.
@@ -227,4 +227,4 @@ bool on_path(const std::string& program) {
     return false;
 }
 
-}  // namespace batbot::util
+}  // namespace crucible::util

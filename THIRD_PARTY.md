@@ -1,10 +1,10 @@
 # Third-party licenses
 
-BatBot links these projects statically. Each is MIT-licensed, the same as
-BatBot itself, so a distributed `batbot` binary carries no obligations beyond
+Crucible links these projects statically. Each is MIT-licensed, the same as
+Crucible itself, so a distributed `crucible` binary carries no obligations beyond
 retaining the copyright notices below.
 
-They are fetched at build time by `cmake/BatBotDependencies.cmake`, pinned to
+They are fetched at build time by `cmake/CrucibleDependencies.cmake`, pinned to
 exact tags. No third-party source is vendored into this repository.
 
 | project | version | license | what it does here |
@@ -13,6 +13,6 @@ exact tags. No third-party source is vendored into this repository.
 | [FTXUI](https://github.com/ArthurSonzogni/FTXUI) | `v7.0.3` | MIT | draws the terminal interface |
 | [nlohmann/json](https://github.com/nlohmann/json) | `v3.12.0` | MIT | reads and writes the config file |
 
-**Models are not covered by any of this.** BatBot ships no model weights and
+**Models are not covered by any of this.** Crucible ships no model weights and
 downloads none. Whatever GGUF files you put in your models directory carry
 their own licenses, which are between you and whoever trained them.

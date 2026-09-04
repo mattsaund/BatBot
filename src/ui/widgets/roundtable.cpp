@@ -2,18 +2,18 @@
 //
 // The roundtable.
 //
-// BatBot on the left with a dot of his own, the experts in a column beside him
+// Crucible on the left with a dot of his own, the experts in a column beside him
 // with a dot each, and the fallback at the bottom of that column -- it is not
 // one of the nine, and the bottom of the list is where the thing that catches
 // what the others did not belongs.
 //
-// A line joins BatBot's dot to whichever seat the delegation chose, for as long
+// A line joins Crucible's dot to whichever seat the delegation chose, for as long
 // as work is flowing to it. The dots say what is happening rather than what is
 // in memory: a seat lights up when it is given the turn and goes dark when the
-// answer is finished, and BatBot's own dot is lit exactly when the delegator is
+// answer is finished, and Crucible's own dot is lit exactly when the delegator is
 // loaded and waiting -- which, with the delegator set to load on demand, is not
 // most of the time.
-#include "batbot/ui/widgets/roundtable.hpp"
+#include "crucible/ui/widgets/roundtable.hpp"
 
 #include <algorithm>
 #include <array>
@@ -21,11 +21,11 @@
 #include <string_view>
 #include <vector>
 
-#include "batbot/ui/theme.hpp"
+#include "crucible/ui/theme.hpp"
 
 using namespace ftxui;  // NOLINT(google-build-using-namespace) -- DOM builders read far better unqualified
 
-namespace batbot::ui {
+namespace crucible::ui {
 namespace {
 
 Color seat_color(SeatPhase phase) {
@@ -95,7 +95,7 @@ Element seat(Subject subject, const SeatState& state, std::size_t tick,
     // the label is centred in that room rather than left-aligned in it. A
     // six-column chip in an eleven-column box reads as three columns further
     // left than it is, which was enough to make the whole ring look adrift of
-    // the bat it is supposed to be arranged around.
+    // the crucible it is supposed to be arranged around.
     return chip | hcenter | size(WIDTH, EQUAL, 11);
 }
 
@@ -103,9 +103,9 @@ Element seat(Subject subject, const SeatState& state, std::size_t tick,
 constexpr int kLinkWidth  = 8;
 constexpr int kLinkColumn = 3;
 
-/// One row of the connector between BatBot's dot and the chosen seat's.
+/// One row of the connector between Crucible's dot and the chosen seat's.
 ///
-/// An elbow: out from BatBot, down or up the column, then in to the seat. Drawn
+/// An elbow: out from Crucible, down or up the column, then in to the seat. Drawn
 /// a row at a time because that is how the rest of the panel is built, and the
 /// three shapes it can take are the three cases below.
 std::string link_row(int row, int from, int to) {
@@ -147,7 +147,7 @@ std::string link_row(int row, int from, int to) {
 
 }  // namespace
 
-Element roundtable(const Snapshot& snapshot, const BatSprite& bat, std::size_t tick,
+Element roundtable(const Snapshot& snapshot, const CrucibleSprite& sprite, std::size_t tick,
                    bool compact) {
     // Every subject in table order, with the fallback last -- it is not one of
     // the nine, and the bottom of the list is where the thing that catches what
@@ -164,9 +164,9 @@ Element roundtable(const Snapshot& snapshot, const BatSprite& bat, std::size_t t
         return -1;
     };
 
-    // BatBot sits level with the middle of the list, so the connector reaches
+    // Crucible sits level with the middle of the list, so the connector reaches
     // as far up as it does down.
-    const int bat_row = (static_cast<int>(order.size()) - 1) / 2;
+    const int sprite_row = (static_cast<int>(order.size()) - 1) / 2;
     const int to_row  = snapshot.linked ? row_of(*snapshot.linked) : -1;
 
     // --- the seats, one per row ------------------------------------------
@@ -191,14 +191,14 @@ Element roundtable(const Snapshot& snapshot, const BatSprite& bat, std::size_t t
         }
 
         seat_rows.push_back(hbox({
-            text(link_row(static_cast<int>(i), bat_row, to_row))
+            text(link_row(static_cast<int>(i), sprite_row, to_row))
                 | color(to_row >= 0 ? theme::kSeatActive : theme::kMeta),
             text(seat_marker(state.phase, tick) + " ") | color(seat_color(state.phase)),
             std::move(name),
         }));
     }
 
-    // --- BatBot, and his own dot -------------------------------------------
+    // --- Crucible, and his own dot -------------------------------------------
     //
     // The dot is lit when the delegator is loaded and waiting, which is exactly
     // when it can route the next prompt. With the delegator set to load on
@@ -210,11 +210,11 @@ Element roundtable(const Snapshot& snapshot, const BatSprite& bat, std::size_t t
     const SeatPhase   phase = ready ? SeatPhase::Active : SeatPhase::Dormant;
     const std::string dot   = seat_marker(phase, tick);
 
-    Elements bat_lines;
-    for (const std::string& line : bat.render(snapshot.mood, tick, compact)) {
-        bat_lines.push_back(text(line) | color(mood_color(snapshot.mood)));
+    Elements sprite_lines;
+    for (const std::string& line : sprite.render(snapshot.mood, tick, compact)) {
+        sprite_lines.push_back(text(line) | color(mood_color(snapshot.mood)));
     }
-    Element sprite = vbox(std::move(bat_lines));
+    Element vessel = vbox(std::move(sprite_lines));
 
     // The label goes on the row directly above the dot, so the two read as one
     // thing rather than as a heading over the whole column.
@@ -225,10 +225,10 @@ Element roundtable(const Snapshot& snapshot, const BatSprite& bat, std::size_t t
     // starting somewhere out in the gap.
     Elements dot_column;
     for (int row = 0; row < static_cast<int>(order.size()); ++row) {
-        if (row == bat_row - 1) {
+        if (row == sprite_row - 1) {
             dot_column.push_back(
-                hbox({filler(), text("BatBot") | color(theme::kBat) | bold}));
-        } else if (row == bat_row) {
+                hbox({filler(), text("Crucible") | color(theme::kFlame) | bold}));
+        } else if (row == sprite_row) {
             dot_column.push_back(
                 hbox({filler(), text(dot) | color(seat_color(phase))}));
         } else {
@@ -237,7 +237,7 @@ Element roundtable(const Snapshot& snapshot, const BatSprite& bat, std::size_t t
     }
 
     Element table = hbox({
-        vbox({filler(), std::move(sprite), filler()}),
+        vbox({filler(), std::move(vessel), filler()}),
         text("  "),
         vbox(std::move(dot_column)) | size(WIDTH, EQUAL, 6),
         vbox(std::move(seat_rows)),
@@ -276,4 +276,4 @@ Element roundtable_strip(const Snapshot& snapshot, std::size_t tick) {
     return hbox(std::move(chips));
 }
 
-}  // namespace batbot::ui
+}  // namespace crucible::ui

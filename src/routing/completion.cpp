@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: MIT
 //
 // The command list and the matching. See completion.hpp for the why.
-#include "batbot/routing/completion.hpp"
+#include "crucible/routing/completion.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <optional>
 
-#include "batbot/routing/subject.hpp"
+#include "crucible/routing/subject.hpp"
 
-namespace batbot::ui {
+namespace crucible::ui {
 namespace {
 
 std::vector<CommandInfo> build_commands() {
@@ -106,4 +106,4 @@ std::string command_completion(std::string_view input, const CommandInfo& choice
     return completion;
 }
 
-}  // namespace batbot::ui
+}  // namespace crucible::ui

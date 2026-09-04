@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //
 // See web_search.hpp.
-#include "batbot/tools/web_search.hpp"
+#include "crucible/tools/web_search.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -10,9 +10,9 @@
 
 #include <nlohmann/json.hpp>
 
-#include "batbot/util/subprocess.hpp"
+#include "crucible/util/subprocess.hpp"
 
-namespace batbot::tools {
+namespace crucible::tools {
 namespace {
 
 using json = nlohmann::json;
@@ -303,7 +303,7 @@ std::vector<SearchResult> search(const std::string& query, const SearchSettings&
         // error page is handed to the JSON reader, which reports it as an empty
         // result -- "nothing found" rather than "the key is wrong".
         "--fail",
-        "--user-agent", "BatBot/0.1 (+local assistant)",
+        "--user-agent", "Crucible/0.1 (+local assistant)",
     };
     if (settings.provider == "brave") {
         if (settings.api_key.empty()) {
@@ -391,4 +391,4 @@ std::string tool_instructions() {
            "answer normally, citing what you used. Do not search for things you already know.";
 }
 
-}  // namespace batbot::tools
+}  // namespace crucible::tools

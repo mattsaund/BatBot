@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: MIT
 //
 // The backend table. See backend.hpp for why everything derives from it.
-#include "batbot/runtime/backend.hpp"
+#include "crucible/runtime/backend.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <string>
 
-#include "batbot/util/subprocess.hpp"
+#include "crucible/util/subprocess.hpp"
 
-namespace batbot {
+namespace crucible {
 namespace {
 
 // Order matters: this is the order the settings screen lists runtimes in, and
@@ -172,4 +172,4 @@ std::optional<BackendKind> backend_from_reg_name(std::string_view reg_name) {
     return std::nullopt;
 }
 
-}  // namespace batbot
+}  // namespace crucible

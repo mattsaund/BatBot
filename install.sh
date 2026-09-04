@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 #
-# BatBot installer.
+# Crucible installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/mattsaund/batbot/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/mattsaund/crucible/main/install.sh | bash
 #
-# Installs the build toolchain and the GPU SDKs, builds BatBot with loadable
+# Installs the build toolchain and the GPU SDKs, builds Crucible with loadable
 # runtimes, pre-builds the GPU runtime this machine wants, and puts the binary
 # on your PATH. Safe to re-run: it upgrades in place.
 
 set -euo pipefail
 
-REPO_URL="https://github.com/mattsaund/batbot.git"
-RAW_URL="https://raw.githubusercontent.com/mattsaund/batbot/main/install.sh"
+REPO_URL="https://github.com/mattsaund/crucible.git"
+RAW_URL="https://raw.githubusercontent.com/mattsaund/crucible/main/install.sh"
 
 BRANCH="main"
 # Which GPU SDK to install, so that runtime can be built from the settings
-# screen later. It is not "which runtime to install" -- BatBot installs none.
+# screen later. It is not "which runtime to install" -- Crucible installs none.
 RUNTIME="auto"   # auto | cpu | cuda | vulkan | metal
 
 # Which backends the settings screen will offer, which is not the same list on
@@ -28,7 +28,7 @@ else
     BACKEND_LIST="CPU, CUDA and Vulkan"
 fi
 
-# Must match BATBOT_LLAMA_TAG in cmake/BatBotDependencies.cmake: a runtime
+# Must match CRUCIBLE_LLAMA_TAG in cmake/CrucibleDependencies.cmake: a runtime
 # built from a different tag would load and then crash on the first tensor.
 LLAMA_TAG="b10678"
 PREFIX=""
@@ -408,7 +408,7 @@ STEP_TOTAL=5
 #
 # These are rough measurements of a cold install on a mid-range machine, not
 # guesses; they only have to be right about the shape. Part 5 dominates because
-# it compiles BatBot, and part 2 is second because installing a toolchain (and
+# it compiles Crucible, and part 2 is second because installing a toolchain (and
 # possibly a Vulkan SDK) is the only other thing here that touches the network
 # for minutes at a time.
 #
@@ -433,7 +433,7 @@ banner() {
 cat <<'ART'
 
    /\           /\
-  /  \_________/  \      BatBot
+  /  \_________/  \      Crucible
  |   ___________   |     a local roundtable of experts
  |  |           |  |
  |  |  o     o  |  |
@@ -463,7 +463,7 @@ usage: install.sh [options]
   -y, --yes        assume yes; never prompt
   --check          report what would be installed and which runtime is chosen
                    would be chosen, then exit without changing anything
-  --uninstall      remove an installed batbot
+  --uninstall      remove an installed crucible
   -h, --help       this message
 
 examples:
@@ -675,7 +675,7 @@ pkg_available() {
 # --------------------------------------------------------------------------
 # CMake
 #
-# BatBot needs CMake >= 3.24, which is newer than several current LTS releases
+# Crucible needs CMake >= 3.24, which is newer than several current LTS releases
 # ship. Rather than fail, fetch the official static build into a cache dir.
 # --------------------------------------------------------------------------
 cmake_version_ok() {
@@ -740,7 +740,7 @@ bootstrap_cmake() {
         *) die "no prebuilt CMake for $arch; please install cmake >= ${CMAKE_MIN_MAJOR}.${CMAKE_MIN_MINOR} yourself." ;;
     esac
 
-    cache="${XDG_CACHE_HOME:-$HOME/.cache}/batbot"
+    cache="${XDG_CACHE_HOME:-$HOME/.cache}/crucible"
     dir="$cache/cmake-${CMAKE_BOOTSTRAP_VERSION}-linux-${arch}"
     mkdir -p "$cache"
 
@@ -940,7 +940,7 @@ packages_available() {
 
 # Install what a runtime will need, before there is a runtime.
 #
-# BatBot installs no compute runtime at all -- you pick one from the settings
+# Crucible installs no compute runtime at all -- you pick one from the settings
 # screen, and it is compiled there. That build has to work without root,
 # because asking for a sudo password from inside a TUI is a bad idea and a
 # worse implementation. So this is the one moment where root is already at
@@ -1040,13 +1040,13 @@ locate_source() {
 
     # Running ./install.sh from inside a checkout builds that checkout, so you
     # can test local changes without pushing them first.
-    if [ -n "$here" ] && [ -f "$here/CMakeLists.txt" ] && grep -q 'project(batbot' "$here/CMakeLists.txt" 2>/dev/null; then
+    if [ -n "$here" ] && [ -f "$here/CMakeLists.txt" ] && grep -q 'project(crucible' "$here/CMakeLists.txt" 2>/dev/null; then
         SRC_DIR="$here"
         info "building the checkout at $SRC_DIR"
         return
     fi
 
-    SRC_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/batbot/src"
+    SRC_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/crucible/src"
     if [ -d "$SRC_DIR/.git" ]; then
         PHASE_LABEL="updating $SRC_DIR"
         spinner_start
@@ -1112,8 +1112,8 @@ show_log_tail() {
 # into the cache directory when there was none, because llama.cpp's shared
 # libraries were written under a versioned name with an unversioned symlink
 # beside them -- and exFAT and NTFS cannot hold a symlink, so the link step
-# failed a long way into the build. BatBot now builds those libraries without
-# the version suffix (see cmake/BatBotUnversion.cmake), so there is nothing
+# failed a long way into the build. Crucible now builds those libraries without
+# the version suffix (see cmake/CrucibleUnversion.cmake), so there is nothing
 # left to detect and the build tree can stay where the user put the checkout.
 choose_build_dir() {
     BUILD_DIR="$SRC_DIR/build"
@@ -1127,7 +1127,7 @@ run_configure() {
     "$CMAKE" -S "$SRC_DIR" -B "$BUILD_DIR" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-        -DBATBOT_BACKEND_DL=ON \
+        -DCRUCIBLE_BACKEND_DL=ON \
         > "$BUILD_LOG" 2>&1 || status=$?
     return 0
 }
@@ -1140,12 +1140,12 @@ build_and_install() {
     # The log is only interesting when something breaks, so its path is
     # announced on failure rather than upfront, and it is removed on success
     # instead of accumulating in /tmp on every upgrade.
-    BUILD_LOG="$(mktemp -t batbot-build-XXXXXX.log)"
+    BUILD_LOG="$(mktemp -t crucible-build-XXXXXX.log)"
 
     # --- configure ---------------------------------------------------------
     # The first configure clones llama.cpp and FTXUI, so it is slow and has no
     # percentage of its own.
-    # No GPU backend is compiled in. BatBot is built with ggml's loadable
+    # No GPU backend is compiled in. Crucible is built with ggml's loadable
     # backends, so CUDA and Vulkan are files the settings screen manages rather
     # than a decision frozen here -- which is the whole point of this install
     # producing something you can change your mind about later.
@@ -1237,13 +1237,13 @@ build_and_install() {
     spinner_start
     status=0
     if [ -w "$PREFIX" ] || [ "$(id -u)" -eq 0 ]; then
-        "$CMAKE" --install "$build_dir" --component batbot >> "$BUILD_LOG" 2>&1 || status=$?
+        "$CMAKE" --install "$build_dir" --component crucible >> "$BUILD_LOG" 2>&1 || status=$?
     else
         mkdir -p "$PREFIX/bin" 2>/dev/null || true
         if [ -w "$PREFIX/bin" ]; then
-            "$CMAKE" --install "$build_dir" --component batbot >> "$BUILD_LOG" 2>&1 || status=$?
+            "$CMAKE" --install "$build_dir" --component crucible >> "$BUILD_LOG" 2>&1 || status=$?
         else
-            $SUDO "$CMAKE" --install "$build_dir" --component batbot >> "$BUILD_LOG" 2>&1 || status=$?
+            $SUDO "$CMAKE" --install "$build_dir" --component crucible >> "$BUILD_LOG" 2>&1 || status=$?
         fi
     fi
     spinner_stop
@@ -1264,12 +1264,12 @@ build_and_install() {
 # --------------------------------------------------------------------------
 # Runtimes
 #
-# BatBot ships with the CPU runtime and builds GPU ones on demand, from the
+# Crucible ships with the CPU runtime and builds GPU ones on demand, from the
 # settings screen. Both of those need a llama.cpp checkout at the exact tag the
 # binary was built against -- and the build we just did already downloaded one.
 # Copying it here means adding a runtime later needs no network at all.
 # --------------------------------------------------------------------------
-DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/batbot"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/crucible"
 
 seed_runtime_source() {
     local build_dir="$1"
@@ -1304,23 +1304,23 @@ uninstall() {
     local found=0 p
     for p in "$PREFIX" /usr/local "$HOME/.local"; do
         [ -n "$p" ] || continue
-        if [ -f "$p/bin/batbot" ]; then
+        if [ -f "$p/bin/crucible" ]; then
             # Not step(): uninstall is a single action, not one of the five
             # phases of an install, so a "[1/5]" counter would be nonsense.
-            printf '\n%s==>%s %sRemoving %s/bin/batbot%s\n' \
+            printf '\n%s==>%s %sRemoving %s/bin/crucible%s\n' \
                 "$C_CYN" "$C_RESET" "$C_BOLD" "$p" "$C_RESET"
-            if [ -w "$p/bin" ]; then rm -f "$p/bin/batbot"; else $SUDO rm -f "$p/bin/batbot"; fi
+            if [ -w "$p/bin" ]; then rm -f "$p/bin/crucible"; else $SUDO rm -f "$p/bin/crucible"; fi
             found=1
         fi
     done
-    [ "$found" = 1 ] || info "no installed batbot found"
+    [ "$found" = 1 ] || info "no installed crucible found"
 
-    local src="${XDG_DATA_HOME:-$HOME/.local/share}/batbot/src"
+    local src="${XDG_DATA_HOME:-$HOME/.local/share}/crucible/src"
     if [ -d "$src" ] && confirm "Also remove the build checkout at $src?" n; then
         rm -rf "$src"
     fi
     info "your config and models were left alone:"
-    muted "${XDG_CONFIG_HOME:-$HOME/.config}/batbot"
+    muted "${XDG_CONFIG_HOME:-$HOME/.config}/crucible"
     exit 0
 }
 
@@ -1372,7 +1372,7 @@ run_check() {
         ok "$(cmake --version | head -1)"
     else
         info "cmake is missing or older than ${CMAKE_MIN_MAJOR}.${CMAKE_MIN_MINOR};"
-        info "CMake ${CMAKE_BOOTSTRAP_VERSION} would be downloaded to ${XDG_CACHE_HOME:-$HOME/.cache}/batbot"
+        info "CMake ${CMAKE_BOOTSTRAP_VERSION} would be downloaded to ${XDG_CACHE_HOME:-$HOME/.cache}/crucible"
     fi
 
     printf '\n%swould install:%s\n' "$C_BOLD" "$C_RESET"
@@ -1390,10 +1390,10 @@ run_check() {
     fi
 
     printf '\n%swould build and install:%s\n' "$C_BOLD" "$C_RESET"
-    info "binary     : $PREFIX/bin/batbot"
-    info "libraries  : $PREFIX/lib/batbot"
-    info "config     : ${XDG_CONFIG_HOME:-$HOME/.config}/batbot/config.json"
-    info "runtime dir: ${XDG_DATA_HOME:-$HOME/.local/share}/batbot/runtimes"
+    info "binary     : $PREFIX/bin/crucible"
+    info "libraries  : $PREFIX/lib/crucible"
+    info "config     : ${XDG_CONFIG_HOME:-$HOME/.config}/crucible/config.json"
+    info "runtime dir: ${XDG_DATA_HOME:-$HOME/.local/share}/crucible/runtimes"
     info "runtimes   : none -- you choose one from the settings screen"
     muted "Compute backends are loadable: $BACKEND_LIST can be added or"
     muted "removed at any time from the settings screen, without rebuilding."
@@ -1441,20 +1441,20 @@ main() {
     locate_source
     phase_end
 
-    step "Building BatBot"
+    step "Building Crucible"
     build_and_install
 
     # Create the models directory now, so the first run has somewhere obvious to
     # put GGUFs rather than reporting a path that does not exist yet.
-    local models_dir="${XDG_DATA_HOME:-$HOME/.local/share}/batbot/models"
+    local models_dir="${XDG_DATA_HOME:-$HOME/.local/share}/crucible/models"
     mkdir -p "$models_dir" 2>/dev/null || true
 
     progress_end
 
-    printf '\n%s%s  BatBot is installed.%s\n\n' "$C_GRN" "$C_BOLD" "$C_RESET"
-    printf '    binary   : %s\n' "$PREFIX/bin/batbot"
+    printf '\n%s%s  Crucible is installed.%s\n\n' "$C_GRN" "$C_BOLD" "$C_RESET"
+    printf '    binary   : %s\n' "$PREFIX/bin/crucible"
     printf '    models   : %s\n' "$models_dir"
-    printf '    config   : %s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/batbot/config.json"
+    printf '    config   : %s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/crucible/config.json"
     printf '    runtimes : %snone yet%s\n' "$C_YEL" "$C_RESET"
 
     if [ -n "$CUDA_NOTE" ]; then
@@ -1467,29 +1467,29 @@ main() {
 
     cat <<EOF
 
-  ${C_BOLD}Next:${C_RESET} BatBot installs with no compute runtime and no models.
+  ${C_BOLD}Next:${C_RESET} Crucible installs with no compute runtime and no models.
   Both are yours to choose.
 
-    1. run ${C_BOLD}batbot${C_RESET}, press ${C_BOLD}ctrl-e${C_RESET} and open ${C_BOLD}Runtimes${C_RESET}. Pick CPU, CUDA or
+    1. run ${C_BOLD}crucible${C_RESET}, press ${C_BOLD}ctrl-e${C_RESET} and open ${C_BOLD}Runtimes${C_RESET}. Pick CPU, CUDA or
        Vulkan and press enter -- it is compiled here, which takes a few
        minutes, and nothing can load a model until one is installed
     2. put your .gguf files in ${C_BOLD}$models_dir${C_RESET}
     3. back in settings, assign a model to the delegator and to each expert
        seat you want, then ${C_BOLD}ctrl-s${C_RESET} to save
-    4. cd into any project and run ${C_BOLD}batbot${C_RESET}
+    4. cd into any project and run ${C_BOLD}crucible${C_RESET}
 
   A good delegator is any small instruct model, around 1B parameters.
   Check how well one routes before committing to it:
 
-    ${C_BOLD}batbot-routebench <your-model.gguf>${C_RESET}
+    ${C_BOLD}crucible-routebench <your-model.gguf>${C_RESET}
 
-  To remove BatBot later:  ${C_BOLD}batbot --uninstall${C_RESET}
+  To remove Crucible later:  ${C_BOLD}crucible --uninstall${C_RESET}
 
 EOF
 }
 
-# Sourcing with BATBOT_INSTALL_LIB=1 loads the helpers without running anything,
+# Sourcing with CRUCIBLE_INSTALL_LIB=1 loads the helpers without running anything,
 # which is how tests/test_install.sh checks the version and backend logic.
-if [ -z "${BATBOT_INSTALL_LIB:-}" ]; then
+if [ -z "${CRUCIBLE_INSTALL_LIB:-}" ]; then
     main "$@"
 fi

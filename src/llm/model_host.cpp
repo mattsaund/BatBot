@@ -4,14 +4,14 @@
 //
 // Two responsibilities that must not be separated: redirecting llama.cpp's
 // logging away from stderr (it would draw straight over the TUI), and enforcing
-// the rule that makes BatBot's memory budget work -- the small delegator stays
+// the rule that makes Crucible's memory budget work -- the small delegator stays
 // resident, and at most one large expert is loaded at any moment.
 //
-// Every function here must be called from the same thread. BatBot runs it on
+// Every function here must be called from the same thread. Crucible runs it on
 // the engine worker so the UI never blocks behind a model load.
-#include "batbot/llm/model_host.hpp"
+#include "crucible/llm/model_host.hpp"
 
-#include "batbot/util/text.hpp"
+#include "crucible/util/text.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -26,14 +26,14 @@
 #include <ggml-backend.h>
 #include <llama.h>
 
-#include "batbot/config/gpu_policy.hpp"
-#include "batbot/llm/model_shape.hpp"
-#include "batbot/llm/sampling.hpp"
-#include "batbot/runtime/devices.hpp"
-#include "batbot/runtime/registry.hpp"
-#include "batbot/util/format.hpp"
+#include "crucible/config/gpu_policy.hpp"
+#include "crucible/llm/model_shape.hpp"
+#include "crucible/llm/sampling.hpp"
+#include "crucible/runtime/devices.hpp"
+#include "crucible/runtime/registry.hpp"
+#include "crucible/util/format.hpp"
 
-namespace batbot {
+namespace crucible {
 namespace {
 
 
@@ -108,7 +108,7 @@ llama_split_mode split_mode_from_string(const std::string& name) {
 /// free video memory: the allowance invented eight gigabytes of KV cache for a
 /// model whose cache is under one. See model_shape.hpp.
 ///
-/// `held` is what BatBot itself already has on the cards, and `holder` names
+/// `held` is what Crucible itself already has on the cards, and `holder` names
 /// it -- the delegator, almost always. It is not subtracted, because whatever
 /// is holding it is staying; it is named in the message, because on a machine
 /// where a large expert only just fits, that share is the number the user can
@@ -242,7 +242,7 @@ ModelHost::ModelHost(std::filesystem::path log_path) {
 
     // Bring the loadable runtimes in before llama.cpp initialises, so the
     // devices they provide are there from the first model load. A fresh
-    // install has none: BatBot ships no backends, and this does nothing until
+    // install has none: Crucible ships no backends, and this does nothing until
     // one has been built from the settings screen.
     RuntimeRegistry::load_all();
 
@@ -362,7 +362,7 @@ std::unique_ptr<LoadedModel> ModelHost::load(const ModelParams& requested,
     llama_model* model = llama_model_load_from_file(params.path.c_str(), model_params);
     if (model == nullptr) {
         error = "llama.cpp could not load " + params.path
-              + " (see the BatBot log for details)";
+              + " (see the Crucible log for details)";
         // The most likely reason, and the one the user can act on. With every
         // layer pinned to the GPU there is no partial offload to fall back on,
         // so a model that no longer fits fails outright rather than quietly
@@ -455,7 +455,7 @@ LoadedModel* ModelHost::acquire_expert(Subject subject,
 
     // A different seat, but the same weights loaded the same way.
     //
-    // Nothing needs to happen: the seats are BatBot's idea, not llama.cpp's,
+    // Nothing needs to happen: the seats are Crucible's idea, not llama.cpp's,
     // and the model behind two of them is one model. Reloading it would cost
     // half a minute for a large expert to arrive at the file already in memory
     // -- which is what happened on every route change for anyone who has not
@@ -485,4 +485,4 @@ void ModelHost::release_expert() {
     expert_params_.reset();
 }
 
-}  // namespace batbot
+}  // namespace crucible

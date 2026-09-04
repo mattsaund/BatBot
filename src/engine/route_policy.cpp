@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
-#include "batbot/engine/route_policy.hpp"
+#include "crucible/engine/route_policy.hpp"
 
 #include <algorithm>
 #include <string>
 #include <vector>
 
-namespace batbot {
+namespace crucible {
 
 RouteDecision apply_route_policy(const RouteDecision& proposed, const Config& config) {
     RouteDecision decision = proposed;
@@ -53,4 +53,4 @@ RouteDecision apply_route_policy(const RouteDecision& proposed, const Config& co
     return decision;
 }
 
-}  // namespace batbot
+}  // namespace crucible

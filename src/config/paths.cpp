@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: MIT
 //
-// Where BatBot keeps its files, following the XDG base directory spec.
+// Where Crucible keeps its files, following the XDG base directory spec.
 //
 // The spec's awkward rule is honoured here: an XDG variable set to a *relative*
 // path must be ignored rather than resolved, because resolving it against the
 // working directory would scatter config wherever the user happened to be.
-#include "batbot/config/paths.hpp"
+#include "crucible/config/paths.hpp"
 
 #include <cstdlib>
 
-namespace batbot::paths {
+namespace crucible::paths {
 namespace {
 
 std::filesystem::path home_dir() {
@@ -25,10 +25,10 @@ std::filesystem::path xdg_dir(const char* env_var, const char* fallback) {
     if (const char* value = std::getenv(env_var); value != nullptr && *value != '\0') {
         std::filesystem::path candidate(value);
         if (candidate.is_absolute()) {
-            return candidate / "batbot";
+            return candidate / "crucible";
         }
     }
-    return home_dir() / fallback / "batbot";
+    return home_dir() / fallback / "crucible";
 }
 
 }  // namespace
@@ -38,7 +38,7 @@ std::filesystem::path data_dir()    { return xdg_dir("XDG_DATA_HOME", ".local/sh
 std::filesystem::path config_file() { return config_dir() / "config.json"; }
 std::filesystem::path trust_file()  { return config_dir() / "trust.json"; }
 std::filesystem::path models_dir()  { return data_dir() / "models"; }
-std::filesystem::path log_file()    { return data_dir() / "batbot.log"; }
+std::filesystem::path log_file()    { return data_dir() / "crucible.log"; }
 
 std::filesystem::path runtimes_dir()      { return data_dir() / "runtimes"; }
 std::filesystem::path runtime_src_dir()   { return data_dir() / "runtime-src"; }
@@ -75,4 +75,4 @@ std::filesystem::path expand_user(std::string_view raw) {
     return ec ? path : resolved;
 }
 
-}  // namespace batbot::paths
+}  // namespace crucible::paths

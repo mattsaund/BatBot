@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
-#include "batbot/ui/settings/line_editor.hpp"
+#include "crucible/ui/settings/line_editor.hpp"
 
 #include <algorithm>
 
-#include "batbot/util/text.hpp"
+#include "crucible/util/text.hpp"
 
 using namespace ftxui;  // NOLINT(google-build-using-namespace)
 
-namespace batbot::ui {
+namespace crucible::ui {
 
 void LineEditor::begin(std::string initial) {
     active_ = true;
@@ -101,4 +101,4 @@ Element LineEditor::render() const {
     }) | xframe | ftxui::focus;
 }
 
-}  // namespace batbot::ui
+}  // namespace crucible::ui

@@ -2,7 +2,7 @@
 //
 // The two routers.
 //
-// KeywordRouter needs no model at all and keeps BatBot usable with nothing
+// KeywordRouter needs no model at all and keeps Crucible usable with nothing
 // installed. ModelRouter asks the delegator, and does it by scoring every
 // subject rather than by generating one: an invalid answer is not merely
 // unlikely, there is nowhere for it to come from.
@@ -10,7 +10,7 @@
 // The keyword table below matches whole words only. Substring matching sounds
 // harmless until "ion" fires inside "function" and sends every programming
 // question to Chemistry.
-#include "batbot/routing/router.hpp"
+#include "crucible/routing/router.hpp"
 
 #include <algorithm>
 #include <array>
@@ -18,7 +18,7 @@
 #include <chrono>
 #include <cmath>
 
-namespace batbot {
+namespace crucible {
 namespace {
 
 /// Keyword sets for the model-free router. Deliberately weighted towards terms
@@ -319,4 +319,4 @@ RouteDecision ModelRouter::route(const std::string& prompt, const CancelCallback
     return decision;
 }
 
-}  // namespace batbot
+}  // namespace crucible

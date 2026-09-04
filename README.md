@@ -1,11 +1,11 @@
 **A CLI Local LLM delegator.**
 
-BatBot is a full CLI tool that works with 10 specially trained local LLM's called `Experts` and 1
+Crucible is a full CLI tool that works with 10 specially trained local LLM's called `Experts` and 1
 delegator model to point your prompt to the correct expert agent.
 
-`cd` into a project, then type `batbot`. BatBot is the delegator model. It
+`cd` into a project, then type `crucible`. Crucible is the delegator model. It
 decides what expert model loads and computes your prompt. Load in specially trained models
-in Physics, Mathematics, Programming, etc and BatBot will choose the best model for the prompt.
+in Physics, Mathematics, Programming, etc and Crucible will choose the best model for the prompt.
 
 ---
 
@@ -31,28 +31,28 @@ have an AI setup that performs pretty much as well as a 300 billion parameter mo
 **One command**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mattsaund/batbot/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/mattsaund/crucible/main/install.sh | bash
 ```
 
-This will install BatBot and its dependencies. Re-running the installer upgrades in place.
+This will install Crucible and its dependencies. Re-running the installer upgrades in place.
 
 ## Uninstalling
 
 **Uninstalling**
 
 ```sh
-batbot --uninstall
+crucible --uninstall
 ```
 
 If the binary is already gone, the installer can clean up instead:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mattsaund/batbot/main/install.sh | bash -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/mattsaund/crucible/main/install.sh | bash -s -- --uninstall
 ```
 
 ### Installer options
 
-You do not need to install runtimes before installing BatBot. The program has a built in runtime manager.
+You do not need to install runtimes before installing Crucible. The program has a built in runtime manager.
 
 If you want to install runtimes with the initial install, pass options after `--`:
 
@@ -68,15 +68,15 @@ curl -fsSL .../install.sh | bash -s -- --gpu vulkan --prefix ~/.local
 | `--check` | report what would happen, change nothing, never ask for sudo |
 | `--no-deps` | do not install system packages |
 | `-y`, `--yes` | never prompt |
-| `--uninstall` | remove BatBot (leaves your config and models) |
+| `--uninstall` | remove Crucible (leaves your config and models) |
 
 ---
 
 ## Runtimes
 
-BatBot supports `CUDA`, `Vulkan`, `Metal` and `CPU` runtimes.
+Crucible supports `CUDA`, `Vulkan`, `Metal` and `CPU` runtimes.
 
-They are stored in `~/.local/share/batbot/runtimes`.
+They are stored in `~/.local/share/crucible/runtimes`.
 
 ## Multiple GPUs
 
@@ -106,11 +106,11 @@ Everything else — llama.cpp, FTXUI, nlohmann/json — is fetched and pinned
 automatically.
 
 ```sh
-git clone https://github.com/mattsaund/batbot.git
-cd batbot
+git clone https://github.com/mattsaund/crucible.git
+cd crucible
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
-./build/bin/batbot
+./build/bin/crucible
 ```
 
 This builds the binary and no compute backend at all. Every runtime, CPU
@@ -118,43 +118,43 @@ included, is added afterwards from the settings screen — see
 [Runtimes](#runtimes).
 
 ```sh
-sudo cmake --install build --component batbot
+sudo cmake --install build --component crucible
 # or, for a user prefix:
-cmake --install build --component batbot --prefix ~/.local
+cmake --install build --component crucible --prefix ~/.local
 ```
 
-The install is `bin/batbot` plus `lib/batbot/` holding llama.cpp's three shared
+The install is `bin/crucible` plus `lib/crucible/` holding llama.cpp's three shared
 libraries. The binary's RPATH is relative, so it still works from anywhere on
 `PATH`.
 
-**Pass `--component batbot`.** llama.cpp and ggml carry their own install
+**Pass `--component crucible`.** llama.cpp and ggml carry their own install
 rules, written for people installing llama.cpp as a library: a plain
 `cmake --install` would also drop `libllama.so`, `libggml*.so`,
-`ggml-config.cmake` and `ggml.pc` loose into `<prefix>/lib`. BatBot does not
+`ggml-config.cmake` and `ggml.pc` loose into `<prefix>/lib`. Crucible does not
 use those copies — and on a system-wide install one of them could shadow
-another llama.cpp. The component installs what BatBot actually needs, all of
-it under `lib/batbot/`, which is also what makes `batbot --uninstall` able to
+another llama.cpp. The component installs what Crucible actually needs, all of
+it under `lib/crucible/`, which is also what makes `crucible --uninstall` able to
 remove everything it put down.
 
 ## Build options
 
 | option | default | what it does |
 |---|---|---|
-| `BATBOT_BACKEND_DL` | `ON` | loadable GPU runtimes (see the note below) |
-| `BATBOT_NATIVE` | `ON` | tune for this machine; only consulted by monolithic builds, since a loadable backend cannot be built for one CPU |
-| `BATBOT_BUILD_TESTS` | `ON` | build the unit tests |
-| `BATBOT_BUILD_TOOLS` | `ON` | build `batbot-routebench` |
-| `BATBOT_WARNINGS` | `ON` | strict warnings on BatBot's own sources |
-| `BATBOT_CUDA` | `OFF` | monolithic builds only: compile CUDA in |
-| `BATBOT_VULKAN` | `OFF` | monolithic builds only: compile Vulkan in |
+| `CRUCIBLE_BACKEND_DL` | `ON` | loadable GPU runtimes (see the note below) |
+| `CRUCIBLE_NATIVE` | `ON` | tune for this machine; only consulted by monolithic builds, since a loadable backend cannot be built for one CPU |
+| `CRUCIBLE_BUILD_TESTS` | `ON` | build the unit tests |
+| `CRUCIBLE_BUILD_TOOLS` | `ON` | build `crucible-routebench` |
+| `CRUCIBLE_WARNINGS` | `ON` | strict warnings on Crucible's own sources |
+| `CRUCIBLE_CUDA` | `OFF` | monolithic builds only: compile CUDA in |
+| `CRUCIBLE_VULKAN` | `OFF` | monolithic builds only: compile Vulkan in |
 
 ---
 
 ## Setup
 
-As of right now, BatBot is BYO models. There are plans in the future to train specifically trained experts to open source.
+As of right now, Crucible is BYO models. There are plans in the future to train specifically trained experts to open source.
 
-You can either store the models in the default model directory or point BatBot to your own model directory
+You can either store the models in the default model directory or point Crucible to your own model directory
 
 ```
 ╭ Models directory ──────────────────────────────────────────────╮
@@ -178,10 +178,10 @@ each expert seat and for the delegator from whatever is in it, and tune sampling
 
 ```
 ╭ Settings ──────────────────────────────────────────────────────╮
-│  ~/.local/share/batbot/models                  3 models found  │
+│  ~/.local/share/crucible/models                  3 models found  │
 ├────────────────────────────────────────────────────────────────┤
 │  MODELS                                                        │
-│   Models directory    ~/.local/share/batbot/models             │
+│   Models directory    ~/.local/share/crucible/models             │
 │                                                                │
 │  DELEGATOR                                                     │
 │   Router model        LFM2-1.2B-Q8_0.gguf                      │
@@ -196,11 +196,11 @@ each expert seat and for the delegator from whatever is in it, and tune sampling
 ```
 **Editing the config file**
 
-`~/.config/batbot/config.json`:
+`~/.config/crucible/config.json`:
 
 ```jsonc
 {
-  "models_dir": "~/.local/share/batbot/models",
+  "models_dir": "~/.local/share/crucible/models",
   "router":   { "model": "LFM2-1.2B-Q8_0.gguf" },
   "defaults": { "n_ctx": 8192, "n_gpu_layers": -1, "temperature": 0.7 },
   "experts": {
@@ -268,11 +268,11 @@ the rest of the best match in grey after the cursor. `Tab` takes it:
 
 ### Resuming a conversation
 
-BatBot keeps history per project — the directory you started it in. `/resume`
+Crucible keeps history per project — the directory you started it in. `/resume`
 lists what it has for *this* project and nothing else:
 
 ```
- resume · batbot
+ resume · crucible
  ▸ 2 hours ago    why does the JIT swap cost so little?     6 turns   4.1k tok
    yesterday      explain the grammar-constrained sampler   3 turns   2.2k tok
    12 Aug         first pass at the router prompt          14 turns  18.3k tok
@@ -288,7 +288,7 @@ A session is written after each completed turn, so a crash costs at most the
 turn in flight; a reply still streaming is never saved, because it is not
 something to resume into. `/new` starts a fresh one without discarding the old.
 
-History lives in `~/.local/share/batbot/projects/<name>-<hash>/`. The hash is
+History lives in `~/.local/share/crucible/projects/<name>-<hash>/`. The hash is
 what keeps two different checkouts called `src` apart.
 
 ---
@@ -300,7 +300,7 @@ src/
 ├── app/            things that happen instead of the TUI
 │   ├── cli.cpp         argument parsing, banner, usage
 │   ├── trust_gate.cpp  the folder-trust prompt
-│   └── uninstall.cpp   batbot --uninstall
+│   └── uninstall.cpp   crucible --uninstall
 ├── config/         what lives on disk
 │   ├── config.cpp      the Config type's own behaviour
 │   ├── config_io.cpp   reading and writing config.json
@@ -345,7 +345,7 @@ src/
 │   ├── commands.cpp    slash commands
 │   ├── transcript.cpp  drawing the conversation, markdown and all
 │   ├── session_picker.cpp  the /resume list
-│   ├── widgets/        bat sprite, roundtable
+│   ├── widgets/        crucible sprite, roundtable
 │   └── settings/       view, runtimes panel, GPU priority panel,
 │                       model manager, directory browser, model picker,
 │                       line editor
@@ -364,7 +364,7 @@ src/
 - [ ] **Agentic tools** — file read/edit, shell, web search, with a permission model
 - [ ] Prefix caching so an unchanged conversation is not re-ingested every turn
 - [ ] Predictive preloading of the likely next expert
-- [ ] Fine-tuned 1B BatBot router to replace the off-the-shelf one
+- [ ] Fine-tuned 1B Crucible router to replace the off-the-shelf one
 - [ ] Curated subject experts, offered as a download you opt into — never bundled
 
 ---
@@ -380,11 +380,11 @@ I am open to AI and agentic coding, but the code written needs to follow specifi
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Every dependency BatBot links is MIT too, and
+MIT — see [LICENSE](LICENSE). Every dependency Crucible links is MIT too, and
 [THIRD_PARTY.md](THIRD_PARTY.md) lists them with their pinned versions. Nothing
 is vendored into this repository; the build fetches each at a fixed tag.
 
-Model weights are covered by none of it. BatBot ships no models and downloads
+Model weights are covered by none of it. Crucible ships no models and downloads
 none — whatever GGUFs you put in your models directory carry their own licenses,
 which are between you and whoever trained them.
 

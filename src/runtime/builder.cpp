@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //
 // Compiling a ggml backend on demand. See builder.hpp for the shape of it.
-#include "batbot/runtime/builder.hpp"
+#include "crucible/runtime/builder.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -13,11 +13,11 @@
 
 #include <nlohmann/json.hpp>
 
-#include "batbot/config/paths.hpp"
-#include "batbot/runtime/registry.hpp"
-#include "batbot/util/format.hpp"
+#include "crucible/config/paths.hpp"
+#include "crucible/runtime/registry.hpp"
+#include "crucible/util/format.hpp"
 
-namespace batbot {
+namespace crucible {
 namespace {
 
 using json = nlohmann::json;
@@ -26,8 +26,8 @@ using json = nlohmann::json;
 /// different tag would load and then crash on the first tensor: ggml's
 /// internal structures are not stable across releases. CMake passes the tag
 /// in so there is exactly one place to change it.
-#ifndef BATBOT_LLAMA_TAG
-#define BATBOT_LLAMA_TAG "unknown"
+#ifndef CRUCIBLE_LLAMA_TAG
+#define CRUCIBLE_LLAMA_TAG "unknown"
 #endif
 
 /// Keep the log bounded. A CUDA build emits tens of thousands of lines, and
@@ -177,9 +177,9 @@ bool is_module_file(const std::string& filename) {
 /// Write the CMake fragment that stops llama.cpp writing versioned shared
 /// libraries, and return its path.
 ///
-/// BatBot's own build does this by calling batbot_unversion_directory() after
+/// Crucible's own build does this by calling crucible_unversion_directory() after
 /// FetchContent has added llama.cpp. This build cannot: it runs cmake on
-/// llama.cpp directly, with no BatBot CMakeLists in the picture. So the
+/// llama.cpp directly, with no Crucible CMakeLists in the picture. So the
 /// fragment goes in through CMAKE_PROJECT_INCLUDE, which cmake reads at the
 /// end of each project() call -- before any target exists, hence the deferred
 /// call, which runs once the whole tree has been processed.
@@ -191,15 +191,15 @@ bool is_module_file(const std::string& filename) {
 /// Why at all: llama.cpp writes libggml-cuda.so.0.9.4 with libggml-cuda.so as
 /// a symlink beside it, and neither exFAT nor NTFS can hold a symlink. That
 /// makes the build fail outright on a machine whose home directory is on one.
-/// See cmake/BatBotUnversion.cmake.
+/// See cmake/CrucibleUnversion.cmake.
 std::filesystem::path write_unversion_hook(const std::filesystem::path& build) {
-    const std::filesystem::path hook = build / "batbot-unversion.cmake";
+    const std::filesystem::path hook = build / "crucible-unversion.cmake";
     std::ofstream out(hook);
     if (!out) {
         return {};
     }
-    out << R"cmake(# Written by BatBot's runtime builder. See src/runtime/builder.cpp.
-function(batbot_unversion_directory dir)
+    out << R"cmake(# Written by Crucible's runtime builder. See src/runtime/builder.cpp.
+function(crucible_unversion_directory dir)
     get_property(_targets DIRECTORY "${dir}" PROPERTY BUILDSYSTEM_TARGETS)
     foreach(_target IN LISTS _targets)
         get_target_property(_type ${_target} TYPE)
@@ -212,16 +212,16 @@ function(batbot_unversion_directory dir)
     endforeach()
     get_property(_subdirs DIRECTORY "${dir}" PROPERTY SUBDIRECTORIES)
     foreach(_subdir IN LISTS _subdirs)
-        batbot_unversion_directory("${_subdir}")
+        crucible_unversion_directory("${_subdir}")
     endforeach()
 endfunction()
 
 # This file is included once per project() call; only the first one arranges
 # the sweep, and it is deferred so that every target exists by the time it runs.
-if(NOT DEFINED BATBOT_UNVERSION_DEFERRED)
-    set(BATBOT_UNVERSION_DEFERRED ON)
+if(NOT DEFINED CRUCIBLE_UNVERSION_DEFERRED)
+    set(CRUCIBLE_UNVERSION_DEFERRED ON)
     cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}"
-                   CALL batbot_unversion_directory "${CMAKE_SOURCE_DIR}")
+                   CALL crucible_unversion_directory "${CMAKE_SOURCE_DIR}")
 endif()
 )cmake";
     return out ? hook : std::filesystem::path{};
@@ -461,7 +461,7 @@ bool RuntimeBuilder::ensure_source(std::string& error) {
         return true;
     }
 
-    set_phase(BuildProgress::Phase::FetchingSource, "cloning llama.cpp " BATBOT_LLAMA_TAG);
+    set_phase(BuildProgress::Phase::FetchingSource, "cloning llama.cpp " CRUCIBLE_LLAMA_TAG);
     std::filesystem::create_directories(src.parent_path(), ec);
     std::filesystem::remove_all(src, ec);
 
@@ -470,11 +470,11 @@ bool RuntimeBuilder::ensure_source(std::string& error) {
         return false;
     }
 
-    const bool ok = run_command({"git", "clone", "--depth", "1", "--branch", BATBOT_LLAMA_TAG,
+    const bool ok = run_command({"git", "clone", "--depth", "1", "--branch", CRUCIBLE_LLAMA_TAG,
                                  "https://github.com/ggml-org/llama.cpp.git", src.string()},
                                 {}, BuildProgress::Phase::FetchingSource, false);
     if (!ok) {
-        error = "could not clone llama.cpp " BATBOT_LLAMA_TAG;
+        error = "could not clone llama.cpp " CRUCIBLE_LLAMA_TAG;
         return false;
     }
     return true;
@@ -678,7 +678,7 @@ void RuntimeBuilder::run(BackendKind kind) {
         // Reinstalling a runtime that is already loaded is an ordinary thing
         // to do -- it is how you rebuild one after a driver update -- and by
         // then the module is dlopen'd and mmap'd into this process.
-        // Overwriting those bytes underneath the mapping crashes BatBot on the
+        // Overwriting those bytes underneath the mapping crashes Crucible on the
         // next call into the backend. rename() swaps the directory entry
         // instead: the running process keeps the old inode, and the next start
         // picks up the new one.
@@ -719,7 +719,7 @@ void RuntimeBuilder::run(BackendKind kind) {
     const std::string built_at = iso_date_now();
     for (const BackendKind produced : produces) {
         manifest[std::string(backend_info(produced).id)] = {
-            {"llama_tag", BATBOT_LLAMA_TAG},
+            {"llama_tag", CRUCIBLE_LLAMA_TAG},
             {"built_at", built_at},
         };
     }
@@ -729,7 +729,7 @@ void RuntimeBuilder::run(BackendKind kind) {
 
     // Register the new modules with ggml straight away.
     //
-    // Without this the build finishes and nothing changes until BatBot is
+    // Without this the build finishes and nothing changes until Crucible is
     // restarted, which is confusing enough that it reads as the install having
     // silently failed. The CPU backend goes first: llama.cpp looks for it by
     // type and a GPU registered ahead of it does not stand in.
@@ -749,4 +749,4 @@ void RuntimeBuilder::run(BackendKind kind) {
     running_.store(false);
 }
 
-}  // namespace batbot
+}  // namespace crucible
