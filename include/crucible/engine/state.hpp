@@ -33,7 +33,7 @@ enum class Mood {
 
 std::string_view mood_label(Mood mood);
 
-/// A seat at the roundtable, as drawn.
+/// One expert, as drawn.
 enum class SeatPhase {
     Unconfigured,  ///< no GGUF assigned to this subject; drawn hollow
     Missing,       ///< a model is assigned but the file is not there
@@ -48,7 +48,7 @@ struct SeatState {
 };
 
 /// One exchange. Kept as a unit so the transcript can show which expert
-/// answered each turn, which is most of the point of the roundtable.
+/// answered each turn, which is most of the point of the panel.
 struct Turn {
     std::string            prompt;
     std::string            reply;
@@ -95,7 +95,7 @@ struct Snapshot {
     std::optional<ExpertId>             resident;
 
     /// The expert this turn is flowing to, from the moment the delegator names
-    /// it until the answer is finished. What the roundtable draws the line to,
+    /// it until the answer is finished. What the expert panel draws the line to,
     /// and what makes a seat's dot light up -- residency is a different
     /// question, and the status bar is where that is answered.
     std::optional<ExpertId>             linked;

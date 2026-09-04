@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cctype>
 #include <ctime>
+
+#include "crucible/util/platform.hpp"
 #include <fstream>
 #include <set>
 #include <system_error>
@@ -17,8 +19,7 @@ using json = nlohmann::json;
 
 std::string timestamp_id() {
     const std::time_t now = std::time(nullptr);
-    std::tm parts{};
-    ::localtime_r(&now, &parts);
+    std::tm parts = util::local_time(now);
     char buffer[32] = {};
     std::strftime(buffer, sizeof(buffer), "%Y%m%d-%H%M%S", &parts);
     return buffer;

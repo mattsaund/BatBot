@@ -51,13 +51,26 @@ public:
     /// Returns immediately; call wait() afterwards to reap it.
     void terminate();
 
-    bool running() const { return pid_ > 0; }
+    bool running() const;
 
 private:
     void close_pipe();
 
+#if defined(_WIN32)
+    // HANDLEs, held as void* so <windows.h> stays out of a header this widely
+    // included -- it defines `min`, `max` and `ERROR` as macros, and every
+    // translation unit downstream would pay for that.
+    //
+    // `job_` is the equivalent of the POSIX process group: a build is
+    // cmake -> ninja -> a dozen compilers, and terminating only the first would
+    // leave the rest running.
+    void* process_ = nullptr;
+    void* job_     = nullptr;
+    void* read_    = nullptr;
+#else
     int  pid_    = -1;
     int  fd_     = -1;
+#endif
     int  status_ = -1;
     bool reaped_ = false;
     std::string buffer_;   ///< holds a partial line between read_line() calls

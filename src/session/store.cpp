@@ -7,6 +7,8 @@
 #include <chrono>
 #include <cstdio>
 #include <ctime>
+
+#include "crucible/util/platform.hpp"
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -56,8 +58,7 @@ std::string project_key(const std::filesystem::path& root) {
 
 std::string timestamp_id() {
     const std::time_t now = std::time(nullptr);
-    std::tm parts{};
-    ::localtime_r(&now, &parts);
+    std::tm parts = util::local_time(now);
     char buffer[32] = {};
     std::strftime(buffer, sizeof(buffer), "%Y%m%d-%H%M%S", &parts);
     return buffer;
@@ -145,7 +146,7 @@ Turn turn_from_json(const json& entry) {
         // The id is stored verbatim and read back verbatim, with no check
         // that it still names a seat. A conversation with an expert that has
         // since been ejected is history, and history is what it was, not what
-        // the roundtable happens to hold today; the transcript shows the id
+        // the expert list happens to hold today; the transcript shows the id
         // when the name is gone.
         decision.expert = route->value("expert", std::string{});
         decision.confidence = route->value("confidence", 0.0F);

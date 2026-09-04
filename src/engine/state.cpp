@@ -110,7 +110,7 @@ void AppState::configure_seats(const Config& config) {
     seats_  = std::move(seats);
 
     // A seat that was lit may not exist any more. Dropping the reference is
-    // what stops the roundtable drawing a connector to a row that is no longer
+    // what stops the expert panel drawing a connector to a row that is no longer
     // there after an /ejectexpert.
     if (resident_ && !seat_index(*resident_)) {
         resident_.reset();

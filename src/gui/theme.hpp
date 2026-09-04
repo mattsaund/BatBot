@@ -85,7 +85,7 @@ void draw_flame(ImDrawList* draw, ImVec2 centre, float radius, float alpha = 1.0
 /// idea rather than just the mark.
 void draw_crucible(ImDrawList* draw, ImVec2 centre, float radius);
 
-/// A status diamond, the same vocabulary the terminal roundtable uses: filled
+/// A status diamond, the same vocabulary the terminal panel uses: filled
 /// means working, hollow means ready, faint means nothing assigned. Static --
 /// what moves is the percentage beside a loading seat, not the mark.
 enum class Dot { Active, Loading, Ready, Missing, Empty };

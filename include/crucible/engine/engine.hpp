@@ -4,7 +4,7 @@
 // Everything llama.cpp touches lives here. The UI hands the engine a prompt and
 // gets told, via AppState plus a wake callback, how the delegation is going.
 // The engine blocks for seconds at a time loading a 30B expert; keeping it off
-// the UI thread is what lets the roundtable keep animating while that happens.
+// the UI thread is what lets the expert panel keep animating while that happens.
 #pragma once
 
 #include <atomic>

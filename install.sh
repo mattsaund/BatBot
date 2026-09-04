@@ -438,14 +438,17 @@ die()   { block_clear; show_cursor; printf '\n%serror:%s %s\n' "$C_RED" "$C_RESE
 banner() {
 cat <<'ART'
 
-   /\           /\
-  /  \_________/  \      Crucible
- |   ___________   |     a local roundtable of experts
- |  |           |  |
- |  |  o     o  |  |
- |  |    \_/    |  |
- |  |___________|  |
- |_________________|
+         ^
+        (^)
+       (/^\)
+   ,-----------,     Crucible
+   \ ~~~~~~~~~ /     a local forge: experts on demand, projects that cook
+    \         /
+     \_______/
+      /|   |\
+     / |___| \
+    /         \
+   '-----------'
 
 ART
 }
@@ -474,6 +477,9 @@ usage: install.sh [options]
                    would be chosen, then exit without changing anything
   --uninstall      remove an installed crucible
   -h, --help       this message
+
+  Windows has its own one-command installer:
+    irm https://raw.githubusercontent.com/mattsaund/crucible/main/install.ps1 | iex
 
 examples:
   curl -fsSL $RAW_URL | bash

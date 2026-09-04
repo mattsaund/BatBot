@@ -202,7 +202,7 @@ struct ToolsConfig {
 /// Purely cosmetic knobs.
 struct UiConfig {
     int  animation_ms   = 90;    ///< frame interval while Crucible is busy
-    bool show_roundtable = true; ///< draw the ring (toggle at runtime with Ctrl-T)
+    bool show_experts = true; ///< draw the ring (toggle at runtime with Ctrl-T)
     bool unicode        = true;  ///< false falls back to a pure-ASCII crucible
 
     /// Keep a reasoning model's working on screen after it has answered.
@@ -228,7 +228,7 @@ struct Config {
     ///
     /// Defaulted rather than left empty so that every path which builds a
     /// Config without reading a file -- the tests, the parse-failure fallback,
-    /// a first run -- gets a working roundtable rather than a program with
+    /// a first run -- gets a working expert list rather than a program with
     /// nowhere to route to.
     Roster roster = Roster::defaults();
 

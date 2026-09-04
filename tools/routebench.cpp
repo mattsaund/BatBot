@@ -79,7 +79,7 @@ int main(int argc, char** argv) {
     // one of them. This measures the delegator's job and nothing else.
     // Measured against the shipped roster, which is what the benchmark cases
     // are written for. A user's own config may have added seats or taken some
-    // away; scoring against that would be measuring their roundtable, not the
+    // away; scoring against that would be measuring their roster, not the
     // delegator.
     const auto roster = std::make_shared<const Roster>(Roster::defaults());
 

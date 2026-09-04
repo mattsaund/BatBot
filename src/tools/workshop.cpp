@@ -13,6 +13,7 @@
 
 #include "crucible/util/diff.hpp"
 #include "crucible/util/format.hpp"
+#include "crucible/util/platform.hpp"
 #include "crucible/util/subprocess.hpp"
 
 namespace crucible::tools {
@@ -440,7 +441,7 @@ ToolResult do_run(const ToolCall& call, const WorkshopSettings& settings,
     // containment -- a shell can cd out of it, and one has, in testing. The
     // file verbs above are confined; this is not, which is why it is a separate
     // switch and why the interface says so. See workshop.hpp.
-    if (!child.start({"/bin/sh", "-c", call.argument}, settings.root, {}, error)) {
+    if (!child.start(util::shell_command(call.argument), settings.root, {}, error)) {
         return failure("could not run: " + error);
     }
 

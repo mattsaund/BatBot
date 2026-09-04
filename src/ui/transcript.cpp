@@ -32,7 +32,7 @@ Element App::render_turn(const Turn& turn) const {
         paragraph(turn.prompt) | flex,
     }));
 
-    // The route line is the whole point of the roundtable made textual: which
+    // The route line is the whole point of the expert panel made textual: which
     // expert took this turn, how sure Crucible was, and what the swap cost.
     if (turn.route) {
         const RouteDecision& route = *turn.route;

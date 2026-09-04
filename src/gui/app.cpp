@@ -409,11 +409,11 @@ void App::draw_sidebar(const Snapshot& snapshot) {
         }
     }
 
-    // --- the roundtable ---------------------------------------------------
-    section("ROUNDTABLE");
+    // --- the experts ---------------------------------------------------
+    section("EXPERTS");
     const Roster& roster = snapshot.roster ? *snapshot.roster : config_.roster;
     if (roster.experts().empty()) {
-        wrapped(theme::kTextFaint, "No experts yet. Add one in Settings.");
+        wrapped(theme::kTextFaint, "None yet.");
     }
     for (std::size_t i = 0; i < roster.size(); ++i) {
         const Expert&    expert = roster.at(i);
@@ -446,6 +446,12 @@ void App::draw_sidebar(const Snapshot& snapshot) {
         }
     }
 
+    ImGui::Dummy(ImVec2(0, em(0.2F)));
+    if (ImGui::Button("Manage experts", ImVec2(-FLT_MIN, 0))) {
+        view_          = View::Settings;
+        settings_page_ = SettingsPage::Experts;
+    }
+
     // --- navigation --------------------------------------------------------
     section("VIEW");
     const auto nav = [this](const char* label, View view) {
@@ -453,9 +459,12 @@ void App::draw_sidebar(const Snapshot& snapshot) {
             view_ = view;
         }
     };
+    // No "Experts" entry: the section above is called that now, and managing
+    // them lives in Settings, where the rest of the configuration is. Two
+    // things called Experts in one sidebar is a question the user should not
+    // have to answer.
     nav("Chat",     View::Chat);
     nav("Cook",     View::Cook);
-    nav("Experts",  View::Experts);
     nav("History",  View::History);
     nav("Settings", View::Settings);
 
@@ -731,7 +740,7 @@ void App::draw_expert_list() {
 
     if (config_.roster.experts().empty()) {
         wrapped(theme::kTextDim,
-                "The roundtable is empty. Nothing can answer until there is an expert "
+                "The expert list is empty. Nothing can answer until there is an expert "
                 "on it.");
     }
 
@@ -799,7 +808,7 @@ void App::draw_expert_list() {
                 config.routing.default_expert.clear();
             }
         });
-        say(name + " has left the roundtable");
+        say(name + " has left the experts");
     }
 }
 
@@ -1248,7 +1257,7 @@ void App::draw_new_expert_modal() {
             edited.experts[id] = ModelParams{};
             update_config([&edited](Config& config) { config = edited; });
             engine_->write_examples(id);
-            say(expert.name + " has joined the roundtable");
+            say(expert.name + " has joined the experts");
             new_expert_name_.clear();
             new_expert_blurb_.clear();
             expert_error_.clear();
@@ -1422,7 +1431,6 @@ void App::draw() {
         switch (view_) {
             case View::Chat:     draw_chat(snapshot); break;
             case View::Cook:     draw_cook(snapshot); break;
-            case View::Experts:  draw_expert_list();  break;
             case View::History:  draw_history();      break;
             case View::Settings: draw_settings();     break;
         }

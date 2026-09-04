@@ -245,7 +245,7 @@ bool save_config(const Config& config, const std::filesystem::path& file) {
         }},
         {"ui", json{
             {"animation_ms",    config.ui.animation_ms},
-            {"show_roundtable", config.ui.show_roundtable},
+            {"show_experts", config.ui.show_experts},
             {"show_reasoning", config.ui.show_reasoning},
             {"unicode",         config.ui.unicode},
         }},
@@ -348,7 +348,7 @@ void write_default_config(const std::filesystem::path& file) {
         }},
         {"ui", json{
             {"animation_ms",    defaults.ui.animation_ms},
-            {"show_roundtable", defaults.ui.show_roundtable},
+            {"show_experts", defaults.ui.show_experts},
             {"show_reasoning", defaults.ui.show_reasoning},
             {"unicode",         defaults.ui.unicode},
         }},
@@ -413,7 +413,7 @@ Config load_config(const std::filesystem::path& file, std::vector<std::string>& 
     // built-in defaults when it does not. An "experts" key that is present but
     // empty is taken at its word: someone who deleted every seat wanted every
     // seat deleted, and silently restoring nine of them would be worse than an
-    // empty roundtable the UI can explain.
+    // empty expert list the UI can explain.
     if (const auto experts = doc.find("experts"); experts != doc.end()) {
         config.roster = Roster::bare();
 
@@ -505,7 +505,7 @@ Config load_config(const std::filesystem::path& file, std::vector<std::string>& 
 
     if (const auto ui = doc.find("ui"); ui != doc.end() && ui->is_object()) {
         read_field(*ui, "animation_ms",    config.ui.animation_ms,    "ui", warnings);
-        read_field(*ui, "show_roundtable", config.ui.show_roundtable, "ui", warnings);
+        read_field(*ui, "show_experts", config.ui.show_experts, "ui", warnings);
         read_field(*ui, "show_reasoning", config.ui.show_reasoning, "ui", warnings);
         read_field(*ui, "unicode",         config.ui.unicode,         "ui", warnings);
     }

@@ -47,7 +47,7 @@ changes to something that already exists. That is what a cook is.
 
 ---
 
-## The roundtable
+## The experts
 
 Nine experts ship as defaults. They are not fixed: the roster is yours.
 
@@ -236,7 +236,7 @@ one self-contained binary that links the core library directly.
 │  RECENT      │   • only the KV cache is really allocated  │
 │  notes       │                                            │
 │              │  ┌────────────────────────────────────┐    │
-│  ROUNDTABLE  │  │ llama_model_load_from_file(path);  │    │
+│  EXPERTS     │  │ llama_model_load_from_file(path);  │    │
 │  ◇ Mathema…  │  └────────────────────────────────────┘    │
 │  ◆ Programm… ├────────────────────────────────────────────┤
 │              │  ask anything                     [ Send ] │
@@ -246,7 +246,7 @@ one self-contained binary that links the core library directly.
 ```
 
 The sidebar is draggable and collapses to a rail. It carries the project, the
-recent ones, and the roundtable with live status.
+recent ones, and the expert list with live status.
 
 **It has a project picker, and the terminal program does not.** `crucible` is
 told where it is by being run there — you `cd`, then you type it. A window has
@@ -273,13 +273,31 @@ so.
 
 ## Install
 
-**One command**
+One command, on any of the three.
+
+**Linux and macOS**
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mattsaund/crucible/main/install.sh | bash
 ```
 
-This will install Crucible and its dependencies. Re-running the installer upgrades in place.
+**Windows** (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/mattsaund/crucible/main/install.ps1 | iex
+```
+
+Either one installs Crucible and the build tools it needs, and re-running it
+upgrades in place. Neither installs a GPU runtime: Crucible compiles one on
+demand from its settings screen, because a backend has to match the machine it
+will run on and a ten-minute compile does not belong in an installer.
+
+> **On platform support.** Linux is what Crucible is developed and tested on.
+> macOS is regularly built and run. Windows is written and reviewed but has not
+> been compiled on a Windows machine — the platform-specific parts (process
+> spawning, the config directories, the resource meter) are new and unproven
+> there. If you are on Windows, expect to be the first person to find the
+> problems, and please report them.
 
 ## Uninstalling
 
@@ -484,7 +502,7 @@ each expert seat and for the delegator from whatever is in it, and tune sampling
 ```
 
 An `"experts"` key that is present but empty is taken at its word: an empty
-roundtable. The built-in nine are defaults, not a floor.
+expert list. The built-in nine are defaults, not a floor.
 
 ```jsonc
 "routing": {
@@ -523,7 +541,7 @@ gets worked examples written for it before it is first used.
 | `/stop` | wrap up the cook: finishing touches, then done |
 | `/cooks` | what past cooks changed, and how long they took |
 | `/newexpert` | add an expert: a name, and what it is trained in |
-| `/ejectexpert <name>` | remove one from the roundtable |
+| `/ejectexpert <name>` | remove one from the list |
 | `/experts` | which seats are filled, and with what |
 | `/resume` | reopen an earlier conversation about this project |
 | `/new` | start a fresh conversation, keeping the current one on disk |
@@ -556,7 +574,7 @@ the rest of the best match in grey after the cursor. `Tab` takes it:
 | `Tab` | accept the suggested command |
 | `↑` `↓` · wheel | scroll the transcript a line at a time |
 | `Ctrl-C` | cancel the current answer; again when idle to quit |
-| `Ctrl-T` | show/hide the roundtable |
+| `Ctrl-T` | show/hide the expert panel |
 | `PgUp` / `PgDn` | scroll the transcript a page at a time |
 
 ### Resuming a conversation
@@ -629,6 +647,7 @@ src/
 ├── util/           the parts with no opinions
 │   ├── diff.cpp        what a rewrite actually changed
 │   ├── markdown.cpp    reading the markdown a model wrote
+│   ├── platform.cpp    the three things that differ per operating system
 │   ├── resources.cpp   what the GPUs and the processor are doing
 │   ├── subprocess.cpp  fork/exec with a merged output pipe
 │   ├── format.cpp      bytes, durations, paths
@@ -644,7 +663,7 @@ src/
 │   ├── commands.cpp    slash commands
 │   ├── transcript.cpp  drawing the conversation, markdown and all
 │   ├── session_picker.cpp  the /resume list
-│   ├── widgets/        crucible sprite, roundtable, new-expert form
+│   ├── widgets/        crucible sprite, expert panel, new-expert form
 │   └── settings/       view, runtimes panel, GPU priority panel,
 │                       model manager, directory browser, model picker,
 │                       line editor
@@ -656,7 +675,7 @@ src/
 
 ## Roadmap
 
-- [x] JIT model host, router, roundtable TUI, streaming, cancellation
+- [x] JIT model host, router, expert-panel TUI, streaming, cancellation
 - [x] Models directory, and every setting editable in the app
 - [x] Routing benchmark, and a delegator prompt tuned against it
 - [x] A nominated default expert for prompts the delegator cannot place
@@ -676,6 +695,8 @@ src/
       delegator, so a cook can pass from a code expert to a writing one
 - [ ] **Sandbox `RUN`** — bubblewrap on Linux, seatbelt on macOS, so a command
       is confined the way a file path already is
+- [ ] **Compile Crucible on Windows** — the platform code is written; nobody has
+      built it there yet
 - [ ] Prefix caching so an unchanged conversation is not re-ingested every turn
 - [ ] Diffs in the cook journal, so a step says what changed and not only that
       something did

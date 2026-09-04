@@ -22,7 +22,7 @@
 
 #include "crucible/config/paths.hpp"
 #include "crucible/session/usage.hpp"
-#include "crucible/ui/widgets/roundtable.hpp"
+#include "crucible/ui/widgets/expert_panel.hpp"
 #include "crucible/ui/settings/settings_view.hpp"
 #include "crucible/ui/theme.hpp"
 #include "crucible/ui/widgets/resource_meter.hpp"
@@ -44,7 +44,7 @@ App::App(Config config, const std::vector<std::string>& warnings)
       runtimes_([this] { screen_.PostEvent(Event::Custom); }),
       store_(Project::current()),
       screen_(ScreenInteractive::Fullscreen()) {
-    show_roundtable_ = config_.ui.show_roundtable;
+    show_experts_ = config_.ui.show_experts;
 
     for (const std::string& warning : warnings) {
         state_.add_notice(warning);
@@ -126,7 +126,7 @@ void App::stop_ticker() {
 // ---------------------------------------------------------------------------
 
 App::TableView App::table_view() const {
-    if (!show_roundtable_) {
+    if (!show_experts_) {
         return TableView::Hidden;
     }
     // Leave room for a usable transcript: the ring only earns its space when
@@ -196,7 +196,7 @@ Element App::render() {
 
     Elements rows;
 
-    // Overlaid on the roundtable rather than given a column: a panel beside the
+    // Overlaid on the expert panel rather than given a column: a panel beside the
     // ring would push Crucible off the centre it is arranged around, and the
     // space to the right of the table is empty anyway.
     // Only where there is room beside the table. Narrower than that and the two
@@ -209,10 +209,10 @@ Element App::render() {
         Element meter = resource_meter(resources_.snapshot());
         // Its own column, not a dbox overlay.
         //
-        // Composited, the meter sat on top of whatever the centred roundtable
+        // Composited, the meter sat on top of whatever the centred panel
         // happened to reach underneath it, and on a wide terminal that is the
         // seat names: "Mathematics" rendered as "MatRTX 4070". Laid out beside
-        // the table instead, the roundtable centres in what is left over and
+        // the table instead, the panel centres in what is left over and
         // the two cannot collide however many seats the roster grows.
         return hbox({
             std::move(table) | flex,
@@ -223,15 +223,15 @@ Element App::render() {
 
     switch (table_view()) {
         case TableView::Full:
-            rows.push_back(with_meter(roundtable(snapshot, sprite_, tick, /*compact=*/false)));
+            rows.push_back(with_meter(expert_panel(snapshot, sprite_, tick, /*compact=*/false)));
             rows.push_back(separator());
             break;
         case TableView::Compact:
-            rows.push_back(with_meter(roundtable(snapshot, sprite_, tick, /*compact=*/true)));
+            rows.push_back(with_meter(expert_panel(snapshot, sprite_, tick, /*compact=*/true)));
             rows.push_back(separator());
             break;
         case TableView::Strip:
-            rows.push_back(roundtable_strip(snapshot, tick));
+            rows.push_back(expert_strip(snapshot, tick));
             rows.push_back(separator());
             break;
         case TableView::Hidden:
@@ -485,10 +485,10 @@ void App::save_settings(bool announce) {
     }
 
     // The engine applies it between requests; the UI-side copy is updated here
-    // so the roundtable and the crucible pick up cosmetic changes immediately.
+    // so the expert panel and the crucible pick up cosmetic changes immediately.
     config_ = edited;
     sprite_ = CrucibleSprite(config_.ui.unicode);
-    show_roundtable_ = config_.ui.show_roundtable;
+    show_experts_ = config_.ui.show_experts;
     state_.configure_seats(config_);
     engine_->apply_config(std::move(edited));
 }
@@ -803,7 +803,7 @@ int App::run() {
         }
 
         if (event == Event::CtrlT) {
-            show_roundtable_ = !show_roundtable_;
+            show_experts_ = !show_experts_;
             return true;
         }
 

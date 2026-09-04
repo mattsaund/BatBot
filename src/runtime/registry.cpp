@@ -10,7 +10,12 @@
 
 #include <nlohmann/json.hpp>
 
-#include <dlfcn.h>
+#if defined(_WIN32)
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#else
+#  include <dlfcn.h>
+#endif
 
 #include <ggml-backend.h>
 
@@ -120,6 +125,17 @@ std::filesystem::path best_module(const std::vector<std::filesystem::path>& file
     std::filesystem::path best;
     int best_score = 0;
     for (const std::filesystem::path& file : files) {
+#if defined(_WIN32)
+        HMODULE handle = ::LoadLibraryW(file.wstring().c_str());
+        if (handle == nullptr) {
+            continue;
+        }
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        auto score_fn =
+            reinterpret_cast<int (*)()>(::GetProcAddress(handle, "ggml_backend_score"));
+        const int score = score_fn != nullptr ? score_fn() : 1;
+        ::FreeLibrary(handle);
+#else
         void* handle = ::dlopen(file.c_str(), RTLD_NOW | RTLD_LOCAL);
         if (handle == nullptr) {
             continue;
@@ -128,7 +144,7 @@ std::filesystem::path best_module(const std::vector<std::filesystem::path>& file
         auto score_fn = reinterpret_cast<int (*)()>(::dlsym(handle, "ggml_backend_score"));
         const int score = score_fn != nullptr ? score_fn() : 1;
         ::dlclose(handle);
-
+#endif
         if (score > best_score) {
             best_score = score;
             best        = file;

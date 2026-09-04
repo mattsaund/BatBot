@@ -452,6 +452,35 @@ check     "the app knows whether it has one" \
           "$HERE/../cmake/CrucibleDependencies.cmake"
 
 echo
+echo "  Windows"
+
+# The Windows installer is a separate script, because PowerShell is what is
+# there and bash is not. It has to offer the same shape of thing.
+check     "there is a Windows installer" \
+          test -f "$HERE/../install.ps1"
+check     "it takes the same options the shell one does" \
+          grep -q 'param(' "$HERE/../install.ps1"
+for opt in Gpu Prefix Gui Uninstall Check; do
+    check "  -$opt" grep -q "\\\$$opt" "$HERE/../install.ps1"
+done
+# It must not build a runtime either: that decision is the same on every
+# platform, and it belongs to the settings screen.
+check_not "it does not build a GPU runtime" \
+          grep -q 'CRUCIBLE_BUILD_RUNTIME\|prebuild_runtime' "$HERE/../install.ps1"
+check     "it installs only Crucible's own component" \
+          grep -q -- '--component crucible' "$HERE/../install.ps1"
+# RPATH is an ELF idea. On Windows the loader looks beside the executable, so
+# the libraries have to be installed there instead.
+check     "Windows installs the libraries beside the binary" \
+          grep -q 'RUNTIME DESTINATION \${CMAKE_INSTALL_BINDIR}' "$HERE/../CMakeLists.txt"
+check     "and does not try to bake in an RPATH" \
+          grep -q 'CRUCIBLE_BACKEND_DL AND NOT WIN32' "$HERE/../CMakeLists.txt"
+# MSVC assumes the system code page without this and mangles every non-ASCII
+# glyph the sprite and the expert panel draw with.
+check     "MSVC is told the sources are UTF-8" \
+          grep -q 'add_compile_options(/utf-8)' "$HERE/../CMakeLists.txt"
+
+echo
 echo "  the built-in fallback seat is gone"
 
 # It was a tenth expert the delegator could never name. Any ordinary seat can

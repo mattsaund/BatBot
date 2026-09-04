@@ -7,6 +7,8 @@
 // is what a clean reinstall test depends on.
 #include "crucible/app/uninstall.hpp"
 
+#include "crucible/util/platform.hpp"
+
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -25,10 +27,12 @@ namespace {
 /// The path of the running executable. Uninstalling the binary that is asking
 /// the question is the whole point, so resolve it rather than guessing at
 /// /usr/local/bin.
+///
+/// This used to read /proc/self/exe directly, which is Linux -- on macOS it
+/// returned nothing and the uninstaller could not find the binary it was being
+/// asked to remove.
 std::filesystem::path own_path() {
-    std::error_code ec;
-    const std::filesystem::path exe = std::filesystem::read_symlink("/proc/self/exe", ec);
-    return ec ? std::filesystem::path{} : exe;
+    return util::executable_path();
 }
 
 std::uintmax_t directory_size(const std::filesystem::path& dir) {

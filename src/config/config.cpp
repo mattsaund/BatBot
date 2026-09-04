@@ -49,7 +49,7 @@ bool Config::has_expert(const ExpertId& id) const {
 std::vector<ExpertId> Config::configured_experts() const {
     // Roster order, not map order. The map is sorted by id, and a list of
     // experts that reads "Biology, Chemistry, Engineering..." when the
-    // roundtable draws them in a different order is a small but constant
+    // expert panel draws them in a different order is a small but constant
     // friction.
     std::vector<ExpertId> found;
     for (const Expert& seat : roster.experts()) {

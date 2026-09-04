@@ -167,7 +167,7 @@ bool App::handle_command(const std::string& text) {
         say("models directory: " + config_.resolved_models_dir().string());
         for (const Expert& seat : config_.roster.experts()) {
             const ModelParams& params = config_.expert(seat.id);
-            // The tag is what the roundtable chip shows and what the delegator
+            // The tag is what the expert panel chip shows and what the delegator
             // reads in its menu, so it belongs in the listing that answers
             // "which seats are filled".
             std::string line = seat.name + " [" + seat.tag + "]";
@@ -299,7 +299,7 @@ bool App::handle_command(const std::string& text) {
         settings_.set_config(std::move(edited));
         save_settings(/*announce=*/false);
 
-        say(seat.name + " has left the roundtable"
+        say(seat.name + " has left the experts"
             + (seat.builtin ? " -- it was one of the built-in nine; re-add it with "
                               "/newexpert"
                             : ""));
@@ -456,7 +456,7 @@ bool App::commit_new_expert(const ExpertForm::Result& form) {
         return false;
     }
 
-    // The new seat starts with no model. It appears on the roundtable
+    // The new seat starts with no model. It appears in the expert list
     // immediately, drawn hollow, which is the honest picture: the delegator can
     // route to it as soon as it reloads, and until a GGUF is assigned that
     // route is redirected by the policy in route_policy.hpp.
@@ -469,7 +469,7 @@ bool App::commit_new_expert(const ExpertForm::Result& form) {
     const std::string tag = seat ? config_.roster.at(*seat).tag : std::string();
 
     state_.clear_notices();
-    say(form.name + " has joined the roundtable" + (tag.empty() ? "" : " as [" + tag + "]"));
+    say(form.name + " has joined the experts" + (tag.empty() ? "" : " as [" + tag + "]"));
     say("assign it a model with /settings, or pin a prompt to it with /" + id + " ...");
 
     // The one thing the two boxes could not ask for. Queued behind whatever the

@@ -14,7 +14,7 @@ namespace crucible::ui {
 /// Renders the crucible as fixed-width text lines.
 ///
 /// Every frame a sprite produces is the same width and height for a given
-/// size, so the roundtable never reflows as the fire moves.
+/// size, so the expert panel never reflows as the fire moves.
 ///
 /// The vessel never changes. Only the flame above it and the melt inside it
 /// do, and they carry the whole of the animation: a bare ember when nothing is

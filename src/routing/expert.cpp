@@ -4,7 +4,7 @@
 //
 // The list is the single source of truth. The labels the delegator chooses
 // between, its system prompt, its worked examples, the keyword sets the
-// model-free router scores with, and the order seats appear at the roundtable
+// model-free router scores with, and the order experts appear in the panel
 // are all derived from it, so they cannot drift apart -- adding a seat adds it
 // everywhere, whether the seat came from the defaults below or from a user
 // typing `/newexpert` a minute ago.
@@ -292,7 +292,7 @@ std::vector<std::string> Roster::router_labels() const {
     // "Philosophy" and "Physics" are things the model knows about.
     //
     // The tags stay in the system prompt, where they measurably help (dropping
-    // them costs 6 points), and on the roundtable, where a fixed width is what
+    // them costs 6 points), and in the expert panel, where a fixed width is what
     // makes the chips line up.
     std::vector<std::string> labels;
     labels.reserve(experts_.size());

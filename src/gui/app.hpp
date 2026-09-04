@@ -49,7 +49,11 @@ public:
 
 private:
     /// Which pane the main area is showing.
-    enum class View { Chat, Cook, Experts, History, Settings };
+    ///
+    /// No Experts pane: the sidebar section is called that, and managing them
+    /// is a settings page like the rest of the configuration. Two things called
+    /// Experts in one sidebar is a question the user should not have to answer.
+    enum class View { Chat, Cook, History, Settings };
 
     /// Which page of the settings. One list down the left and one page on the
     /// right, which is the shape every desktop application settles on because

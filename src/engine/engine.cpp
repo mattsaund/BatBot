@@ -555,7 +555,7 @@ void Engine::handle(const Request& request) {
 
     const RouteDecision decision = resolve(request);
     state_.set_route(turn, decision);
-    // From here the roundtable draws a line from Crucible to this seat.
+    // From here the expert panel draws a line from Crucible to this seat.
     state_.set_linked(decision.expert);
     if (wake_) {
         wake_();

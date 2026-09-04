@@ -285,7 +285,7 @@ void draw_crucible(ImDrawList* draw, ImVec2 centre, float radius) {
 }
 
 void draw_dot(ImDrawList* draw, ImVec2 centre, float radius, Dot dot) {
-    // A diamond, not a circle: it is what the terminal roundtable uses, and the
+    // A diamond, not a circle: it is what the terminal panel uses, and the
     // shape is half of how a seat's state reads at a glance.
     const auto diamond = [&](float r, ImU32 colour, bool filled) {
         const ImVec2 points[4] = {

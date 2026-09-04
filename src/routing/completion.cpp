@@ -23,7 +23,7 @@ std::vector<CommandInfo> build_commands(const Roster& roster) {
         {"cooks",    "what past cooks changed, and how long they took", false},
         {"experts",  "which seats are filled", false},
         {"newexpert", "add an expert: a name, and what it is trained in", false},
-        {"ejectexpert", "remove an expert from the roundtable", true},
+        {"ejectexpert", "remove an expert from the list", true},
         {"runtimes", "install or remove CUDA / Vulkan / CPU backends", false},
         {"devices",  "compute devices llama.cpp found", false},
         {"search",   "look something up on the internet", true},

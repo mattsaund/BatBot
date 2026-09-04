@@ -195,8 +195,8 @@ void SettingsView::build_rows() {
     header("INTERFACE");
     rows_.push_back({Kind::Int,  "Animation ms", "frame interval while busy",
                      nullptr, &config_.ui.animation_ms, nullptr, nullptr, {}});
-    rows_.push_back({Kind::Bool, "Show roundtable", "draw the ring of experts",
-                     nullptr, nullptr, nullptr, &config_.ui.show_roundtable, {}});
+    rows_.push_back({Kind::Bool, "Show experts", "draw the expert panel",
+                     nullptr, nullptr, nullptr, &config_.ui.show_experts, {}});
     rows_.push_back({Kind::Bool, "Show reasoning", "keep a thinking model's working on screen",
                      nullptr, nullptr, nullptr, &config_.ui.show_reasoning, {}});
     rows_.push_back({Kind::Bool, "Unicode glyphs", "off uses a pure-ASCII crucible",

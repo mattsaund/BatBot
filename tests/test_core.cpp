@@ -167,7 +167,7 @@ TEST(the_shipped_roster_is_complete_and_unique) {
 
         // Two seats sharing an id would make one of them unreachable by slash
         // command and would collide in the config map; two sharing a tag would
-        // put the same chip on two rows of the roundtable.
+        // put the same chip on two rows of the panel.
         CHECK(ids.insert(expert.id).second);
         CHECK(tags.insert(expert.tag).second);
     }
@@ -336,7 +336,7 @@ TEST(a_new_seat_goes_on_the_end_and_the_order_is_the_drawing_order) {
     std::string error;
     CHECK(roster.add(expert, error));
 
-    // The roundtable draws the roster in order, so where a seat lands in the
+    // The expert panel draws the roster in order, so where a seat lands in the
     // list is where it lands on screen.
     CHECK_EQ(roster.at(roster.size() - 1).id, std::string("tax-law"));
     CHECK_EQ(roster.size(), std::size_t{10});
@@ -354,7 +354,7 @@ TEST(an_out_of_range_seat_reads_as_nobody) {
 TEST(every_seat_can_be_ejected_including_the_last_one) {
     Roster roster = Roster::defaults();
     std::string error;
-    // Someone who ejects every expert meant to. An empty roundtable is a state
+    // Someone who ejects every expert meant to. An empty list is a state
     // the UI explains; quietly putting a seat back would be worse.
     while (roster.size() > 0) {
         CHECK(roster.remove(roster.at(0).id, error));
@@ -2452,7 +2452,7 @@ TEST(a_seat_whose_file_is_gone_is_not_shown_as_ready) {
 
     CHECK(seat_of(snapshot, "physics").phase
           == SeatPhase::Dormant);
-    // Assigned but absent must read differently from ready, or the roundtable
+    // Assigned but absent must read differently from ready, or the expert panel
     // promises an expert that cannot answer.
     CHECK(seat_of(snapshot, "biology").phase
           == SeatPhase::Missing);
@@ -2477,7 +2477,7 @@ TEST(saving_then_loading_round_trips_every_setting) {
     original.defaults.n_gpu_layers = 42;
     original.defaults.split_mode  = "row";
     original.ui.animation_ms      = 55;
-    original.ui.show_roundtable   = false;
+    original.ui.show_experts   = false;
     original.ui.unicode           = false;
     original.experts["physics"].model = "phys.gguf";
     original.experts["biology"].model = "bio.gguf";
@@ -2497,7 +2497,7 @@ TEST(saving_then_loading_round_trips_every_setting) {
     CHECK_EQ(reloaded.defaults.n_gpu_layers, 42);
     CHECK_EQ(reloaded.defaults.split_mode, std::string("row"));
     CHECK_EQ(reloaded.ui.animation_ms, 55);
-    CHECK(!reloaded.ui.show_roundtable);
+    CHECK(!reloaded.ui.show_experts);
     CHECK(!reloaded.ui.unicode);
 
     CHECK_EQ(reloaded.expert("physics").model,
@@ -2584,7 +2584,7 @@ TEST(a_user_made_expert_survives_a_round_trip_through_disk) {
 
     // Everything the delegator reads has to come back, not just the name: a
     // seat that reloaded without its blurb or its examples would still appear
-    // on the roundtable and quietly stop being routable to.
+    // in the list and quietly stop being routable to.
     CHECK_EQ(back.name, std::string("Rust Async"));
     CHECK_EQ(back.blurb, expert.blurb);
     CHECK_EQ(back.examples.size(), std::size_t{2});
@@ -2688,7 +2688,7 @@ TEST(an_ejected_expert_does_not_come_back_on_the_next_load) {
     CHECK(reloaded.roster.find("physics").has_value());
 }
 
-TEST(a_config_whose_experts_are_all_gone_loads_as_an_empty_roundtable) {
+TEST(a_config_whose_experts_are_all_gone_loads_as_an_empty_list) {
     TempDir dir;
     const auto file = dir.path() / "config.json";
     {
@@ -2745,7 +2745,7 @@ TEST(an_expert_entry_with_no_blurb_is_skipped_with_a_warning) {
     const Config config = load_config(file, warnings);
 
     // A seat the delegator cannot route to is worse than no seat: it appears on
-    // the roundtable and is never chosen. Refusing it and saying so is the only
+    // the list and is never chosen. Refusing it and saying so is the only
     // outcome the user can act on.
     CHECK(!config.roster.find("vibes").has_value());
     CHECK(!warnings.empty());

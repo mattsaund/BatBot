@@ -89,7 +89,7 @@ constexpr int kAbandonAt = 10;  ///< it is stuck; stop rather than burn the budg
 /// to the one that writes the documentation. Finishing a piece with DONE
 /// prompts for it -- but a small model may never say DONE, and then a
 /// three-hour cook is one expert doing everything, which is the thing the
-/// roundtable is for.
+/// expert list is for.
 ///
 /// So the loop asks on its own schedule as well. Twelve actions is far enough
 /// that a piece of work has usually been finished and near enough that a wrong
@@ -615,7 +615,7 @@ void Engine::do_cook(const std::string& goal, int budget_seconds,
         //
         // Asked on a schedule rather than only when the expert thinks to. See
         // kCheckpointEvery: without this a model that never says DONE keeps the
-        // seat for the whole budget, and the roundtable may as well be one
+        // seat for the whole budget, and the expert list may as well be one
         // chair.
         if (++since_checkpoint >= kCheckpointEvery) {
             since_checkpoint = 0;

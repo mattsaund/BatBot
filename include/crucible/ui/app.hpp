@@ -40,7 +40,7 @@ public:
     int run();
 
 private:
-    /// How much of the roundtable the terminal has room for.
+    /// How much of the expert panel the terminal has room for.
     enum class TableView { Full, Compact, Strip, Hidden };
 
     ftxui::Element render();
@@ -143,10 +143,10 @@ private:
     std::atomic<bool> ticking_{false};
     std::atomic<std::size_t> tick_{0};
 
-    /// Read on its own thread and drawn in the corner of the roundtable.
+    /// Read on its own thread and drawn in the corner of the expert panel.
     util::ResourceMonitor resources_;
 
-    bool show_roundtable_ = true;
+    bool show_experts_ = true;
 
     /// Pin the transcript to its newest line. Any scroll up releases it; coming
     /// back to the bottom, or sending a prompt, takes it again -- so a reply

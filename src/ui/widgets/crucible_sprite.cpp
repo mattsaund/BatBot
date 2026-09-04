@@ -3,7 +3,7 @@
 // The crucible.
 //
 // The sprite is a fixed-width template with marker characters substituted at
-// render time, so every frame is exactly the same size and the roundtable never
+// render time, so every frame is exactly the same size and the expert panel never
 // reflows as the fire moves. Substitution is by marker rather than byte offset,
 // which is what lets a multi-byte glyph stand in for a single-width slot.
 //

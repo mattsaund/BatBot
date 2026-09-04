@@ -28,11 +28,11 @@ namespace crucible {
 /// answered by whoever moved into that slot.
 using ExpertId = std::string;
 
-/// One seat at the roundtable.
+/// One expert on the list.
 struct Expert {
     ExpertId    id;
     std::string name;    ///< human-facing ("Mathematics", "Rust Async")
-    std::string tag;     ///< <= 4 chars, upper case, unique. The roundtable chip.
+    std::string tag;     ///< <= 4 chars, upper case, unique. The chip in the expert panel.
 
     /// What this expert is trained in, in the user's own words. Fed to the
     /// delegator as the description of the seat, and shown in settings.

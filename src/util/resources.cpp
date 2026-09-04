@@ -12,6 +12,11 @@
 #include <fstream>
 #include <sstream>
 
+#if defined(_WIN32)
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#endif
+
 #include "crucible/util/subprocess.hpp"
 
 namespace crucible::util {
@@ -193,6 +198,62 @@ bool read_macos_cpu(ResourceSample& sample) {
     parse_vm_stat(output_of({"vm_stat"}), page_size, total, sample.used);
     return true;
 }
+
+#if defined(_WIN32)
+/// Memory and processor time from the Windows APIs.
+///
+/// The Linux path reads /proc and the macOS path shells out to sysctl and
+/// vm_stat; Windows answers both questions in-process, which is cheaper than
+/// either. GetSystemTimes returns cumulative counters like /proc/stat does, so
+/// the same two-reading rule applies and the caller's first pass reports none.
+bool read_windows_cpu(ResourceSample& sample) {
+    MEMORYSTATUSEX memory{};
+    memory.dwLength = sizeof(memory);
+    if (::GlobalMemoryStatusEx(&memory) == 0) {
+        return false;
+    }
+    sample.total = memory.ullTotalPhys;
+    sample.used  = memory.ullTotalPhys - memory.ullAvailPhys;
+
+    // A name, from the registry key every Windows has had since NT.
+    HKEY key = nullptr;
+    if (::RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+                        "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+                        0, KEY_READ, &key) == ERROR_SUCCESS) {
+        char  name[256] = {};
+        DWORD size      = sizeof(name);
+        DWORD type      = 0;
+        if (::RegQueryValueExA(key, "ProcessorNameString", nullptr, &type,
+                               reinterpret_cast<LPBYTE>(name), &size) == ERROR_SUCCESS) {
+            sample.name = trim(name);
+        }
+        ::RegCloseKey(key);
+    }
+    if (sample.name.empty()) {
+        sample.name = "processor";
+    }
+    return true;
+}
+
+/// Cumulative idle and total processor ticks, the counterpart of /proc/stat.
+bool read_windows_times(std::uint64_t& busy, std::uint64_t& total) {
+    FILETIME idle{};
+    FILETIME kernel{};
+    FILETIME user{};
+    if (::GetSystemTimes(&idle, &kernel, &user) == 0) {
+        return false;
+    }
+    const auto ticks = [](const FILETIME& value) {
+        return (static_cast<std::uint64_t>(value.dwHighDateTime) << 32)
+             | value.dwLowDateTime;
+    };
+    // Kernel time already includes idle, which is why it is subtracted rather
+    // than added: "busy" is everything that was not idling.
+    total = ticks(kernel) + ticks(user);
+    busy  = total - ticks(idle);
+    return true;
+}
+#endif
 
 }  // namespace
 
@@ -442,6 +503,11 @@ void ResourceMonitor::run() {
         if (parse_meminfo(read_file("/proc/meminfo"), next.cpu.used, next.cpu.total)) {
             next.cpu.name          = cpu_name.empty() ? "processor" : cpu_name;
             next.cpu.temperature_c = cpu_temperature();
+#if defined(_WIN32)
+        } else if (read_windows_cpu(next.cpu)) {
+            // Windows exposes no processor temperature without a driver, so
+            // that column stays empty rather than guessing.
+#endif
         } else if (!read_macos_cpu(next.cpu)) {
             next.cpu.name = cpu_name.empty() ? "processor" : cpu_name;
         }
@@ -450,7 +516,11 @@ void ResourceMonitor::run() {
         // reports none rather than reporting the average since boot.
         std::uint64_t busy  = 0;
         std::uint64_t total = 0;
-        if (parse_stat(read_file("/proc/stat"), busy, total) && total > last_total_) {
+        bool have_times = parse_stat(read_file("/proc/stat"), busy, total);
+#if defined(_WIN32)
+        have_times = have_times || read_windows_times(busy, total);
+#endif
+        if (have_times && total > last_total_) {
             if (last_total_ != 0) {
                 const std::uint64_t span = total - last_total_;
                 next.cpu.busy_percent =

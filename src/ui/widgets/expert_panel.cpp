@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// The roundtable.
+// The expert panel.
 //
 // Crucible on the left with a dot of his own, and the experts in a column beside
 // him with a dot each, drawn in roster order.
@@ -11,7 +11,7 @@
 // answer is finished, and Crucible's own dot is lit exactly when the delegator is
 // loaded and waiting -- which, with the delegator set to load on demand, is not
 // most of the time.
-#include "crucible/ui/widgets/roundtable.hpp"
+#include "crucible/ui/widgets/expert_panel.hpp"
 
 #include <algorithm>
 #include <array>
@@ -152,7 +152,7 @@ std::string link_row(int row, int from, int to) {
 
 }  // namespace
 
-Element roundtable(const Snapshot& snapshot, const CrucibleSprite& sprite, std::size_t tick,
+Element expert_panel(const Snapshot& snapshot, const CrucibleSprite& sprite, std::size_t tick,
                    bool compact) {
     // Drawn in roster order, which is the order the user put them in.
     const Roster& roster = snapshot.roster ? *snapshot.roster : *kEmptyRoster();
@@ -258,7 +258,7 @@ Element roundtable(const Snapshot& snapshot, const CrucibleSprite& sprite, std::
     });
 }
 
-Element roundtable_strip(const Snapshot& snapshot, std::size_t tick) {
+Element expert_strip(const Snapshot& snapshot, std::size_t tick) {
     const Roster& roster = snapshot.roster ? *snapshot.roster : *kEmptyRoster();
 
     Elements chips;
@@ -273,9 +273,9 @@ Element roundtable_strip(const Snapshot& snapshot, std::size_t tick) {
     // Ten narrow chips come to about 76 columns, which leaves the mood very
     // little on an 80-column terminal -- and the seats are what the strip is
     // for. So the mood shrinks first: better a clipped mood than a clipped
-    // roundtable. A roster with twenty seats on it will overflow, and the strip
+    // expert panel. A roster with twenty seats on it will overflow, and the strip
     // is already the fallback layout for a terminal with no room; the ring
-    // above is where a large roundtable is meant to be read.
+    // above is where a large list is meant to be read.
     const std::string bubble = thought_bubble(snapshot.mood, snapshot.status, tick);
     chips.push_back(filler());
     chips.push_back(text(" "));  // never let the mood touch the last chip

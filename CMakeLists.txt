@@ -70,6 +70,7 @@ add_library(crucible_core STATIC
     src/util/text.cpp
     src/util/format.cpp
     src/util/diff.cpp
+    src/util/platform.cpp
     src/util/markdown.cpp
     src/util/resources.cpp
     src/util/subprocess.cpp
@@ -146,7 +147,7 @@ add_executable(crucible
     src/ui/commands.cpp
     src/ui/transcript.cpp
     src/ui/widgets/crucible_sprite.cpp
-    src/ui/widgets/roundtable.cpp
+    src/ui/widgets/expert_panel.cpp
     src/ui/widgets/markdown_view.cpp
     src/ui/widgets/scroll.cpp
     src/ui/widgets/resource_meter.cpp
@@ -182,11 +183,30 @@ if(CRUCIBLE_BUILD_GUI)
         src/gui/markdown_view.cpp
         src/gui/theme.cpp)
     target_link_libraries(crucible-gui PRIVATE crucible::core crucible_imgui)
-    if(CRUCIBLE_BACKEND_DL)
+    if(CRUCIBLE_BACKEND_DL AND NOT WIN32)
         set_target_properties(crucible-gui PROPERTIES
             BUILD_RPATH   "$ORIGIN/../${CRUCIBLE_LIBDIR}"
             INSTALL_RPATH "$ORIGIN/../${CRUCIBLE_LIBDIR}")
     endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# MSVC
+#
+# Four settings, and every one of them is a thing that would otherwise fail
+# rather than a preference.
+# ---------------------------------------------------------------------------
+if(MSVC)
+    # The sources contain UTF-8 -- the crucible sprite's melt, the diamonds the
+    # expert panel draws with. MSVC assumes the system code page without this
+    # and mangles every one of them.
+    add_compile_options(/utf-8)
+    # windows.h defines min and max as macros, which breaks std::min the moment
+    # any header reaches it.
+    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
+    # localtime_s and friends are the "secure" versions MSVC wants; the ones
+    # this code uses are already those, but llama.cpp's are not.
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -245,7 +265,15 @@ endif()
 # is the directory of the binary itself, so bin/../lib/crucible resolves whether
 # the prefix is ~/.local or /usr/local.
 # ---------------------------------------------------------------------------
-if(CRUCIBLE_BACKEND_DL)
+# Where the loader looks for llama.cpp's shared libraries.
+#
+# ELF and Mach-O take a search path baked into the binary, and $ORIGIN is the
+# directory the binary is in -- so bin/../lib/crucible resolves whether the
+# prefix is ~/.local or /usr/local, and `crucible` runs from anywhere on PATH
+# with no LD_LIBRARY_PATH. Windows has no such thing: it looks beside the
+# executable, so there the DLLs are installed into bin/ and nothing has to be
+# baked in at all.
+if(CRUCIBLE_BACKEND_DL AND NOT WIN32)
     set_target_properties(crucible PROPERTIES
         BUILD_RPATH   "$ORIGIN/../${CRUCIBLE_LIBDIR}"
         INSTALL_RPATH "$ORIGIN/../${CRUCIBLE_LIBDIR}")
@@ -279,15 +307,18 @@ if(CRUCIBLE_BUILD_TOOLS)
 endif()
 
 if(CRUCIBLE_BACKEND_DL)
-    # llama.cpp's core libraries, into Crucible's own lib directory.
+    # llama.cpp's core libraries. Beside the binary on Windows, where that is
+    # the only place the loader looks; in Crucible's own lib directory
+    # everywhere else, where the RPATH above points at it.
     foreach(_lib llama ggml ggml-base)
         if(TARGET ${_lib})
             # These targets carry a PUBLIC_HEADER list for people who install
-            # llama.cpp as a library. Crucible only wants the .so, so clear it
-            # rather than scatter llama.cpp's headers through the prefix.
+            # llama.cpp as a library. Crucible only wants the binary, so clear
+            # it rather than scatter llama.cpp's headers through the prefix.
             set_target_properties(${_lib} PROPERTIES PUBLIC_HEADER "")
             install(TARGETS ${_lib}
                     LIBRARY DESTINATION ${CRUCIBLE_LIBDIR}
+                    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
                     COMPONENT ${CRUCIBLE_INSTALL_COMPONENT})
         endif()
     endforeach()
