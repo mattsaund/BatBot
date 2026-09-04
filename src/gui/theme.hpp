@@ -27,6 +27,13 @@ constexpr ImU32 kPanel      = IM_COL32(0x14, 0x14, 0x16, 0xFF);
 constexpr ImU32 kPanelEdge  = IM_COL32(0x26, 0x26, 0x2A, 0xFF);
 constexpr ImU32 kRaised     = IM_COL32(0x1E, 0x1E, 0x21, 0xFF);
 
+// A diff has to separate added from removed, and the palette has one saturated
+// colour. So added is orange -- new, hot -- and removed is faint grey, which
+// reads as "this is gone" and does not compete with it. Red for removed would
+// sit a few degrees from the orange and be worse than either.
+constexpr ImU32 kAdded      = IM_COL32(0xFF, 0xAF, 0x00, 0xFF);
+constexpr ImU32 kRemoved    = IM_COL32(0x77, 0x77, 0x7D, 0xFF);
+
 constexpr ImU32 kText       = IM_COL32(0xEC, 0xEC, 0xEC, 0xFF);
 constexpr ImU32 kTextDim    = IM_COL32(0x8C, 0x8C, 0x92, 0xFF);
 constexpr ImU32 kTextFaint  = IM_COL32(0x5A, 0x5A, 0x60, 0xFF);
@@ -36,22 +43,28 @@ ImVec4 to_vec(ImU32 colour);
 /// Apply the whole style: colours, rounding, spacing.
 void apply();
 
-/// Load the interface font, and a monospace one for code.
+/// Load the interface faces.
 ///
-/// From the system rather than shipped. A bundled font is the usual answer and
-/// it is the wrong one here: Crucible installs as a binary and a lib directory,
-/// and adding a search path for a typeface -- which then has to be found again
-/// after an install, a move, or a run from the build tree -- buys nothing over
-/// using the font the machine already has. Every desktop has one of the
-/// families tried here.
+/// JetBrains Mono, compiled into the binary -- see cmake/EmbedBinary.cmake for
+/// why. One family for the whole interface, monospace throughout: Crucible's
+/// other face is a terminal, and a desktop app in a proportional font beside a
+/// TUI in a fixed one reads as two programs rather than two views of one.
 ///
-/// Falls back to ImGui's built-in bitmap font, which is ugly and always works.
+/// Three weights, which is what rendering markdown needs: prose, **bold** and
+/// *italic*. Falls back to a system monospace, and then to ImGui's built-in
+/// bitmap face, because a missing typeface is not a reason to have no window.
+///
 /// `scale` comes from the display's DPI.
 void load_fonts(float scale);
 
-/// The monospace face, for code blocks and command output. Never null once
-/// load_fonts has run -- it is the interface font when nothing better was found.
-ImFont* mono();
+/// The faces, after load_fonts. `body()` is never null; the others fall back to
+/// it when only one face could be loaded.
+ImFont* body();
+ImFont* bold();
+ImFont* italic();
+
+/// The larger face used for markdown headings.
+ImFont* heading();
 
 /// The mark: a flame, drawn rather than loaded.
 ///
@@ -61,10 +74,11 @@ ImFont* mono();
 /// asset would have to be found at runtime, which means an install layout and a
 /// search path for a picture the program can simply draw.
 ///
-/// Two stacked teardrops -- the body and a brighter core. Deliberately convex:
-/// a real flame outline has a notch at its base, and filling a concave path is
-/// a capability ImGui only grew recently. Two convex shapes read as a flame at
-/// every size and work everywhere.
+/// One silhouette, filled twice: the body and a hotter core leaning the other
+/// way. The base curls inward to a notch, which is the whole difference between
+/// something that reads as fire and something that reads as a leaf.
+///
+/// It does not move. Nothing in this file does.
 void draw_flame(ImDrawList* draw, ImVec2 centre, float radius, float alpha = 1.0F);
 
 /// The flame with the vessel under it, for places with room for the whole
@@ -72,8 +86,9 @@ void draw_flame(ImDrawList* draw, ImVec2 centre, float radius, float alpha = 1.0
 void draw_crucible(ImDrawList* draw, ImVec2 centre, float radius);
 
 /// A status diamond, the same vocabulary the terminal roundtable uses: filled
-/// means working, hollow means ready, faint means nothing assigned.
+/// means working, hollow means ready, faint means nothing assigned. Static --
+/// what moves is the percentage beside a loading seat, not the mark.
 enum class Dot { Active, Loading, Ready, Missing, Empty };
-void draw_dot(ImDrawList* draw, ImVec2 centre, float radius, Dot dot, float phase);
+void draw_dot(ImDrawList* draw, ImVec2 centre, float radius, Dot dot);
 
 }  // namespace crucible::gui::theme

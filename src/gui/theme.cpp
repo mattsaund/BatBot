@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include "theme.hpp"
 
+#include "fonts.hpp"
+
 #include <cmath>
 #include <filesystem>
 #include <system_error>
@@ -96,93 +98,133 @@ void apply() {
 
 namespace {
 
-ImFont* g_mono = nullptr;
+ImFont* g_body    = nullptr;
+ImFont* g_bold    = nullptr;
+ImFont* g_italic  = nullptr;
+ImFont* g_heading = nullptr;
 
 /// The first of `candidates` that exists and loads, or nullptr.
-ImFont* first_available(const char* const* candidates, std::size_t count, float pixels) {
+ImFont* first_available(const char* const* candidates, std::size_t count, float pixels,
+                        const ImWchar* ranges) {
     ImGuiIO& io = ImGui::GetIO();
+    ImFontConfig cfg;
+    cfg.GlyphRanges = ranges;
     for (std::size_t i = 0; i < count; ++i) {
         std::error_code ec;
         if (!std::filesystem::exists(candidates[i], ec)) {
             continue;
         }
-        if (ImFont* font = io.Fonts->AddFontFromFileTTF(candidates[i], pixels)) {
+        if (ImFont* font = io.Fonts->AddFontFromFileTTF(candidates[i], pixels, &cfg)) {
             return font;
         }
     }
     return nullptr;
 }
 
-/// One teardrop: round at the base, drawn to a point at the top.
+/// The flame outline, as one closed path.
 ///
-/// `lean` shifts the tip sideways, which is the whole difference between a leaf
-/// and a flame -- a flame's tip is never directly over its base.
-void teardrop(ImDrawList* draw, ImVec2 base, float width, float height, float lean,
-              ImU32 colour) {
-    const ImVec2 tip{base.x + lean * width, base.y - height};
+/// A real flame silhouette rather than a leaf: it is asymmetric, the tip leans,
+/// and the base curls inward to a notch. That notch is the whole difference
+/// between something that reads as fire and something that reads as foliage,
+/// and it is why this is a concave fill -- an earlier version was three stacked
+/// convex teardrops, which had no notch and looked like a leaf with highlights.
+///
+/// `lean` scales the sideways offset of the tip, so the core can lean the other
+/// way from the body. Coordinates are fractions of `radius` about `base`, which
+/// is the point the flame stands on.
+void flame_path(ImDrawList* draw, ImVec2 base, float radius, float lean) {
+    const auto at = [&](float x, float y) {
+        return ImVec2(base.x + x * radius, base.y + y * radius);
+    };
 
     draw->PathClear();
-    draw->PathLineTo(base);
-    // Up the left: wide at the bottom, drawn in towards the tip.
-    draw->PathBezierCubicCurveTo(ImVec2(base.x - width, base.y - height * 0.30F),
-                                 ImVec2(base.x - width * 0.72F, base.y - height * 0.78F),
-                                 tip);
-    // And down the right, which bows out further so the shape is not symmetric.
-    // A symmetric flame reads as a leaf.
-    draw->PathBezierCubicCurveTo(ImVec2(base.x + width * 0.88F, base.y - height * 0.74F),
-                                 ImVec2(base.x + width, base.y - height * 0.26F),
-                                 base);
-    draw->PathFillConvex(colour);
+    draw->PathLineTo(at(0.00F, 0.16F));                       // the notch
+    // Down and out to the left foot. The notch is shallow on purpose: an
+    // earlier version cut a third of the way up and the shape read as a paw.
+    draw->PathBezierCubicCurveTo(at(-0.12F, 0.34F), at(-0.26F, 0.42F), at(-0.40F, 0.40F));
+    // Up the left side in two sweeps, which is what gives it a waist. One long
+    // curve from foot to tip bulges in the middle and looks like a leaf.
+    draw->PathBezierCubicCurveTo(at(-0.62F, 0.06F), at(-0.52F, -0.20F), at(-0.34F, -0.42F));
+    draw->PathBezierCubicCurveTo(at(-0.20F, -0.72F), at(-0.04F, -0.86F),
+                                 at(0.10F * lean, -1.00F));   // the tip, leaning
+    // And down the right, which is straighter -- a flame is not symmetric, and
+    // making it so is the difference between fire and a teardrop.
+    draw->PathBezierCubicCurveTo(at(0.28F, -0.74F), at(0.34F, -0.48F), at(0.34F, -0.24F));
+    draw->PathBezierCubicCurveTo(at(0.33F, -0.02F), at(0.42F, 0.16F), at(0.42F, 0.36F));
+    draw->PathBezierCubicCurveTo(at(0.32F, 0.42F), at(0.14F, 0.32F), at(0.00F, 0.16F));
 }
 
 }  // namespace
 
-ImFont* mono() {
-    return g_mono;
-}
+ImFont* body()    { return g_body; }
+ImFont* bold()    { return g_bold != nullptr ? g_bold : g_body; }
+ImFont* italic()  { return g_italic != nullptr ? g_italic : g_body; }
+ImFont* heading() { return g_heading != nullptr ? g_heading : bold(); }
 
 void load_fonts(float scale) {
     ImGuiIO& io = ImGui::GetIO();
+    const float size = 15.0F * scale;
 
-    // Ordered by preference within each platform, and across platforms by
-    // whichever is most likely to be present. Nothing here is unusual: these
-    // are the default UI faces of the three desktops Crucible runs on.
-    static const char* const kSans[] = {
-        // Linux
-        "/usr/share/fonts/truetype/inter/Inter-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",
-        // macOS
-        "/System/Library/Fonts/SFNS.ttf",
-        "/System/Library/Fonts/Helvetica.ttc",
-        // Windows
-        "C:/Windows/Fonts/segoeui.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-    };
-    static const char* const kMono[] = {
-        "/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-        "/usr/share/fonts/truetype/hack/Hack-Regular.ttf",
-        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
-        "/System/Library/Fonts/Menlo.ttc",
-        "/System/Library/Fonts/SFNSMono.ttf",
-        "C:/Windows/Fonts/consola.ttf",
+    // The glyphs to bake, beyond Latin.
+    //
+    // ImGui's default range is Latin-1 and nothing else, so the first bulleted
+    // list rendered every "\xE2\x80\xA2" as a question mark. It is not only the
+    // bullet: instruction-tuned models emit em dashes, curly quotes and
+    // ellipses constantly, and every one of those would have been a "?" in an
+    // answer that looked fine in the terminal.
+    //
+    // General punctuation and the arrow block cover all of it, and cost a few
+    // hundred glyphs in an atlas that already holds two hundred and fifty.
+    static const ImWchar kRanges[] = {
+        0x0020, 0x00FF,  // Latin, Latin-1 supplement
+        0x2010, 0x205E,  // dashes, quotes, bullet, ellipsis, dagger
+        0x2190, 0x21FF,  // arrows
+        0x2200, 0x22FF,  // maths operators, for a model showing its working
+        0,
     };
 
-    const float body = 16.0F * scale;
-    if (first_available(kSans, IM_ARRAYSIZE(kSans), body) == nullptr) {
-        // The built-in is a bitmap face and looks it. Scaling it is worse than
-        // leaving it alone, so the size is left where it is and only the global
-        // scale moves.
-        io.Fonts->AddFontDefault();
-        io.FontGlobalScale = scale;
+#ifdef CRUCIBLE_HAS_EMBEDDED_FONT
+    // Compiled in, so this cannot fail for want of a file. ImGui takes
+    // ownership of a font buffer it is given and frees it on shutdown, which it
+    // must not do to a static array -- FontDataOwnedByAtlas says so.
+    ImFontConfig cfg;
+    cfg.FontDataOwnedByAtlas = false;
+    cfg.GlyphRanges          = kRanges;
+
+    const auto embedded = [&](const unsigned char* data, unsigned int bytes, float pixels) {
+        return io.Fonts->AddFontFromMemoryTTF(
+            const_cast<unsigned char*>(data), static_cast<int>(bytes), pixels, &cfg);
+    };
+    g_body    = embedded(fonts::kRegular, fonts::kRegular_size, size);
+    g_bold    = embedded(fonts::kBold,    fonts::kBold_size,    size);
+    g_italic  = embedded(fonts::kItalic,  fonts::kItalic_size,  size);
+    // Headings are the same face a size and a half up. Markdown structure has
+    // to be visible while scrolling past it, and weight alone does not do that
+    // in a monospace family where every glyph is already the same width.
+    g_heading = embedded(fonts::kBold,    fonts::kBold_size,    size * 1.32F);
+#endif
+
+    if (g_body == nullptr) {
+        // No embedded font in this build. A system monospace keeps the
+        // interface honest -- Crucible's other face is a terminal, and mixing a
+        // proportional font in here would read as a different program.
+        static const char* const kMono[] = {
+            "/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+            "/usr/share/fonts/truetype/hack/Hack-Regular.ttf",
+            "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+            "/System/Library/Fonts/Menlo.ttc",
+            "/System/Library/Fonts/SFNSMono.ttf",
+            "C:/Windows/Fonts/consola.ttf",
+        };
+        g_body = first_available(kMono, IM_ARRAYSIZE(kMono), size, kRanges);
     }
-    g_mono = first_available(kMono, IM_ARRAYSIZE(kMono), body * 0.94F);
-    if (g_mono == nullptr) {
-        g_mono = io.Fonts->Fonts.empty() ? nullptr : io.Fonts->Fonts[0];
+    if (g_body == nullptr) {
+        // The built-in is a bitmap face and looks it, but a window with ugly
+        // text beats no window.
+        g_body = io.Fonts->AddFontDefault();
+        io.FontGlobalScale = scale;
     }
 }
 
@@ -192,15 +234,22 @@ void draw_flame(ImDrawList* draw, ImVec2 centre, float radius, float alpha) {
         return (colour & ~IM_COL32_A_MASK) | (a << IM_COL32_A_SHIFT);
     };
 
-    const ImVec2 base{centre.x, centre.y + radius * 0.92F};
+    // The same silhouette twice: the body, and a core two thirds the size
+    // leaning the other way. Two shapes, because a flame is a shape with a
+    // hotter middle and anything more is decoration.
+    //
+    // Nothing here moves. An earlier version flickered the whole mark with the
+    // engine's pulse, which is the sort of thing that looks alive for a minute
+    // and then makes a window impossible to sit next to.
+    const ImVec2 base{centre.x, centre.y + radius * 0.62F};
+    flame_path(draw, base, radius, 1.0F);
+    draw->PathFillConcave(fade(kFlame));
 
-    // Three layers, each smaller and hotter, sharing a base. The gradient is
-    // what makes two flat shapes read as fire rather than as a logo of a leaf.
-    teardrop(draw, base, radius * 0.86F, radius * 1.86F,  0.06F, fade(kFlame));
-    teardrop(draw, ImVec2(base.x, base.y - radius * 0.04F),
-             radius * 0.52F, radius * 1.20F, -0.05F, fade(kFlameBright));
-    teardrop(draw, ImVec2(base.x, base.y - radius * 0.08F),
-             radius * 0.24F, radius * 0.58F,  0.02F, fade(kFlameHot));
+    // The core sits on the same foot and leans the other way, so the two edges
+    // cross rather than nest -- which is what makes it read as two tongues of
+    // one flame instead of a shape with an outline.
+    flame_path(draw, ImVec2(base.x, base.y - radius * 0.03F), radius * 0.46F, -0.9F);
+    draw->PathFillConcave(fade(kFlameBright));
 }
 
 void draw_crucible(ImDrawList* draw, ImVec2 centre, float radius) {
@@ -232,10 +281,10 @@ void draw_crucible(ImDrawList* draw, ImVec2 centre, float radius) {
     draw->AddLine(ImVec2(centre.x + w * 0.40F, base),
                   ImVec2(centre.x + w * 0.72F, base + radius * 0.30F), kFlame, 2.0F);
 
-    draw_flame(draw, ImVec2(centre.x, centre.y - radius * 0.42F), radius * 0.62F);
+    draw_flame(draw, ImVec2(centre.x, centre.y - radius * 0.52F), radius * 0.68F);
 }
 
-void draw_dot(ImDrawList* draw, ImVec2 centre, float radius, Dot dot, float phase) {
+void draw_dot(ImDrawList* draw, ImVec2 centre, float radius, Dot dot) {
     // A diamond, not a circle: it is what the terminal roundtable uses, and the
     // shape is half of how a seat's state reads at a glance.
     const auto diamond = [&](float r, ImU32 colour, bool filled) {
@@ -256,15 +305,14 @@ void draw_dot(ImDrawList* draw, ImVec2 centre, float radius, Dot dot, float phas
         case Dot::Active:
             diamond(radius, kFlameBright, true);
             break;
-        case Dot::Loading: {
-            // Breathing rather than spinning. A model load takes tens of
-            // seconds and a spinner at that duration reads as a hang; a slow
-            // pulse reads as work.
-            const float pulse = 0.65F + 0.35F * std::sin(phase * 3.2F);
-            diamond(radius * pulse, kFlame, true);
+        case Dot::Loading:
+            // A filled core inside a ring: loading, and the percentage beside
+            // it is what actually moves. This used to breathe with a sine, and
+            // a mark that pulses for the whole minute a 30B model takes to load
+            // is exhausting to sit beside.
+            diamond(radius * 0.55F, kFlame, true);
             diamond(radius, kFlame, false);
             break;
-        }
         case Dot::Ready:
             diamond(radius, kTextDim, false);
             break;

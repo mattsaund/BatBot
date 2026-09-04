@@ -18,6 +18,7 @@ set(CRUCIBLE_FTXUI_TAG v7.0.3     CACHE STRING "FTXUI git tag to build against")
 set(CRUCIBLE_JSON_TAG  v3.12.0    CACHE STRING "nlohmann/json git tag to build against")
 set(CRUCIBLE_IMGUI_TAG v1.91.9b   CACHE STRING "Dear ImGui git tag to build against")
 set(CRUCIBLE_GLFW_TAG  3.4        CACHE STRING "GLFW git tag, used only when the system has none")
+set(CRUCIBLE_FONT_TAG  2.304      CACHE STRING "JetBrains Mono release to compile into the desktop app")
 
 # ---------------------------------------------------------------------------
 # Symlink-free shared libraries
@@ -122,6 +123,60 @@ if(CRUCIBLE_BUILD_GUI)
     target_include_directories(crucible_imgui PUBLIC
         ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends ${imgui_SOURCE_DIR}/misc/cpp)
     target_link_libraries(crucible_imgui PUBLIC glfw OpenGL::GL)
+
+    # --- the interface font -------------------------------------------------
+    #
+    # JetBrains Mono, compiled in rather than looked for. A font is the one
+    # asset the program cannot draw for itself, and searching for it at runtime
+    # would mean an install layout and a search path for a typeface -- the same
+    # machinery the flame mark avoids by being vector shapes. Three faces, which
+    # is what rendering markdown needs: prose, **bold**, and *italic*.
+    #
+    # Fetched and pinned like everything else. If the download fails the build
+    # still works and the app falls back to whatever monospace face the system
+    # has, because a missing typeface is not a reason to have no program.
+    FetchContent_Declare(jetbrains_mono
+        URL      https://github.com/JetBrains/JetBrainsMono/releases/download/v${CRUCIBLE_FONT_TAG}/JetBrainsMono-${CRUCIBLE_FONT_TAG}.zip
+        URL_HASH SHA256=6f6376c6ed2960ea8a963cd7387ec9d76e3f629125bc33d1fdcd7eb7012f7bbf
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    FetchContent_MakeAvailable(jetbrains_mono)
+
+    set(CRUCIBLE_FONT_DIR ${CMAKE_BINARY_DIR}/generated)
+    file(MAKE_DIRECTORY ${CRUCIBLE_FONT_DIR})
+
+    set(CRUCIBLE_FONT_SOURCES "")
+    set(CRUCIBLE_FONTS_EMBEDDED ON)
+    foreach(_face Regular Bold Italic)
+        string(TOLOWER ${_face} _symbol)
+        set(_ttf ${jetbrains_mono_SOURCE_DIR}/fonts/ttf/JetBrainsMono-${_face}.ttf)
+        set(_cpp ${CRUCIBLE_FONT_DIR}/font_${_symbol}.cpp)
+        if(NOT EXISTS ${_ttf})
+            message(WARNING "JetBrains Mono ${_face} not found; the desktop app will "
+                            "fall back to a system font")
+            set(CRUCIBLE_FONTS_EMBEDDED OFF)
+            break()
+        endif()
+        # Configure time, not build time: the input never changes, so there is
+        # nothing for a dependency rule to track.
+        if(NOT EXISTS ${_cpp} OR ${_ttf} IS_NEWER_THAN ${_cpp})
+            execute_process(COMMAND ${CMAKE_COMMAND}
+                -DIN=${_ttf} -DOUT=${_cpp} -DSYMBOL=k${_face}
+                -P ${CMAKE_CURRENT_LIST_DIR}/EmbedBinary.cmake
+                RESULT_VARIABLE _embed_status)
+            if(NOT _embed_status EQUAL 0)
+                message(WARNING "could not embed JetBrains Mono ${_face}")
+                set(CRUCIBLE_FONTS_EMBEDDED OFF)
+                break()
+            endif()
+        endif()
+        list(APPEND CRUCIBLE_FONT_SOURCES ${_cpp})
+    endforeach()
+
+    if(CRUCIBLE_FONTS_EMBEDDED)
+        add_library(crucible_fonts STATIC ${CRUCIBLE_FONT_SOURCES})
+        target_compile_definitions(crucible_fonts PUBLIC CRUCIBLE_HAS_EMBEDDED_FONT)
+        target_link_libraries(crucible_imgui PUBLIC crucible_fonts)
+    endif()
 endif()
 
 # --- llama.cpp -------------------------------------------------------------

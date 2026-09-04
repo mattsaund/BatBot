@@ -165,21 +165,96 @@ Turn turn_from_json(const json& entry) {
 // Project
 // ---------------------------------------------------------------------------
 
+Project Project::at(const std::filesystem::path& root) {
+    // Normalised, so that /home/me/proj and /home/me/proj/ are one project
+    // rather than two histories that never see each other.
+    std::error_code ec;
+    std::filesystem::path resolved = std::filesystem::weakly_canonical(root, ec);
+    if (ec || resolved.empty()) {
+        resolved = root;
+    }
+
+    Project project;
+    project.root = resolved;
+    project.name = resolved.filename().string();
+    if (project.name.empty()) {
+        project.name = resolved.string();
+    }
+    project.dir = paths::projects_dir() / project_key(resolved);
+    return project;
+}
+
 Project Project::current() {
     std::error_code ec;
     std::filesystem::path cwd = std::filesystem::current_path(ec);
     if (ec) {
         cwd = ".";
     }
+    return Project::at(cwd);
+}
 
-    Project project;
-    project.root = cwd;
-    project.name = cwd.filename().string();
-    if (project.name.empty()) {
-        project.name = cwd.string();
+namespace {
+
+std::filesystem::path recent_file() {
+    return paths::projects_dir() / "recent.json";
+}
+
+}  // namespace
+
+std::vector<Project> recent_projects(std::size_t limit) {
+    std::vector<Project> found;
+    json doc;
+    try {
+        std::ifstream in(recent_file());
+        if (!in) {
+            return found;
+        }
+        in >> doc;
+    } catch (const json::exception&) {
+        return found;  // a corrupt list is an empty list, not a failure
     }
-    project.dir = paths::projects_dir() / project_key(cwd);
-    return project;
+    if (!doc.is_array()) {
+        return found;
+    }
+
+    for (const json& entry : doc) {
+        if (!entry.is_string()) {
+            continue;
+        }
+        const std::filesystem::path root = entry.get<std::string>();
+        std::error_code ec;
+        // Dropped rather than shown greyed out. A list whose entries open onto
+        // nothing is worse than a short one.
+        if (!std::filesystem::is_directory(root, ec)) {
+            continue;
+        }
+        found.push_back(Project::at(root));
+        if (found.size() >= limit) {
+            break;
+        }
+    }
+    return found;
+}
+
+void remember_project(const std::filesystem::path& root) {
+    const Project project = Project::at(root);
+
+    std::vector<std::string> paths{project.root.string()};
+    for (const Project& previous : recent_projects(32)) {
+        if (previous.root != project.root) {
+            paths.push_back(previous.root.string());
+        }
+    }
+    if (paths.size() > 32) {
+        paths.resize(32);
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(paths::projects_dir(), ec);
+    std::ofstream out(recent_file());
+    if (out) {
+        out << json(paths).dump(2) << '\n';
+    }
 }
 
 // ---------------------------------------------------------------------------

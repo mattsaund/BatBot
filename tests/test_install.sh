@@ -440,6 +440,45 @@ done
 
 # Same defaults, same problem, one layer down: a CPU runtime built on a Mac
 # would otherwise emit ggml-metal and ggml-blas alongside it.
+# The desktop app's typeface is compiled in, not looked for. A missing font must
+# downgrade to a system face rather than fail the build.
+check     "the interface font is fetched and pinned" \
+          grep -q 'CRUCIBLE_FONT_TAG' "$HERE/../cmake/CrucibleDependencies.cmake"
+check     "a font that will not fetch does not break the build" \
+          grep -q 'CRUCIBLE_FONTS_EMBEDDED OFF' \
+          "$HERE/../cmake/CrucibleDependencies.cmake"
+check     "the app knows whether it has one" \
+          grep -q 'CRUCIBLE_HAS_EMBEDDED_FONT' \
+          "$HERE/../cmake/CrucibleDependencies.cmake"
+
+echo
+echo "  the built-in fallback seat is gone"
+
+# It was a tenth expert the delegator could never name. Any ordinary seat can
+# play that part now, and routing.default_expert says which.
+check_not "no expert is special-cased as a fallback" \
+          grep -rq 'kFallbackId' "$HERE/../src" "$HERE/../include"
+check_not "no seat is marked unroutable" \
+          grep -rq 'routable' "$HERE/../src" "$HERE/../include"
+check     "the nominated default is what catches the rest" \
+          grep -q 'default_expert' "$HERE/../include/crucible/config/config.hpp"
+
+echo
+echo "  a cook can change hands"
+
+# The verb table specifically, not the instructions -- those name it too, so a
+# grep for the word alone would pass with the verb renamed out from under it.
+check     "HANDOFF is in the verb table" \
+          grep -q '"HANDOFF", ToolKind::Handoff' "$HERE/../src/tools/workshop.cpp"
+check     "the cook loop re-routes on one" \
+          grep -q 'take_the_seat' "$HERE/../src/engine/engine_cook.cpp"
+# The whole memory argument for the design: one expert resident at a time.
+check     "the previous expert is freed before the next is loaded" \
+          grep -q 'acquire_expert' "$HERE/../src/engine/engine_cook.cpp"
+
+echo
+echo "  no runtimes are installed (continued)"
+
 check     "a runtime build turns off BLAS and Accelerate" \
           grep -q -- '-DGGML_BLAS=OFF' "$HERE/../src/runtime/builder.cpp"
 check     "a runtime build turns off Metal unless Metal is what was asked for" \

@@ -179,6 +179,7 @@ if(CRUCIBLE_BUILD_GUI)
     add_executable(crucible-gui
         src/gui/main.cpp
         src/gui/app.cpp
+        src/gui/markdown_view.cpp
         src/gui/theme.cpp)
     target_link_libraries(crucible-gui PRIVATE crucible::core crucible_imgui)
     if(CRUCIBLE_BACKEND_DL)

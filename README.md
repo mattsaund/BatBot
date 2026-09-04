@@ -61,7 +61,6 @@ Nine experts ship as defaults. They are not fixed: the roster is yours.
                  / |___| \                ◇ Philosophy
                 /         \               ◇ Sociology
                '-----------'              ◇ Language
-                                          · Fallback
 ```
 
 The fire says what the machine is doing — banked when idle, a steady column
@@ -89,8 +88,14 @@ removes one, including the built-in nine. The roster is a set of defaults, not a
 floor: eject a seat and it stays ejected.
 
 A new expert is routable the moment it exists. Point it at a GGUF from
-`/settings` and it starts answering; leave it empty and prompts routed to it
-land on the fallback.
+`/settings` and it starts answering; leave it empty and prompts routed to it are
+redirected to whichever seat you nominated as the **default expert** — or, if
+you nominated none, to any filled one, with the transcript saying so.
+
+There is no built-in catch-all. Crucible used to ship a tenth seat called
+Fallback that the delegator was forbidden from naming; with a roster you own,
+"a general-purpose model for anything that does not fit" is just an expert you
+add and then nominate in `/settings`.
 
 ---
 
@@ -127,6 +132,23 @@ It can stop and ask you something, and the next thing you type answers it:
      type an answer and press enter
 ```
 
+**One cook, several experts.** The expert that writes the code is not the one
+that should write the documentation, so a cook does not hold one for the whole
+hour. Finishing a piece of work prompts for the next one, and that line goes
+back through the delegator:
+
+```
+     done     fixed the sign error and confirmed the test passes
+     handoff  document the parser's public functions
+     note     Programming handed over to Language
+     write    updated README.md  +18
+```
+
+The previous model is freed before the next is loaded, so the peak is still the
+larger of the two and never their sum. An expert can also hand over mid-piece
+with `HANDOFF: <the next work>`. If nobody else can take it, the one already
+loaded carries on — a worse specialist finishing the job beats no job.
+
 **`/stop` is not cancel.** It stops the cook taking new work and runs a
 finishing pass whose only job is to leave the project in a state that runs —
 finish a half-made edit, repair what broke, check it starts. `Ctrl-C` is still
@@ -154,6 +176,7 @@ describe it:
 | `RUN:` | run a command in the project root |
 | `SEARCH:` | look something up (needs web search on) |
 | `ASK:` | ask you something |
+| `HANDOFF:` | this piece is done and the next needs a different expert |
 | `NOTE:` `DONE:` | record what it is doing; close a piece of work |
 
 Three things are load-bearing and none of them is the tool list.
@@ -183,9 +206,50 @@ convention every model can follow beats one only the tool-trained models can.
 crucible-gui
 ```
 
-The same engine with a different face — same roster, same cook loop, same
-config file, no protocol in between. Dear ImGui over GLFW, in one
-self-contained binary that links the core library directly.
+The same engine with a different face — same roster, same cook loop, same config
+file, same folder-trust store, no protocol in between. Dear ImGui over GLFW, in
+one self-contained binary that links the core library directly.
+
+```
+┌──────────────┬────────────────────────────────────────────┐
+│  ▲ CRUCIBLE  │  you                                       │
+│    idle      │  why does the JIT swap cost so little?     │
+│              │                                            │
+│  PROJECT     │  Programming · 1.00 · router model         │
+│  crucible    │                                            │
+│  ~/code/cru… │  ## The short answer                       │
+│  Open project│  Weights are mapped, not copied — so:      │
+│              │   • the page cache holds them already      │
+│  RECENT      │   • only the KV cache is really allocated  │
+│  notes       │                                            │
+│              │  ┌────────────────────────────────────┐    │
+│  ROUNDTABLE  │  │ llama_model_load_from_file(path);  │    │
+│  ◇ Mathema…  │  └────────────────────────────────────┘    │
+│  ◆ Programm… ├────────────────────────────────────────────┤
+│              │  ask anything                     [ Send ] │
+│  VIEW        │  or give it a goal to cook on  30m [ Cook ]│
+│  Chat  Cook  │                                            │
+└──────────────┴────────────────────────────────────────────┘
+```
+
+The sidebar is draggable and collapses to a rail. It carries the project, the
+recent ones, and the roundtable with live status.
+
+**It has a project picker, and the terminal program does not.** `crucible` is
+told where it is by being run there — you `cd`, then you type it. A window has
+no `cd`, so it offers the list instead: open a folder, create one, or pick a
+recent. Opening a folder goes through the same trust prompt, so a directory
+trusted in one face is trusted in the other.
+
+**Replies are rendered, not printed.** Headings, bold, lists, tables and fenced
+code all draw as themselves, using the same parser the terminal uses — so both
+faces break a reply into the same blocks and only the drawing differs. A cook
+step expands to show its diff, coloured by line.
+
+The typeface is JetBrains Mono, compiled into the binary. A font is the one
+asset the program cannot draw for itself, and searching for it at runtime would
+mean an install layout and a search path for a typeface — the same machinery the
+flame mark avoids by being vector shapes.
 
 It is opt-in because it is the only part of Crucible that needs anything from
 the system beyond a compiler: OpenGL, and on Linux a few X11 development
@@ -406,13 +470,13 @@ each expert seat and for the delegator from whatever is in it, and tune sampling
 }
 ```
 
-An `"experts"` key that is present but empty is taken at its word: a roundtable
-with only a fallback on it. The built-in nine are defaults, not a floor.
+An `"experts"` key that is present but empty is taken at its word: an empty
+roundtable. The built-in nine are defaults, not a floor.
 
 ```jsonc
 "routing": {
   "min_confidence": 0.60,       // below this, treat the answer as undecided
-  "use_fallback_expert": true   // empty seats send work to Fallback, not elsewhere
+  "default_expert": "general"   // catches what does not fit; "" for none
 },
 "tools": {
   "web_search": false,          // the only thing Crucible sends off the machine
@@ -550,6 +614,7 @@ src/
 │   └── workshop.cpp    reading, writing and running things inside one root
 │
 ├── util/           the parts with no opinions
+│   ├── diff.cpp        what a rewrite actually changed
 │   ├── markdown.cpp    reading the markdown a model wrote
 │   ├── resources.cpp   what the GPUs and the processor are doing
 │   ├── subprocess.cpp  fork/exec with a merged output pipe
@@ -572,15 +637,16 @@ src/
 │                       line editor
 └── gui/            the desktop app                 [its own binary]
     ├── main.cpp        parse, trust, hand off
-    ├── app.cpp         the window: sidebar, panes, composer
-    └── theme.cpp       the palette, the flame, the status diamonds
+    ├── app.cpp         the window: sidebar, panes, composer, dialogs
+    ├── markdown_view.cpp  drawing the markdown a model wrote
+    └── theme.cpp       the palette, the flame, the fonts
 
 ## Roadmap
 
 - [x] JIT model host, router, roundtable TUI, streaming, cancellation
 - [x] Models directory, and every setting editable in the app
 - [x] Routing benchmark, and a delegator prompt tuned against it
-- [x] `Fallback` seat for prompts the delegator cannot place
+- [x] A nominated default expert for prompts the delegator cannot place
 - [x] Loadable runtimes — install and remove CUDA / Vulkan / CPU from settings
 - [x] Token counts per turn, session and project, with a live tok/s readout
 - [x] Multi-GPU splitting: even by memory, or a priority order you set
@@ -591,9 +657,11 @@ src/
       root and off until switched on
 - [x] **Cooking** — a goal and a budget instead of a question, with a journal of
       what changed
-- [x] **A desktop app** — the same engine, a different face
+- [x] **A desktop app** — the same engine, a different face, with a project
+      picker, rendered markdown and a resizable sidebar
+- [x] **Handover mid-cook** — the next piece of work goes back through the
+      delegator, so a cook can pass from a code expert to a writing one
 - [ ] Prefix caching so an unchanged conversation is not re-ingested every turn
-- [ ] A cook that can hand work between experts mid-run, rather than routing once
 - [ ] Diffs in the cook journal, so a step says what changed and not only that
       something did
 - [ ] Predictive preloading of the likely next expert

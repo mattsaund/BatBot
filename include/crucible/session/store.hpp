@@ -28,7 +28,25 @@ struct Project {
     /// walk up looking for a repository root, because the directory you start
     /// in is the one you meant.
     static Project current();
+
+    /// The project at `root`. The desktop app opens one this way; the terminal
+    /// program is always `current()`, because you cd to it.
+    static Project at(const std::filesystem::path& root);
 };
+
+/// Projects Crucible has been opened in, newest first.
+///
+/// For the desktop app, which has no `cd` to be told where it is and so has to
+/// offer a list. Kept beside the per-project histories rather than in the config
+/// file: it is a record of what happened, not a setting, and a config someone
+/// hand-edits should not be full of paths they visited once.
+///
+/// Paths that no longer exist are dropped on read. A recent-projects list whose
+/// entries open onto nothing is worse than a short one.
+std::vector<Project> recent_projects(std::size_t limit = 12);
+
+/// Put `root` at the top of that list.
+void remember_project(const std::filesystem::path& root);
 
 /// Enough about a stored session to choose one from a list.
 struct SessionSummary {
