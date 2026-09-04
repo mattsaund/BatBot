@@ -2219,6 +2219,72 @@ TEST(a_user_made_expert_survives_a_round_trip_through_disk) {
     CHECK(std::find(labels.begin(), labels.end(), "Rust Async") != labels.end());
 }
 
+TEST(the_config_shape_the_readme_documents_actually_loads) {
+    TempDir dir;
+    const auto file = dir.path() / "config.json";
+    {
+        // Copied from README.md, comments stripped. The README tells people
+        // this is what a config looks like; if it stops being true, this is
+        // where that is noticed rather than in someone's issue tracker.
+        std::ofstream out(file);
+        out << R"({
+  "models_dir": "~/.local/share/crucible/models",
+  "router":   { "model": "LFM2-1.2B-Q8_0.gguf" },
+  "defaults": { "n_ctx": 8192, "n_gpu_layers": -1, "temperature": 0.7 },
+  "experts": [
+    { "id": "mathematics", "builtin": true, "model": "math-expert-q4_k_m.gguf" },
+    { "id": "physics",     "builtin": true, "model": "physics-expert-q4_k_m.gguf" },
+    { "id": "programming", "builtin": true, "model": "/mnt/big/code-expert-q4_k_m.gguf" },
+    { "id": "rust-async",
+      "name": "Rust Async",
+      "tag": "RA",
+      "blurb": "tokio, futures, pinning, async traits, executor tuning",
+      "examples": ["why does my future never wake",
+                   "how do I pin a self-referential struct"],
+      "keywords": ["tokio", "futures", "pinning", "async"],
+      "model": "" },
+    { "id": "fallback", "builtin": true, "model": "generalist-q4_k_m.gguf" }
+  ],
+  "routing": { "min_confidence": 0.60, "use_fallback_expert": true },
+  "tools": { "web_search": false, "workshop": false,
+             "workshop_run": true, "workshop_timeout": 120 }
+})";
+    }
+
+    std::vector<std::string> warnings;
+    const Config config = load_config(file, warnings);
+
+    CHECK_EQ(config.roster.size(), std::size_t{5});
+    CHECK_EQ(config.roster.at(config.roster.size() - 1).id, std::string(kFallbackId));
+
+    // A built-in written as just its id gets its identity back from the table.
+    const std::optional<std::size_t> maths = config.roster.find("mathematics");
+    CHECK(maths.has_value());
+    if (maths) {
+        CHECK_EQ(config.roster.at(*maths).name, std::string("Mathematics"));
+        CHECK(!config.roster.at(*maths).keywords.empty());
+    }
+
+    // And the user-made one keeps everything it was given.
+    const std::optional<std::size_t> rust = config.roster.find("rust-async");
+    CHECK(rust.has_value());
+    if (rust) {
+        CHECK_EQ(config.roster.at(*rust).tag, std::string("RA"));
+        CHECK_EQ(config.roster.at(*rust).examples.size(), std::size_t{2});
+    }
+
+    CHECK_EQ(config.defaults.n_ctx, 8192);
+    CHECK(!config.tools.workshop);
+    CHECK(config.tools.workshop_run);
+    CHECK_EQ(config.tools.workshop_timeout, 120);
+
+    // The only warnings should be about models that are not on this machine --
+    // nothing about the shape of the file itself.
+    for (const std::string& warning : warnings) {
+        CHECK(warning.find("model not found") != std::string::npos);
+    }
+}
+
 TEST(an_ejected_expert_does_not_come_back_on_the_next_load) {
     TempDir dir;
     const auto file = dir.path() / "config.json";

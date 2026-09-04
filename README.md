@@ -1,28 +1,196 @@
-**A CLI Local LLM delegator.**
+```
+         ^
+        (^)
+       (/^\)
+   ,-----------,
+   \ ~~~~~~~~~ /     C R U C I B L E
+    \         /      a local forge: experts on demand, projects that cook
+     \_______/
+      /|   |\
+     / |___| \
+    /         \
+   '-----------'
+```
 
-Crucible is a full CLI tool that works with 10 specially trained local LLM's called `Experts` and 1
-delegator model to point your prompt to the correct expert agent.
+**A local AI engine that delegates, and then keeps working.**
 
-`cd` into a project, then type `crucible`. Crucible is the delegator model. It
-decides what expert model loads and computes your prompt. Load in specially trained models
-in Physics, Mathematics, Programming, etc and Crucible will choose the best model for the prompt.
+Two things, in one program.
+
+**It delegates.** You bring a set of small, specialised models. A tiny
+*delegator* reads your prompt, names the expert it belongs to, and that expert
+is loaded just in time to answer it. One model is resident at a time, so the
+memory you need is the largest expert rather than the sum of them.
+
+**It cooks.** Give it a goal and a length of time instead of a question, and it
+works on the project on disk: reads files, changes them, runs them, reads the
+failure, changes them again, for as long as you gave it. When the time is up it
+makes a finishing pass to leave things in a state that runs, and writes down
+what it did.
+
+Both faces are the same program. `crucible` is a terminal application;
+`crucible-gui` is a desktop one. They share an engine, a config file and a
+history — an expert added in one is there in the other.
 
 ---
 
 ## Why
 
-Running a single local model has to be small enough to fit onto your hardware,
-so it isn't the best on its own. Using a `Mixture-of-Agents` approach, You can
-get 10 specially trained models on specific subjects, and one delegator model to
-choose which one gets the prompt. 
+A single local model has to fit on your hardware, so it is always smaller than
+you would like. Ten specialised models plus a delegator do not: only one is
+resident at a time, so ten 30B experts occupy the space of one and behave more
+like a 300B model than any of them could alone. The cost is a load per swap,
+which is the trade the whole design is built around.
 
-The purpose of this approach is to be able to get as much power out of Local models as
-Possible. 
+And a question is not the only shape work comes in. Most of what you want from a
+model on your own machine is not one answer — it is an afternoon of small
+changes to something that already exists. That is what a cook is.
 
-**Example**
-If you choose 10, specially trained 30 billion parameter models, Essentially, you can 
-have an AI setup that performs pretty much as well as a 300 billion parameter model using
-30 billion parameters of space. The only downside to this setup is Just-In-Time loading overhead.
+---
+
+## The roundtable
+
+Nine experts ship as defaults. They are not fixed: the roster is yours.
+
+```
+                     ^                    ◇ Mathematics
+               ,-----------,              ◇ Programming
+               \ ≈≈≈≈≈≈≈≈≈ /   Crucible   ◆ Physics ────────┐
+                \         /         ◆     ◇ Chemistry       │
+                 \_______/                ◇ Biology         │
+                  /|   |\                 ◇ Engineering ────┘
+                 / |___| \                ◇ Philosophy
+                /         \               ◇ Sociology
+               '-----------'              ◇ Language
+                                          · Fallback
+```
+
+The fire says what the machine is doing — banked when idle, a steady column
+while a model is loading, a full plume with the melt bubbling while tokens are
+coming out. The line joins Crucible to whichever expert the delegation chose.
+
+### Making your own
+
+```
+/newexpert
+```
+
+opens two boxes: a name, and what the expert is trained in. That is all you are
+asked for. The id, the four-character chip, and the keyword set the model-free
+router scores with are derived from what you typed. The worked examples the
+delegator routes on are written **by the delegator itself** — two example
+questions per seat is worth seven points of routing accuracy on the benchmark
+(89% to 96%), and it is the one input a description cannot stand in for.
+
+```
+/ejectexpert chemistry
+```
+
+removes one, including the built-in nine. The roster is a set of defaults, not a
+floor: eject a seat and it stays ejected.
+
+A new expert is routable the moment it exists. Point it at a GGUF from
+`/settings` and it starts answering; leave it empty and prompts routed to it
+land on the fallback.
+
+---
+
+## Cooking
+
+```
+/cook fix the failing tests and tidy up the parser
+/cook 30m make the CLI take a --json flag
+/stop
+```
+
+A cook is a goal and a budget. Without a time it runs until you `/stop` it.
+
+The expert works one action at a time, and you watch it happen:
+
+```
+cook ▸ fix the bug in calc.py so that test_calc.py passes
+     working  ·  round 2  ·  4 minutes  ·  26 minutes left
+
+     list    listed . (2 entries)
+     read    read calc.py
+     note    the add function subtracts instead of adding
+     write   updated calc.py (8 lines)
+     run     $ python3 -m pytest -q  -- exit 0
+     done    fixed the sign error and confirmed the test passes
+
+     changed  calc.py
+```
+
+It can stop and ask you something, and the next thing you type answers it:
+
+```
+   ? Should the parser reject a trailing comma, or accept it silently?
+     type an answer and press enter
+```
+
+**`/stop` is not cancel.** It stops the cook taking new work and runs a
+finishing pass whose only job is to leave the project in a state that runs —
+finish a half-made edit, repair what broke, check it starts. `Ctrl-C` is still
+there for "stop now".
+
+`/cooks` lists what every past cook in this project changed and how long it
+took. The journal is written as the cook runs, not at the end, so a cook killed
+at minute fifty can still tell you what it did.
+
+> A finished cook that wrote no files says so, in red, under its own summary.
+> The summary is the expert's account of itself; the journal is the fact. They
+> disagree more often than you would like.
+
+### The workshop
+
+Cooking needs the workshop, and the workshop is **off until you turn it on**, in
+`/settings` under TOOLS. It is what lets an expert act on a project rather than
+describe it:
+
+| | |
+|---|---|
+| `LIST:` | what is in a directory |
+| `READ:` | a file, with line numbers |
+| `WRITE:` | replace a file |
+| `RUN:` | run a command in the project root |
+| `SEARCH:` | look something up (needs web search on) |
+| `ASK:` | ask you something |
+| `NOTE:` `DONE:` | record what it is doing; close a piece of work |
+
+Three things are load-bearing and none of them is the tool list.
+
+**Every path is resolved inside the project root and anything that escapes is
+refused** — absolute paths, `..`, and symlinks, which are resolved *before* the
+check rather than after. Containment compares path components rather than
+strings, because `/home/me/proj` is a text prefix of `/home/me/project-two` and
+is not a parent of it. An expert that can write outside the project is not a
+coding assistant, it is a remote shell, and the difference has to be structural.
+
+**It is two switches, not one.** Letting a model edit a project you already
+trusted and letting it execute arbitrary commands there are different decisions;
+`RUN` can be off while the rest is on. Both sit on top of the folder-trust
+prompt Crucible already asks on first use in a directory.
+
+**It is a text protocol.** llama.cpp applies a chat template, it does not
+negotiate a tool schema, and Crucible cannot know which model is in the seat. A
+convention every model can follow beats one only the tool-trained models can.
+
+---
+
+## The desktop app
+
+```sh
+./install.sh --gui          # or: cmake -B build -DCRUCIBLE_BUILD_GUI=ON
+crucible-gui
+```
+
+The same engine with a different face — same roster, same cook loop, same
+config file, no protocol in between. Dear ImGui over GLFW, in one
+self-contained binary that links the core library directly.
+
+It is opt-in because it is the only part of Crucible that needs anything from
+the system beyond a compiler: OpenGL, and on Linux a few X11 development
+headers. An install that cannot find them builds the terminal program and says
+so.
 
 ---
 
@@ -102,8 +270,8 @@ get involved at all.
 ## Build from source
 
 If you would rather do it yourself: a C++20 compiler, CMake ≥ 3.24, and git.
-Everything else — llama.cpp, FTXUI, nlohmann/json — is fetched and pinned
-automatically.
+Everything else — llama.cpp, FTXUI, nlohmann/json, and for the desktop app Dear
+ImGui and GLFW — is fetched and pinned automatically.
 
 ```sh
 git clone https://github.com/mattsaund/crucible.git
@@ -144,6 +312,7 @@ remove everything it put down.
 | `CRUCIBLE_NATIVE` | `ON` | tune for this machine; only consulted by monolithic builds, since a loadable backend cannot be built for one CPU |
 | `CRUCIBLE_BUILD_TESTS` | `ON` | build the unit tests |
 | `CRUCIBLE_BUILD_TOOLS` | `ON` | build `crucible-routebench` |
+| `CRUCIBLE_BUILD_GUI` | `OFF` | build the desktop app; needs OpenGL and, on Linux, the X11 development headers |
 | `CRUCIBLE_WARNINGS` | `ON` | strict warnings on Crucible's own sources |
 | `CRUCIBLE_CUDA` | `OFF` | monolithic builds only: compile CUDA in |
 | `CRUCIBLE_VULKAN` | `OFF` | monolithic builds only: compile Vulkan in |
@@ -153,6 +322,8 @@ remove everything it put down.
 ## Setup
 
 As of right now, Crucible is BYO models. There are plans in the future to train specifically trained experts to open source.
+
+Nothing here ships with a model, and nothing downloads one behind your back.
 
 You can either store the models in the default model directory or point Crucible to your own model directory
 
@@ -203,28 +374,59 @@ each expert seat and for the delegator from whatever is in it, and tune sampling
   "models_dir": "~/.local/share/crucible/models",
   "router":   { "model": "LFM2-1.2B-Q8_0.gguf" },
   "defaults": { "n_ctx": 8192, "n_gpu_layers": -1, "temperature": 0.7 },
-  "experts": {
-    "mathematics": { "model": "math-expert-q4_k_m.gguf" },
-    "physics":     { "model": "physics-expert-q4_k_m.gguf" },
-    "programming": { "model": "/mnt/big/code-expert-q4_k_m.gguf" }
-  }
+
+  // A list, because the order is the order the seats are drawn in. A built-in
+  // expert that has not been retuned writes only its id -- its name, blurb,
+  // keywords and examples come from the table Crucible ships.
+  "experts": [
+    { "id": "mathematics", "builtin": true, "model": "math-expert-q4_k_m.gguf" },
+    { "id": "physics",     "builtin": true, "model": "physics-expert-q4_k_m.gguf" },
+    { "id": "programming", "builtin": true, "model": "/mnt/big/code-expert-q4_k_m.gguf" },
+
+    // One you made. `/newexpert` writes this; by hand, an id and a blurb are
+    // the only fields that have to be there.
+    { "id": "rust-async",
+      "name": "Rust Async",
+      "tag": "RA",
+      "blurb": "tokio, futures, pinning, async traits, executor tuning",
+      "examples": ["why does my future never wake",
+                   "how do I pin a self-referential struct"],
+      "keywords": ["tokio", "futures", "pinning", "async"],
+      "model": "" },
+
+    { "id": "fallback", "builtin": true, "model": "generalist-q4_k_m.gguf" }
+  ]
 }
 ```
+
+An `"experts"` key that is present but empty is taken at its word: a roundtable
+with only a fallback on it. The built-in nine are defaults, not a floor.
 
 ```jsonc
 "routing": {
   "min_confidence": 0.60,       // below this, treat the answer as undecided
   "use_fallback_expert": true   // empty seats send work to Fallback, not elsewhere
+},
+"tools": {
+  "web_search": false,          // the only thing Crucible sends off the machine
+  "workshop": false,            // let experts read and write in the project
+  "workshop_run": true,         // ...and run commands there
+  "workshop_timeout": 120       // seconds before a stuck command is killed
 }
 ```
 
 ## The delegator model
 
-The delegator never answers you; it only names a subject. 
+The delegator never answers you; it only names an expert. 
 
-It applies a score to the prompt to dictate what subject would be best suited to answer.
-You can adjust the min scoring thresholds in settings. The more detailed the prompt the more
-accurate the delegator is.
+It scores every expert on the roster as a continuation of your prompt and takes
+the best. Scoring rather than generating is what makes naming an expert that
+does not exist impossible rather than merely unlikely, and it gives a confidence
+worth thresholding on — you can set that threshold in settings. The more
+detailed the prompt, the more accurate the delegator is.
+
+Adding an expert changes what it is choosing between, which is why a new seat
+gets worked examples written for it before it is first used.
 
 ---
 
@@ -232,15 +434,23 @@ accurate the delegator is.
 
 | command | |
 |---|---|
-| `/<subject> <prompt>` | skip routing, send straight to one expert |
+| `/<expert> <prompt>` | skip routing, send straight to one expert |
+| `/cook [30m] <goal>` | work on this project until the time is up, or until `/stop` |
+| `/stop` | wrap up the cook: finishing touches, then done |
+| `/cooks` | what past cooks changed, and how long they took |
+| `/newexpert` | add an expert: a name, and what it is trained in |
+| `/ejectexpert <name>` | remove one from the roundtable |
+| `/experts` | which seats are filled, and with what |
 | `/resume` | reopen an earlier conversation about this project |
 | `/new` | start a fresh conversation, keeping the current one on disk |
 | `/usage` | tokens spent this session and on this project |
-| `/config` | open the settings screen |
+| `/settings` | assign models, tune sampling, choose hardware |
 | `/runtimes` | install or remove compute backends |
 | `/models` | list the .gguf files in the models directory |
-| `/experts` | which seats are filled, and with what |
 | `/devices` | compute devices, with the indices the GPU split uses |
+| `/effort low\|medium\|high` | how hard a thinking model works |
+| `/thinking` | show or hide a thinking model's working |
+| `/search <query>` | look something up, if web search is on |
 | `/release` | unload the resident expert, freeing its memory |
 | `/clear` | clear the transcript and the experts' history |
 | `/paths` | where the config, models, runtimes, history and log live |
@@ -260,7 +470,6 @@ the rest of the best match in grey after the cursor. `Tab` takes it:
 | key | |
 |---|---|
 | `Tab` | accept the suggested command |
-| `/settings` | assign models, move the models directory, tune sampling |
 | `↑` `↓` · wheel | scroll the transcript a line at a time |
 | `Ctrl-C` | cancel the current answer; again when idle to quit |
 | `Ctrl-T` | show/hide the roundtable |
@@ -316,9 +525,12 @@ src/
 │   ├── usage.cpp       token counting and its readout
 │   └── store.cpp       per-project session history
 ├── routing/        deciding who answers
-│   ├── subject.cpp     the subject table; labels and prompt come from it
+│   ├── expert.cpp      the roster; every delegator input is generated from it
 │   ├── router.cpp      KeywordRouter and ModelRouter
+│   ├── benchmark.cpp   the prompts the delegator is measured against
 │   └── completion.cpp  the slash-command list, and matching a prefix to it
+├── cook/           working on a project over an hour
+│   └── journal.cpp     what a cook did, live and afterwards
 ├── llm/            everything that touches llama.cpp
 │   ├── model_host.cpp    owns the backend; one expert resident at a time
 │   ├── loaded_model.cpp  the generation loop
@@ -327,7 +539,8 @@ src/
 │   ├── model_shape.cpp   what a GGUF says about itself, before it is loaded
 │   └── response_filter.cpp  sorting a model's working from its answer
 ├── tools/          what the experts can reach beyond the machine
-│   └── web_search.cpp  looking something up, off by default
+│   ├── web_search.cpp  looking something up, off by default
+│   └── workshop.cpp    reading, writing and running things inside one root
 │
 ├── util/           the parts with no opinions
 │   ├── markdown.cpp    reading the markdown a model wrote
@@ -338,6 +551,7 @@ src/
 │
 ├── engine/         the delegation loop            [worker thread]
 │   ├── engine.cpp        route -> JIT swap -> generate
+│   ├── engine_cook.cpp   the cook loop: act, read the result, act again
 │   ├── route_policy.cpp  what to do with the delegator's answer
 │   └── state.cpp         the only memory the two threads share
 ├── ui/                                            [UI thread]
@@ -345,11 +559,14 @@ src/
 │   ├── commands.cpp    slash commands
 │   ├── transcript.cpp  drawing the conversation, markdown and all
 │   ├── session_picker.cpp  the /resume list
-│   ├── widgets/        crucible sprite, roundtable
+│   ├── widgets/        crucible sprite, roundtable, new-expert form
 │   └── settings/       view, runtimes panel, GPU priority panel,
 │                       model manager, directory browser, model picker,
 │                       line editor
-└── util/           text and formatting helpers, subprocess
+└── gui/            the desktop app                 [its own binary]
+    ├── main.cpp        parse, trust, hand off
+    ├── app.cpp         the window: sidebar, panes, composer
+    └── theme.cpp       the palette, the flame, the status diamonds
 
 ## Roadmap
 
@@ -361,8 +578,17 @@ src/
 - [x] Token counts per turn, session and project, with a live tok/s readout
 - [x] Multi-GPU splitting: even by memory, or a priority order you set
 - [x] `/resume` — per-project conversation history
-- [ ] **Agentic tools** — file read/edit, shell, web search, with a permission model
+- [x] **A roster you own** — `/newexpert` and `/ejectexpert`, with the delegator
+      writing its own worked examples for a new seat
+- [x] **Agentic tools** — file read/write, shell, web search, sandboxed to one
+      root and off until switched on
+- [x] **Cooking** — a goal and a budget instead of a question, with a journal of
+      what changed
+- [x] **A desktop app** — the same engine, a different face
 - [ ] Prefix caching so an unchanged conversation is not re-ingested every turn
+- [ ] A cook that can hand work between experts mid-run, rather than routing once
+- [ ] Diffs in the cook journal, so a step says what changed and not only that
+      something did
 - [ ] Predictive preloading of the likely next expert
 - [ ] Fine-tuned 1B Crucible router to replace the off-the-shelf one
 - [ ] Curated subject experts, offered as a download you opt into — never bundled
