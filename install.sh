@@ -18,11 +18,15 @@ BRANCH="main"
 # screen later. It is not "which runtime to install" -- Crucible installs none.
 RUNTIME="auto"   # auto | cpu | cuda | vulkan | metal
 
-# The desktop application. Opt-in because it is the only part of Crucible that
-# needs anything from the system beyond a compiler -- OpenGL and, on Linux, a
-# handful of X11 development headers. Someone who only wants `crucible` in a
-# terminal should not have to install those to get it.
-WITH_GUI=0
+# The desktop application. Built by default: Crucible is two faces over one
+# engine, and someone who runs the one-line install should get both of them.
+#
+# It is the only part that needs anything from the system beyond a compiler --
+# OpenGL and, on Linux, a handful of X11 development headers, a few megabytes
+# in total, which this installs. Where those cannot be had the build steps
+# down to the terminal program with a warning rather than failing, so turning
+# this on cannot cost anyone their install. --no-gui skips it outright.
+WITH_GUI=1
 
 # Which backends the settings screen will offer, which is not the same list on
 # every platform: Metal exists only on Apple hardware and CUDA has not existed
@@ -468,9 +472,13 @@ usage: install.sh [options]
                    otherwise ~/.local)
   --branch NAME    git branch to build (default: main)
   --jobs N         parallel build jobs (default: all cores)
-  --gui            also build the desktop application (crucible-gui).
-                   Needs OpenGL and, on Linux, the X11 development headers,
-                   which this installs. The terminal program needs neither.
+  --no-gui         build only the terminal program, skipping crucible-gui.
+                   The desktop app is built by default; it needs OpenGL and,
+                   on Linux, the X11 development headers, which this installs.
+                   Where they are unavailable the build falls back to the
+                   terminal program on its own.
+  --gui            build the desktop application. On by default; the flag is
+                   kept so an explicit --gui still means what it says.
   --no-deps        do not install system packages
   -y, --yes        assume yes; never prompt
   --check          report what would be installed and which runtime is chosen
@@ -485,7 +493,7 @@ examples:
   curl -fsSL $RAW_URL | bash
   curl -fsSL $RAW_URL | bash -s -- --gpu vulkan
   ./install.sh --prefix ~/.local --gpu cpu
-  ./install.sh --gui
+  ./install.sh --no-gui
 EOF
 }
 
@@ -495,6 +503,7 @@ EOF
 while [ $# -gt 0 ]; do
     case "$1" in
         --gui)       WITH_GUI=1;       shift ;;
+        --no-gui)    WITH_GUI=0;       shift ;;
         --gpu)       RUNTIME="${2:-}";    shift 2 ;;
         --gpu=*)     RUNTIME="${1#*=}";   shift ;;
         --prefix)    PREFIX="${2:-}"; shift 2 ;;
@@ -996,10 +1005,14 @@ install_dependencies() {
         phase_end
     fi
 
-    # The desktop app's dependencies, when it was asked for. Small -- a few
-    # megabytes of headers -- but they are the one thing Crucible needs from the
-    # system beyond a compiler, which is why the GUI is opt-in and this is not
-    # installed for someone who only wants the terminal program.
+    # The desktop app's dependencies. Small -- a few megabytes of headers --
+    # but they are the one thing Crucible needs from the system beyond a
+    # compiler, so this is the one step that can fail on a machine that is
+    # otherwise fine. It degrades instead: the warning says the terminal
+    # program is being built, and the install carries on.
+    #
+    # Skipped entirely on macOS, where PKGS_GUI is empty because OpenGL comes
+    # with the system.
     if [ "$WITH_GUI" = "1" ] && [ "${#PKGS_GUI[@]}" -gt 0 ]; then
         phase 20 "installing the desktop app's dependencies"
         if packages_available ${PKGS_GUI[@]+"${PKGS_GUI[@]}"}; then
@@ -1440,6 +1453,11 @@ run_check() {
 
     printf '\n%swould build and install:%s\n' "$C_BOLD" "$C_RESET"
     info "binary     : $PREFIX/bin/crucible"
+    if [ "$WITH_GUI" = "1" ]; then
+        info "desktop app: $PREFIX/bin/crucible-gui"
+    else
+        muted "desktop app: skipped (--no-gui)"
+    fi
     info "libraries  : $PREFIX/lib/crucible"
     info "config     : ${XDG_CONFIG_HOME:-$HOME/.config}/crucible/config.json"
     info "runtime dir: ${XDG_DATA_HOME:-$HOME/.local/share}/crucible/runtimes"
@@ -1502,6 +1520,11 @@ main() {
 
     printf '\n%s%s  Crucible is installed.%s\n\n' "$C_GRN" "$C_BOLD" "$C_RESET"
     printf '    binary   : %s\n' "$PREFIX/bin/crucible"
+    # WITH_GUI is whatever survived the dependency step, so this reports what
+    # was actually built rather than what was asked for.
+    if [ "$WITH_GUI" = "1" ]; then
+        printf '    desktop  : %s\n' "$PREFIX/bin/crucible-gui"
+    fi
     printf '    models   : %s\n' "$models_dir"
     printf '    config   : %s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/crucible/config.json"
     printf '    runtimes : %snone yet%s\n' "$C_YEL" "$C_RESET"

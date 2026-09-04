@@ -23,9 +23,14 @@
 .PARAMETER Prefix
     Where to install. Defaults to %LOCALAPPDATA%\Programs\Crucible.
 
+.PARAMETER NoGui
+    Build only the terminal program, skipping crucible-gui. The desktop app is
+    built by default: it needs nothing extra on Windows, since OpenGL is part
+    of the system, so unlike Linux it costs only build time.
+
 .PARAMETER Gui
-    Also build the desktop application. Needs nothing extra on Windows --
-    OpenGL is part of the system -- so unlike Linux this costs only build time.
+    Build the desktop application. On by default; the switch is kept so an
+    explicit -Gui still means what it says.
 
 .PARAMETER Uninstall
     Remove an installed Crucible instead of installing one.
@@ -38,6 +43,7 @@ param(
     [string] $Branch = 'main',
     [int]    $Jobs   = 0,
     [switch] $Gui,
+    [switch] $NoGui,
     [switch] $NoDeps,
     [switch] $Yes,
     [switch] $Check,
@@ -193,7 +199,9 @@ $runtime = Resolve-Runtime
 Write-Step "checking the machine"
 Write-Note "prefix     : $Prefix"
 Write-Note "GPU SDK    : $runtime"
-Write-Note "desktop app: $(if ($Gui) { 'yes' } else { 'no (pass -Gui)' })"
+# -Gui is accepted and redundant; -NoGui is the one that changes anything.
+$BuildGui = -not $NoGui
+Write-Note "desktop app: $(if ($BuildGui) { 'yes' } else { 'no (-NoGui)' })"
 
 if ($Check) {
     Write-Note "cmake      : $(if (Test-Command 'cmake') { 'found' } else { 'would install' })"
@@ -245,7 +253,7 @@ $generator = if (Test-Command 'ninja') { @('-G', 'Ninja') } else { @() }
     -DCMAKE_BUILD_TYPE=Release `
     -DCMAKE_INSTALL_PREFIX="$Prefix" `
     -DCRUCIBLE_BACKEND_DL=ON `
-    -DCRUCIBLE_BUILD_GUI="$(if ($Gui) { 'ON' } else { 'OFF' })" 2>&1 |
+    -DCRUCIBLE_BUILD_GUI="$(if ($BuildGui) { 'ON' } else { 'OFF' })" 2>&1 |
     Tee-Object -Variable configureLog | Out-Null
 if ($LASTEXITCODE -ne 0) {
     $configureLog | Select-String -Pattern 'CMake Error|error:' | Select-Object -First 20 |
@@ -281,6 +289,6 @@ if ($userPath -notlike "*$binDir*") {
 Write-Ok "installed to $Prefix"
 Write-Host ''
 Write-Note 'cd into a project and run:  crucible'
-if ($Gui) { Write-Note 'or open the desktop app:     crucible-gui' }
+if ($BuildGui) { Write-Note 'or open the desktop app:     crucible-gui' }
 Write-Note 'no GPU runtime is installed yet -- type /runtimes inside Crucible to build one'
 Write-Host ''

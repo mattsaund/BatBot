@@ -215,8 +215,14 @@ convention every model can follow beats one only the tool-trained models can.
 ## The desktop app
 
 ```sh
-./install.sh --gui          # or: cmake -B build -DCRUCIBLE_BUILD_GUI=ON
-crucible-gui
+crucible-gui                # installed by default; --no-gui skips it
+```
+
+Building it by hand needs the option turned on, since a bare CMake run cannot
+install OpenGL headers for you the way the installer can:
+
+```sh
+cmake -B build -DCRUCIBLE_BUILD_GUI=ON
 ```
 
 The same engine with a different face — same roster, same cook loop, same config
@@ -287,10 +293,16 @@ curl -fsSL https://raw.githubusercontent.com/mattsaund/Crucible/main/install.sh 
 irm https://raw.githubusercontent.com/mattsaund/Crucible/main/install.ps1 | iex
 ```
 
-Either one installs Crucible and the build tools it needs, and re-running it
-upgrades in place. Neither installs a GPU runtime: Crucible compiles one on
-demand from its settings screen, because a backend has to match the machine it
-will run on and a ten-minute compile does not belong in an installer.
+Either one installs **both** faces — `crucible` for the terminal and
+`crucible-gui` for the desktop — along with the build tools they need, and
+re-running it upgrades in place. Pass `--no-gui` (`-NoGui` on Windows) for the
+terminal program alone. On Linux the desktop app needs OpenGL and a few X11
+development headers, which the installer adds; where those are unavailable it
+says so and builds the terminal program rather than failing.
+
+Neither installs a GPU runtime: Crucible compiles one on demand from its
+settings screen, because a backend has to match the machine it will run on and
+a ten-minute compile does not belong in an installer.
 
 > **On platform support.** Linux is what Crucible is developed and tested on.
 > macOS is regularly built and run. Windows is written and reviewed but has not
@@ -327,6 +339,7 @@ curl -fsSL .../install.sh | bash -s -- --gpu vulkan --prefix ~/.local
 |---|---|
 | `--gpu cuda\|vulkan\|metal\|cpu\|auto` | which GPU SDK to install (default `auto`; `metal` on a Mac, and `cuda` is refused there) |
 | `--prefix DIR` | install location (default `/usr/local`, or `~/.local` without sudo) |
+| `--no-gui` | build only the terminal program; the desktop app is built by default |
 | `--jobs N` | parallel build jobs |
 | `--check` | report what would happen, change nothing, never ask for sudo |
 | `--no-deps` | do not install system packages |
@@ -407,7 +420,7 @@ remove everything it put down.
 | `CRUCIBLE_NATIVE` | `ON` | tune for this machine; only consulted by monolithic builds, since a loadable backend cannot be built for one CPU |
 | `CRUCIBLE_BUILD_TESTS` | `ON` | build the unit tests |
 | `CRUCIBLE_BUILD_TOOLS` | `ON` | build `crucible-routebench` |
-| `CRUCIBLE_BUILD_GUI` | `OFF` | build the desktop app; needs OpenGL and, on Linux, the X11 development headers |
+| `CRUCIBLE_BUILD_GUI` | `OFF` | build the desktop app; needs OpenGL and, on Linux, the X11 development headers. The installers turn this on by default — they can add those headers first and fall back to the terminal program if they cannot; a bare `cmake` run can do neither, so it stays off here |
 | `CRUCIBLE_WARNINGS` | `ON` | strict warnings on Crucible's own sources |
 | `CRUCIBLE_CUDA` | `OFF` | monolithic builds only: compile CUDA in |
 | `CRUCIBLE_VULKAN` | `OFF` | monolithic builds only: compile Vulkan in |

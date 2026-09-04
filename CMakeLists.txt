@@ -331,10 +331,18 @@ if(CRUCIBLE_BACKEND_DL)
             # llama.cpp as a library. Crucible only wants the binary, so clear
             # it rather than scatter llama.cpp's headers through the prefix.
             set_target_properties(${_lib} PROPERTIES PUBLIC_HEADER "")
+            # COMPONENT is repeated per artifact kind on purpose. Everything
+            # after LIBRARY/RUNTIME applies to that kind alone, so a single
+            # trailing COMPONENT would attach to RUNTIME and leave the LIBRARY
+            # rule in the default "Unspecified" component -- which
+            # `--install --component crucible` never installs. That is exactly
+            # how these shared objects went missing: the binaries landed, the
+            # libraries they need did not, and crucible would not start.
             install(TARGETS ${_lib}
                     LIBRARY DESTINATION ${CRUCIBLE_LIBDIR}
+                            COMPONENT ${CRUCIBLE_INSTALL_COMPONENT}
                     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-                    COMPONENT ${CRUCIBLE_INSTALL_COMPONENT})
+                            COMPONENT ${CRUCIBLE_INSTALL_COMPONENT})
         endif()
     endforeach()
 

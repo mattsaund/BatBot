@@ -305,9 +305,30 @@ echo "  install component"
 
 check     "CMakeLists puts Crucible's install rules in a component" \
           grep -q "COMPONENT \${CRUCIBLE_INSTALL_COMPONENT}" "$HERE/../CMakeLists.txt"
-check     "no install rule is left outside that component" \
-          test "$(grep -c '^ *install(TARGETS' "$HERE/../CMakeLists.txt")" \
-               = "$(grep -c 'COMPONENT \${CRUCIBLE_INSTALL_COMPONENT}' "$HERE/../CMakeLists.txt")"
+# Counting install(TARGETS) against COMPONENT used to stand in for this, and
+# it is what let the bug through: the counts matched while the component was
+# attached to the wrong artifact kind. What has to hold is that *every*
+# artifact group in a rule names a component of its own, because options after
+# LIBRARY or RUNTIME bind to that kind alone.
+every_artifact_group_names_a_component() {
+    awk '
+        /install\(TARGETS/ { inrule = 1; group = 0; has = 0 }
+        inrule {
+            if ($0 ~ /(ARCHIVE|LIBRARY|RUNTIME|OBJECTS|FRAMEWORK|BUNDLE)[ \t]+DESTINATION/) {
+                if (group && !has) bad = 1
+                group = 1; has = 0
+            }
+            if ($0 ~ /COMPONENT/) has = 1
+            if ($0 ~ /\)[ \t]*$/) {
+                if (group && !has) bad = 1
+                inrule = 0
+            }
+        }
+        END { exit bad ? 1 : 0 }
+    ' "$1"
+}
+check     "every artifact group in an install rule names its component" \
+          every_artifact_group_names_a_component "$HERE/../CMakeLists.txt"
 check     "the installer asks for that component" \
           grep -q -- "--install .* --component crucible" "$HERE/../install.sh"
 check_eq  "every install invocation is scoped" \
@@ -398,27 +419,44 @@ STEP_NUM=0; STEP_PCT=0
 # makes the choice of backend reversible.
 # --------------------------------------------------------------------------
 echo
-echo "  the desktop app is opt-in"
+echo "  the one-line install builds both faces"
 
-# The GUI is the one part of Crucible that needs anything from the system
-# beyond a compiler. Someone who only wants the terminal program must not be
-# made to install OpenGL and half of X11 to get it.
-check     "the desktop app is off unless asked for" \
-          grep -q 'option(CRUCIBLE_BUILD_GUI .* OFF)' "$HERE/../CMakeLists.txt"
-check     "--gui turns it on" \
+# Crucible is two faces over one engine, so the one-line install gives you
+# both. The GUI is still the only part that needs anything from the system
+# beyond a compiler, which is what the fallback below is for.
+check     "the installer builds the desktop app by default" \
+          grep -q '^WITH_GUI=1$' "$HERE/../install.sh"
+check     "--no-gui opts out" \
+          grep -q -- '--no-gui)    WITH_GUI=0' "$HERE/../install.sh"
+check     "--gui is still accepted, and still means yes" \
           grep -q -- '--gui)       WITH_GUI=1' "$HERE/../install.sh"
 check     "the installer passes the choice through to cmake" \
           grep -q 'DCRUCIBLE_BUILD_GUI=' "$HERE/../install.sh"
-check     "it is off unless --gui is passed" \
-          grep -q '^WITH_GUI=0$' "$HERE/../install.sh"
-# The packages are the point of the flag: they are what an install that only
-# wants the terminal program must not be made to pull in.
-check     "the GUI's packages are behind that flag" \
+
+# The CMake option stays off. The installers can add the OpenGL and X11 headers
+# first and step down to the terminal program when they cannot; a bare `cmake`
+# run can do neither, so defaulting it on there would turn a missing system
+# header into a failed build.
+check     "the CMake option itself stays off for a bare build" \
+          grep -q 'option(CRUCIBLE_BUILD_GUI .* OFF)' "$HERE/../CMakeLists.txt"
+
+check     "the GUI's packages are behind the flag" \
           grep -q 'WITH_GUI" = "1" \] && \[ "${#PKGS_GUI\[@\]}"' "$HERE/../install.sh"
-# A window library that cannot be installed must downgrade to the terminal
-# program rather than failing an install that was otherwise going to work.
+# This is what makes the new default safe: a machine with no window library
+# gets the terminal program and a warning, not a failed install.
 check     "a missing window library falls back to the terminal app" \
           grep -q 'building the terminal app only' "$HERE/../install.sh"
+check     "the fallback leaves WITH_GUI off, so the summary tells the truth" \
+          grep -q 'WITH_GUI=0$' "$HERE/../install.sh"
+
+# Windows: switches default to false, so the opt-out is the switch and the
+# build flag has to be derived from it rather than read directly.
+check     "Windows takes -NoGui" \
+          grep -q '\[switch\] \$NoGui' "$HERE/../install.ps1"
+check     "Windows derives the build flag from it" \
+          grep -q 'BuildGui = -not \$NoGui' "$HERE/../install.ps1"
+check_not "Windows no longer gates the build on the bare -Gui switch" \
+          grep -q 'CRUCIBLE_BUILD_GUI="\$(if (\$Gui)' "$HERE/../install.ps1"
 
 echo
 echo "  no runtimes are installed"
@@ -587,6 +625,43 @@ check_eq "CUDA on a Mac is refused, not attempted" "$(runtime_for Darwin cuda)" 
 check_eq "Metal off a Mac is refused, not attempted" "$(runtime_for Linux metal)" ""
 check     "the refusal names what to use instead" \
           grep -q -- "use --gpu metal (or --gpu cpu)" "$HERE/../install.sh"
+
+echo
+echo "  the crucible component carries the libraries the binary links against"
+
+# The bug this pins down: in install(TARGETS), every option after LIBRARY or
+# RUNTIME binds to that artifact kind alone. A single trailing COMPONENT
+# attaches to RUNTIME and leaves the LIBRARY rule in CMake's default
+# "Unspecified" component, which `--install --component crucible` never
+# installs. The binaries land, the shared objects they need do not, and
+# crucible dies on startup with
+#   "libllama.so: cannot open shared object file: No such file or directory".
+#
+# Read off the generated install script rather than by installing: it names the
+# component of every file, needs no build, and is what CMake will actually run.
+filed_under_crucible() {
+    awk -v want="$2" '
+        /^if\(CMAKE_INSTALL_COMPONENT STREQUAL "/ {
+            component = $0
+            sub(/.*STREQUAL "/, "", component)
+            sub(/".*/, "", component)
+        }
+        index($0, want) { seen = 1; if (component != "crucible") wrong = 1 }
+        END { exit (seen && !wrong) ? 0 : 1 }
+    ' "$1"
+}
+
+GENERATED="$HERE/../build/cmake_install.cmake"
+if [ -f "$GENERATED" ]; then
+    for _lib in libllama.so libggml.so libggml-base.so; do
+        check "$_lib is filed under the crucible component" \
+              filed_under_crucible "$GENERATED" "lib/crucible/$_lib"
+    done
+    check "the crucible binary is filed under the crucible component" \
+          filed_under_crucible "$GENERATED" "bin/crucible"
+else
+    echo "    (skipped: no configured build tree at build/)"
+fi
 
 echo
 echo "$((PASS + FAIL)) checks, $FAIL failed"
