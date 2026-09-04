@@ -698,8 +698,8 @@ src/
 - [ ] **Compile Crucible on Windows** — the platform code is written; nobody has
       built it there yet
 - [ ] Prefix caching so an unchanged conversation is not re-ingested every turn
-- [ ] Diffs in the cook journal, so a step says what changed and not only that
-      something did
+- [x] **Diffs in the cook journal** — a write records what changed, not only
+      that something did, and both faces expand a step to show it
 - [ ] Predictive preloading of the likely next expert
 - [ ] Fine-tuned 1B Crucible router to replace the off-the-shelf one
 - [ ] Curated subject experts, offered as a download you opt into — never bundled
