@@ -394,8 +394,15 @@ each expert seat and for the delegator from whatever is in it, and tune sampling
       "keywords": ["tokio", "futures", "pinning", "async"],
       "model": "" },
 
-    { "id": "fallback", "builtin": true, "model": "generalist-q4_k_m.gguf" }
-  ]
+    { "id": "general",
+      "name": "General",
+      "blurb": "anything that does not obviously belong to one of the others",
+      "model": "generalist-q4_k_m.gguf" }
+  ],
+
+  // Which seat catches what the delegator could not place, or what was routed
+  // to a seat with no model. Any ordinary expert; empty means there is none.
+  "routing": { "default_expert": "general" }
 }
 ```
 

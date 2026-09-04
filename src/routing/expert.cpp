@@ -81,25 +81,7 @@ Expert builtin(const char* id, const char* name, const char* tag, const char* bl
     expert.examples = std::move(examples);
     expert.keywords = std::move(keywords);
     expert.builtin  = true;
-    expert.routable = true;
     return expert;
-}
-
-Expert fallback_seat() {
-    Expert seat;
-    seat.id   = std::string(kFallbackId);
-    seat.name = "Fallback";
-    seat.tag  = "FALL";
-    // Never offered to the delegator, so this text is for the settings screen
-    // only -- it is not part of the routing prompt.
-    seat.blurb =
-        "takes prompts the delegator could not place, and prompts routed to a seat "
-        "with no model";
-    seat.builtin  = true;
-    seat.routable = false;
-    // No keywords on purpose: the fallback is reached by the no-match path, not
-    // by competing for scores.
-    return seat;
 }
 
 }  // namespace
@@ -190,16 +172,12 @@ Roster Roster::defaults() {
              "etymology","syntax rules","proofread","paragraph","literature","novel",
              "tone","phonetic","vocabulary","idiom","narrative","rewrite","spelling",
              "linguistic","prose","dialogue","summarize"}),
-
-        fallback_seat(),
     };
     return roster;
 }
 
 Roster Roster::bare() {
-    Roster roster;
-    roster.experts_ = {fallback_seat()};
-    return roster;
+    return Roster{};
 }
 
 // ---------------------------------------------------------------------------
@@ -207,14 +185,12 @@ Roster Roster::bare() {
 // ---------------------------------------------------------------------------
 
 const Expert& Roster::at(std::size_t index) const {
-    // Out of range resolves to the fallback rather than to whatever is at zero.
-    // An index that has gone stale -- a seat ejected while a turn was in flight
-    // -- then reads as "nobody in particular", which is true, instead of
-    // silently attributing the work to the first expert in the list.
-    if (index < experts_.size()) {
-        return experts_[index];
-    }
-    return experts_[fallback_index()];
+    // Out of range resolves to a blank expert rather than to whatever is at
+    // zero. An index can go stale -- a seat ejected while a turn was in flight
+    // -- and reading "nobody in particular" is true, where reading index zero
+    // would silently attribute the work to the first expert in the list.
+    static const Expert kNobody{};
+    return index < experts_.size() ? experts_[index] : kNobody;
 }
 
 std::optional<std::size_t> Roster::find(std::string_view key) const {
@@ -232,40 +208,9 @@ std::optional<std::size_t> Roster::find(std::string_view key) const {
     return std::nullopt;
 }
 
-std::size_t Roster::fallback_index() const {
-    for (std::size_t i = 0; i < experts_.size(); ++i) {
-        if (!experts_[i].routable) {
-            return i;
-        }
-    }
-    // Unreachable while every constructor plants a fallback and `remove`
-    // refuses to take it away. Answering with the last index keeps `at()` in
-    // bounds if that ever stops being true.
-    return experts_.empty() ? 0 : experts_.size() - 1;
-}
-
-std::vector<std::size_t> Roster::routable() const {
-    std::vector<std::size_t> out;
-    for (std::size_t i = 0; i < experts_.size(); ++i) {
-        if (experts_[i].routable) {
-            out.push_back(i);
-        }
-    }
-    return out;
-}
-
 // ---------------------------------------------------------------------------
 // Mutation
 // ---------------------------------------------------------------------------
-
-void Roster::reorder() {
-    // The fallback goes last, wherever it was. It is not one of the specialists
-    // and the bottom of the list is where the thing that catches what the
-    // others did not belongs -- the roundtable draws the list in this order.
-    const auto is_fallback = [](const Expert& e) { return !e.routable; };
-    std::stable_partition(experts_.begin(), experts_.end(),
-                          [&](const Expert& e) { return !is_fallback(e); });
-}
 
 bool Roster::add(Expert expert, std::string& error) {
     expert.name = trim(expert.name);
@@ -278,10 +223,6 @@ bool Roster::add(Expert expert, std::string& error) {
     }
     if (expert.id.empty()) {
         error = "\"" + expert.name + "\" has no letters or digits in it to make a name from";
-        return false;
-    }
-    if (expert.id == kFallbackId) {
-        error = "\"fallback\" is the seat that catches everything else and already exists";
         return false;
     }
     if (find(expert.id) || find(expert.name)) {
@@ -309,7 +250,6 @@ bool Roster::add(Expert expert, std::string& error) {
     }
 
     experts_.push_back(std::move(expert));
-    reorder();
     return true;
 }
 
@@ -317,11 +257,6 @@ bool Roster::remove(std::string_view key, std::string& error) {
     const std::optional<std::size_t> index = find(key);
     if (!index) {
         error = "no expert called \"" + std::string(key) + "\"";
-        return false;
-    }
-    if (!experts_[*index].routable) {
-        error = "the fallback seat cannot be ejected -- it is where prompts go when "
-                "nothing else fits";
         return false;
     }
     experts_.erase(experts_.begin() + static_cast<std::ptrdiff_t>(*index));
@@ -336,7 +271,6 @@ bool Roster::update(const ExpertId& id, const Expert& replacement) {
             const ExpertId keep = expert.id;
             expert    = replacement;
             expert.id = keep;
-            reorder();
             return true;
         }
     }
@@ -361,10 +295,9 @@ std::vector<std::string> Roster::router_labels() const {
     // them costs 6 points), and on the roundtable, where a fixed width is what
     // makes the chips line up.
     std::vector<std::string> labels;
+    labels.reserve(experts_.size());
     for (const Expert& expert : experts_) {
-        if (expert.routable) {
-            labels.push_back(expert.name);
-        }
+        labels.push_back(expert.name);
     }
     return labels;
 }
@@ -379,9 +312,6 @@ std::string Roster::router_system_prompt() const {
         "You label a question with the one subject it belongs to.\n"
         "Reply with only a tag and a confidence.\n\n";
     for (const Expert& expert : experts_) {
-        if (!expert.routable) {
-            continue;  // the delegator is never offered the fallback seat
-        }
         // Tag, name, then the remit. The tag earns its place here even though
         // the delegator answers with the name: on the 54-prompt benchmark,
         // listing the options without their tags costs 6 points (87% to 81%).
@@ -399,9 +329,6 @@ std::string Roster::router_system_prompt() const {
 std::vector<std::pair<std::string, std::string>> Roster::router_examples() const {
     std::vector<std::pair<std::string, std::string>> examples;
     for (const Expert& expert : experts_) {
-        if (!expert.routable) {
-            continue;
-        }
         for (const std::string& question : expert.examples) {
             if (question.empty()) {
                 continue;

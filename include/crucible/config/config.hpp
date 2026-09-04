@@ -69,13 +69,19 @@ struct ModelParams {
 /// How the delegator's answer is acted on.
 struct RoutingConfig {
     /// Below this confidence the delegator is treated as undecided and the
-    /// prompt goes to the Fallback expert instead. 0 disables the check and
-    /// every routed subject is taken at face value.
+    /// prompt goes to `default_expert` instead -- or is taken at face value
+    /// when there is none. 0 disables the check entirely.
     float min_confidence = 0.60F;
 
-    /// Send work to Fallback when the chosen subject has no model behind it,
-    /// rather than substituting some other filled seat.
-    bool use_fallback_expert = true;
+    /// The expert that catches what does not fit: a prompt the delegator could
+    /// not place confidently, or one routed to a seat with no model.
+    ///
+    /// An ordinary seat, named by id, and empty by default. Crucible used to
+    /// ship a tenth built-in expert called Fallback for this; with a roster the
+    /// user owns, a general-purpose expert is something they add and name
+    /// themselves, and this says which one it is. Empty means there is none, and
+    /// an uncertain route is taken at face value rather than being sent nowhere.
+    ExpertId default_expert;
 
     /// Keep the delegator in memory between prompts.
     ///

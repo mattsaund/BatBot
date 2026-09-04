@@ -25,6 +25,7 @@
 #include "crucible/llm/response_filter.hpp"
 #include "crucible/tools/web_search.hpp"
 #include "crucible/cook/journal.hpp"
+#include "crucible/util/diff.hpp"
 #include "crucible/tools/workshop.hpp"
 #include "crucible/util/markdown.hpp"
 #include "crucible/util/resources.hpp"
@@ -116,6 +117,21 @@ ExpertId route_of(const std::string& prompt) {
 /// roster is no longer a fixed order known at compile time, so a test that
 /// indexed by a hard-coded number would silently start reading its neighbour
 /// the first time a seat moved.
+/// A journal step, built by name. CookStep has grown a field in the middle
+/// more than once, and a positional literal has to be edited every time.
+CookStep step_of(int iteration, const char* expert, const char* kind, const char* summary,
+                 bool ok = true, long ms = 0, std::vector<std::string> changed = {}) {
+    CookStep step;
+    step.iteration = iteration;
+    step.expert    = expert;
+    step.kind      = kind;
+    step.summary   = summary;
+    step.ok        = ok;
+    step.ms        = ms;
+    step.changed   = std::move(changed);
+    return step;
+}
+
 SeatState seat_of(const Snapshot& snapshot, const ExpertId& id) {
     if (snapshot.roster) {
         if (const std::optional<std::size_t> row = snapshot.roster->find(id)) {
@@ -135,7 +151,7 @@ SeatState seat_of(const Snapshot& snapshot, const ExpertId& id) {
 
 TEST(the_shipped_roster_is_complete_and_unique) {
     const Roster roster = Roster::defaults();
-    CHECK_EQ(roster.size(), std::size_t{10});
+    CHECK_EQ(roster.size(), std::size_t{9});
 
     std::set<std::string> ids;
     std::set<std::string> tags;
@@ -155,19 +171,21 @@ TEST(the_shipped_roster_is_complete_and_unique) {
     }
 }
 
-TEST(every_shipped_expert_but_the_fallback_is_routable_and_worked) {
+TEST(every_shipped_expert_is_worked_and_none_is_a_catch_all) {
     const Roster roster = Roster::defaults();
     for (const Expert& expert : roster.experts()) {
-        if (expert.id == kFallbackId) {
-            continue;
-        }
-        CHECK(expert.routable);
         // Two examples each and a keyword set each: both are what the two
         // routers actually read, and a seat missing either is a seat that
         // cannot be reached by that router.
         CHECK_EQ(expert.examples.size(), std::size_t{2});
         CHECK(!expert.keywords.empty());
     }
+
+    // No built-in catch-all. There used to be a tenth seat the delegator was
+    // forbidden from naming; a general-purpose expert is now something the user
+    // adds and nominates in `routing.default_expert`.
+    CHECK(!roster.find("fallback").has_value());
+    CHECK_EQ(roster.size(), std::size_t{9});
 }
 
 TEST(roster_lookup_accepts_ids_tags_names_and_case) {
@@ -228,7 +246,6 @@ TEST(an_expert_needs_only_a_name_and_a_description) {
     CHECK_EQ(added.tag, std::string("RA"));   // initials, not the first four letters
     CHECK(!added.keywords.empty());
     CHECK(!added.builtin);
-    CHECK(added.routable);
 
     // And the derived keywords are content words, not the whole description.
     CHECK(std::find(added.keywords.begin(), added.keywords.end(), "tokio")
@@ -260,7 +277,7 @@ TEST(a_name_that_is_already_taken_is_refused) {
     std::string error;
     CHECK(!roster.add(expert, error));
     CHECK(error.find("Physics") != std::string::npos);
-    CHECK_EQ(roster.size(), std::size_t{10});
+    CHECK_EQ(roster.size(), std::size_t{9});
 }
 
 TEST(a_name_with_nothing_to_slugify_is_refused) {
@@ -293,20 +310,22 @@ TEST(a_colliding_tag_is_broken_rather_than_duplicated) {
     }
 }
 
-TEST(the_fallback_seat_cannot_be_ejected) {
+TEST(a_built_in_expert_can_be_ejected_like_any_other) {
     Roster roster = Roster::defaults();
     std::string error;
-    CHECK(!roster.remove("fallback", error));
-    CHECK(!error.empty());
-    CHECK(roster.find("fallback").has_value());
 
-    // A built-in specialist can be, though: the roster is the user's list.
+    // The roster is the user's list. Nothing on it is protected.
     CHECK(roster.remove("chemistry", error));
     CHECK(!roster.find("chemistry").has_value());
-    CHECK_EQ(roster.size(), std::size_t{9});
+    CHECK_EQ(roster.size(), std::size_t{8});
+
+    // And removing something that is not there is an error, not a silent
+    // success -- a typo in /ejectexpert should say so.
+    CHECK(!roster.remove("chemistry", error));
+    CHECK(!error.empty());
 }
 
-TEST(the_fallback_seat_stays_last_however_the_roster_is_edited) {
+TEST(a_new_seat_goes_on_the_end_and_the_order_is_the_drawing_order) {
     Roster roster = Roster::defaults();
     Expert expert;
     expert.name  = "Tax Law";
@@ -315,20 +334,32 @@ TEST(the_fallback_seat_stays_last_however_the_roster_is_edited) {
     std::string error;
     CHECK(roster.add(expert, error));
 
-    // The roundtable draws the roster in order and puts the catch-all at the
-    // bottom. That is a property of the list, not of the widget, so a seat
-    // added after the fallback must not end up below it.
-    CHECK_EQ(roster.fallback_index(), roster.size() - 1);
-    CHECK_EQ(roster.at(roster.size() - 1).id, std::string(kFallbackId));
-    CHECK_EQ(roster.at(roster.size() - 2).id, std::string("tax-law"));
+    // The roundtable draws the roster in order, so where a seat lands in the
+    // list is where it lands on screen.
+    CHECK_EQ(roster.at(roster.size() - 1).id, std::string("tax-law"));
+    CHECK_EQ(roster.size(), std::size_t{10});
 }
 
-TEST(an_out_of_range_seat_reads_as_the_fallback) {
+TEST(an_out_of_range_seat_reads_as_nobody) {
     const Roster roster = Roster::defaults();
     // A handle can go stale between a seat being ejected and a turn in flight
     // noticing. Reading "nobody in particular" is true; reading whoever is at
     // index zero would attribute the work to Mathematics.
-    CHECK_EQ(roster.at(9999).id, std::string(kFallbackId));
+    CHECK(roster.at(9999).id.empty());
+    CHECK(roster.at(9999).name.empty());
+}
+
+TEST(every_seat_can_be_ejected_including_the_last_one) {
+    Roster roster = Roster::defaults();
+    std::string error;
+    // Someone who ejects every expert meant to. An empty roundtable is a state
+    // the UI explains; quietly putting a seat back would be worse.
+    while (roster.size() > 0) {
+        CHECK(roster.remove(roster.at(0).id, error));
+    }
+    CHECK(roster.experts().empty());
+    CHECK(roster.router_labels().empty());
+    CHECK(roster.router_examples().empty());
 }
 
 TEST(expert_label_falls_back_to_the_id_it_was_given) {
@@ -727,6 +758,49 @@ TEST(the_instructions_show_the_write_shape_rather_than_only_describing_it) {
     CHECK(text.find("The colon is required") != std::string::npos);
 }
 
+TEST(a_handoff_names_the_next_piece_of_work) {
+    const std::optional<tools::ToolCall> call =
+        tools::parse_tool_call("HANDOFF: write the API documentation for the parser", "");
+    CHECK(call.has_value());
+    if (!call) {
+        return;
+    }
+    // It is not executed like a file operation: the cook loop reads it, sends
+    // the line back through the delegator, and whoever wins takes the seat.
+    CHECK(call->kind == tools::ToolKind::Handoff);
+    CHECK_EQ(call->argument, std::string("write the API documentation for the parser"));
+
+    tools::WorkshopSettings settings;
+    settings.enabled = true;
+    settings.root    = "/tmp";
+    CHECK(!tools::run_tool(*call, settings, tools::SearchSettings{}, {}).ok);
+}
+
+TEST(the_instructions_offer_a_handoff) {
+    tools::WorkshopSettings settings;
+    settings.enabled = true;
+    const std::string text = tools::workshop_instructions(settings);
+    // An expert that does not know it can hand over will never do it, and the
+    // roster stays a list of seats only one of which ever gets used.
+    CHECK(text.find("HANDOFF:") != std::string::npos);
+}
+
+TEST(a_cook_records_every_expert_that_held_the_seat) {
+    Cook cook;
+    cook.steps.push_back(step_of(1, "programming", "write", "wrote parse.py", true, 0, {"parse.py"}));
+    cook.steps.push_back(step_of(1, "programming", "run",   "$ pytest",       true, 0, {}));
+    cook.steps.push_back(step_of(2, "programming", "handoff", "document the parser", true, 0, {}));
+    cook.steps.push_back(step_of(2, "language",    "write", "wrote README.md", true, 0, {"README.md"}));
+    cook.steps.push_back(step_of(3, "programming", "write", "fixed a typo",    true, 0, {"parse.py"}));
+
+    // In the order they first took the seat, and each once however often they
+    // come back.
+    const std::vector<ExpertId> used = cook.experts_used();
+    CHECK_EQ(used.size(), std::size_t{2});
+    CHECK_EQ(used[0], ExpertId("programming"));
+    CHECK_EQ(used[1], ExpertId("language"));
+}
+
 TEST(a_command_runs_in_the_project_and_reports_its_status) {
     TempDir dir;
     const tools::WorkshopSettings settings = workshop_at(dir.path());
@@ -828,6 +902,84 @@ TEST(the_instructions_only_offer_what_the_settings_allow) {
 
 
 // ---------------------------------------------------------------------------
+// Diffs
+// ---------------------------------------------------------------------------
+
+TEST(a_diff_reports_only_the_lines_that_moved) {
+    const std::string before = "def add(a, b):\n    return a - b\n\ndef main():\n    pass\n";
+    const std::string after  = "def add(a, b):\n    return a + b\n\ndef main():\n    pass\n";
+
+    const util::DiffStat stat = util::diff_stat(before, after);
+    CHECK_EQ(stat.added, 1);
+    CHECK_EQ(stat.removed, 1);
+    CHECK_EQ(stat.summary(), std::string("+1 -1"));
+
+    // "updated calc.py" is true and almost useless. This is what makes a
+    // journal say whether one character moved or the file was replaced.
+    const std::string diff = util::unified_diff(before, after);
+    CHECK(diff.find("-    return a - b") != std::string::npos);
+    CHECK(diff.find("+    return a + b") != std::string::npos);
+    // The untouched lines are context, not changes.
+    CHECK(diff.find("-def add") == std::string::npos);
+    CHECK(diff.find("+def main") == std::string::npos);
+}
+
+TEST(an_unchanged_write_produces_no_diff) {
+    const std::string same = "one\ntwo\nthree\n";
+    CHECK(util::unified_diff(same, same).empty());
+    CHECK_EQ(util::diff_stat(same, same).summary(), std::string("unchanged"));
+}
+
+TEST(a_diff_handles_an_insertion_at_either_end) {
+    // The head and tail trimming is the whole algorithm, and both edges are
+    // where it goes wrong if the arithmetic is off by one.
+    const util::DiffStat front = util::diff_stat("b\nc\n", "a\nb\nc\n");
+    CHECK_EQ(front.added, 1);
+    CHECK_EQ(front.removed, 0);
+
+    const util::DiffStat back = util::diff_stat("a\nb\n", "a\nb\nc\n");
+    CHECK_EQ(back.added, 1);
+    CHECK_EQ(back.removed, 0);
+
+    // And creating a file from nothing is all addition.
+    const util::DiffStat fresh = util::diff_stat("", "a\nb\n");
+    CHECK_EQ(fresh.added, 2);
+    CHECK_EQ(fresh.removed, 0);
+}
+
+TEST(a_long_diff_says_it_was_cut_rather_than_stopping) {
+    std::string before;
+    std::string after;
+    for (int i = 0; i < 200; ++i) {
+        before += "old " + std::to_string(i) + "\n";
+        after  += "new " + std::to_string(i) + "\n";
+    }
+    const std::string diff = util::unified_diff(before, after, 10);
+
+    // A diff that stops without warning reads as a complete diff of a smaller
+    // change, which is a worse lie than no diff at all.
+    CHECK(diff.find("not shown") != std::string::npos);
+    CHECK(diff.find("+200 -200") != std::string::npos);
+}
+
+TEST(a_write_records_what_it_changed) {
+    TempDir dir;
+    const tools::WorkshopSettings settings = workshop_at(dir.path());
+    { std::ofstream(dir.path() / "calc.py") << "def add(a, b):\n    return a - b\n"; }
+
+    tools::ToolCall write;
+    write.kind     = tools::ToolKind::Write;
+    write.argument = "calc.py";
+    write.content  = "def add(a, b):\n    return a + b\n";
+
+    const tools::ToolResult result = do_call(write, settings);
+    CHECK(result.ok);
+    CHECK(result.summary.find("+1 -1") != std::string::npos);
+    CHECK(result.detail.find("-    return a - b") != std::string::npos);
+    CHECK(result.detail.find("+    return a + b") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
 // The cook journal
 // ---------------------------------------------------------------------------
 
@@ -854,10 +1006,10 @@ TEST(a_goal_that_starts_with_a_word_is_not_a_duration) {
 
 TEST(a_cook_reports_the_files_it_touched_in_the_order_it_touched_them) {
     Cook cook;
-    cook.steps.push_back({1, "programming", "write", "created src/a.py", true, 0, {"src/a.py"}});
-    cook.steps.push_back({1, "programming", "run",   "$ pytest",         true, 0, {}});
-    cook.steps.push_back({2, "programming", "write", "created src/b.py", true, 0, {"src/b.py"}});
-    cook.steps.push_back({2, "programming", "write", "updated src/a.py", true, 0, {"src/a.py"}});
+    cook.steps.push_back(step_of(1, "programming", "write", "created src/a.py", true, 0, {"src/a.py"}));
+    cook.steps.push_back(step_of(1, "programming", "run",   "$ pytest",         true, 0, {}));
+    cook.steps.push_back(step_of(2, "programming", "write", "created src/b.py", true, 0, {"src/b.py"}));
+    cook.steps.push_back(step_of(2, "programming", "write", "updated src/a.py", true, 0, {"src/a.py"}));
 
     // First-touched order, not sorted: it reads as the story of the cook.
     const std::vector<std::string> files = cook.files_touched();
@@ -890,10 +1042,10 @@ TEST(a_cook_round_trips_through_disk) {
     cook.ended_unix     = 1'700'001'000;
     cook.iterations     = 4;
     cook.outcome        = "fixed the parser and added two tests";
-    cook.steps.push_back({1, "programming", "read",  "read src/parse.py", true, 12, {}});
-    cook.steps.push_back({1, "programming", "write", "updated src/parse.py", true, 8,
-                          {"src/parse.py"}});
-    cook.steps.push_back({2, "programming", "run",   "$ pytest -- exit 1", false, 4200, {}});
+    cook.steps.push_back(step_of(1, "programming", "read",  "read src/parse.py", true, 12, {}));
+    cook.steps.push_back(step_of(1, "programming", "write", "updated src/parse.py", true, 8,
+                          {"src/parse.py"}));
+    cook.steps.push_back(step_of(2, "programming", "run",   "$ pytest -- exit 1", false, 4200, {}));
 
     std::string error;
     CHECK(log.save(cook, error));
@@ -928,8 +1080,8 @@ TEST(cooks_are_listed_newest_first_with_what_they_changed) {
         cook.state        = CookState::Done;
         cook.started_unix = 1'700'000'000 + i;
         cook.ended_unix   = cook.started_unix + 600;
-        cook.steps.push_back({1, "programming", "write", "wrote a", true, 0, {"a.txt"}});
-        cook.steps.push_back({1, "programming", "write", "wrote a again", true, 0, {"a.txt"}});
+        cook.steps.push_back(step_of(1, "programming", "write", "wrote a", true, 0, {"a.txt"}));
+        cook.steps.push_back(step_of(1, "programming", "write", "wrote a again", true, 0, {"a.txt"}));
         std::string error;
         CHECK(log.save(cook, error));
     }
@@ -994,8 +1146,8 @@ TEST(the_headline_says_files_steps_and_how_long) {
     Cook cook;
     cook.started_unix = 1'700'000'000;
     cook.ended_unix   = cook.started_unix + 2460;  // 41 minutes
-    cook.steps.push_back({1, "programming", "write", "a", true, 0, {"x.py"}});
-    cook.steps.push_back({1, "programming", "run",   "b", true, 0, {}});
+    cook.steps.push_back(step_of(1, "programming", "write", "a", true, 0, {"x.py"}));
+    cook.steps.push_back(step_of(1, "programming", "run",   "b", true, 0, {}));
 
     const std::string headline = cook.headline();
     CHECK(headline.find("1 file") != std::string::npos);
@@ -1566,17 +1718,16 @@ TEST(a_reasoning_format_is_asked_where_its_answer_actually_goes) {
     CHECK(answer_prefix("<|start|>assistant<|message|>hello<|return|>").empty());
 }
 
-TEST(router_labels_name_every_routable_seat_and_nothing_else) {
+TEST(router_labels_name_every_seat_in_roster_order) {
     const Roster roster = Roster::defaults();
-    const std::vector<std::size_t> routable = roster.routable();
-    const std::vector<std::string> labels   = roster.router_labels();
+    const std::vector<std::string> labels = roster.router_labels();
 
     // The two are read in lockstep by ModelRouter: labels[i] is what it scores
-    // for routable()[i]. A mismatch in length or order would route every prompt
+    // for experts()[i]. A mismatch in length or order would route every prompt
     // to the wrong seat while looking entirely healthy.
-    CHECK_EQ(labels.size(), routable.size());
+    CHECK_EQ(labels.size(), roster.size());
     for (std::size_t i = 0; i < labels.size(); ++i) {
-        CHECK_EQ(labels[i], roster.at(routable[i]).name);
+        CHECK_EQ(labels[i], roster.at(i).name);
     }
 }
 
@@ -1590,14 +1741,13 @@ TEST(router_labels_carry_no_padding) {
     }
 }
 
-TEST(the_delegator_is_never_offered_the_fallback_seat) {
+TEST(the_delegator_can_only_answer_with_a_seat_that_exists) {
     const Roster roster = Roster::defaults();
     const std::vector<std::string> labels = roster.router_labels();
 
-    // Unrepresentable, not merely unlikely: the fallback is not among the
-    // labels, so no score can name it.
-    CHECK(std::find(labels.begin(), labels.end(), roster.fallback().name) == labels.end());
-    CHECK_EQ(labels.size(), roster.size() - 1);
+    // Unrepresentable, not merely unlikely: the scorer compares exactly these
+    // strings, so there is nowhere for an invented answer to come from.
+    CHECK_EQ(labels.size(), roster.size());
 
     // And the worked examples answer with exactly those labels -- an example
     // that answered anything else would teach the model to produce a string
@@ -1610,24 +1760,18 @@ TEST(the_delegator_is_never_offered_the_fallback_seat) {
 TEST(router_system_prompt_describes_every_expert) {
     const Roster roster = Roster::defaults();
     const std::string prompt = roster.router_system_prompt();
-    for (const std::size_t index : roster.routable()) {
-        const Expert& expert = roster.at(index);
+    for (const Expert& expert : roster.experts()) {
         CHECK(prompt.find(expert.name) != std::string::npos);
         CHECK(prompt.find(expert.blurb) != std::string::npos);
     }
 
-    // The prompt must not mention the fallback seat at all. Checking only that
-    // the specialists are present would miss this -- and did: the guard was
-    // dropped in an edit and the labels and examples stayed correct while the
-    // prompt silently offered an extra option the scorer could never name.
-    const Expert& fallback = roster.fallback();
-    CHECK(prompt.find(fallback.name)  == std::string::npos);
-    CHECK(prompt.find(fallback.blurb) == std::string::npos);
-    CHECK(prompt.find("FALL")         == std::string::npos);
-    // An earlier prompt closed by naming Language as the catch-all, and small
-    // models answered LANG to nearly everything as a result (16% accurate
-    // against 63% now). Keep that phrasing out.
+    // The prompt must not offer a way to decline. An earlier version closed by
+    // naming a catch-all and small models answered it for almost everything --
+    // 16% accurate against 96% now -- so the wording that did it stays out, and
+    // so does any seat the scorer cannot name.
     CHECK(prompt.find("fits no other") == std::string::npos);
+    CHECK(prompt.find("Fallback")      == std::string::npos);
+    CHECK(prompt.find("FALL")          == std::string::npos);
 }
 
 TEST(an_added_expert_reaches_the_delegator_without_anything_else_being_edited) {
@@ -1670,30 +1814,54 @@ TEST(an_ejected_expert_leaves_the_delegator_prompt_entirely) {
     }
 }
 
-TEST(the_fallback_is_the_last_seat_and_is_not_routable) {
-    const Roster roster = Roster::defaults();
-    CHECK_EQ(roster.size(), std::size_t{10});
-    CHECK_EQ(roster.fallback_index(), std::size_t{9});
+TEST(a_nominated_default_expert_catches_what_does_not_fit) {
+    Config config;
+    config.experts["physics"].model  = "p.gguf";
+    config.experts["language"].model = "l.gguf";
 
-    const Expert& fallback = roster.fallback();
-    CHECK_EQ(fallback.id,   std::string("fallback"));
-    CHECK_EQ(fallback.name, std::string("Fallback"));
+    // No default nominated: an uncertain route is taken at face value, because
+    // there is nothing better to do with it.
+    RouteDecision proposed;
+    proposed.expert     = "physics";
+    proposed.confidence = 0.20F;
+    proposed.source     = RouteSource::Model;
+    RouteDecision out = apply_route_policy(proposed, config);
+    CHECK_EQ(out.expert, ExpertId("physics"));
+    CHECK(out.detail.find("undecided") != std::string::npos);
 
-    // The delegator's job is to pick a specialist. Offering it an "anything
-    // else" option is what collapsed routing to 16% once already.
-    CHECK(!fallback.routable);
-    CHECK_EQ(roster.routable().size(), roster.size() - 1);
+    // Nominate one, and it takes the uncertain route instead.
+    config.routing.default_expert = "language";
+    out = apply_route_policy(proposed, config);
+    CHECK_EQ(out.expert, ExpertId("language"));
+    CHECK(out.source == RouteSource::Fallback);
+    CHECK(out.detail.find("Language") != std::string::npos);
+}
+
+TEST(a_default_expert_with_no_model_is_not_used) {
+    Config config;
+    config.experts["physics"].model = "p.gguf";
+    // Nominated but never filled. Routing to it would turn a working prompt
+    // into a "no model configured" failure one layer further down.
+    config.routing.default_expert = "language";
+
+    RouteDecision proposed;
+    proposed.expert     = "chemistry";   // no model either
+    proposed.confidence = 0.95F;
+    proposed.source     = RouteSource::Model;
+
+    const RouteDecision out = apply_route_policy(proposed, config);
+    CHECK_EQ(out.expert, ExpertId("physics"));
+    CHECK(out.detail.find("Chemistry has no model") != std::string::npos);
 }
 
 TEST(every_expert_gets_the_same_number_of_worked_examples) {
     const Roster roster = Roster::defaults();
     const std::vector<std::pair<std::string, std::string>> examples = roster.router_examples();
-    const std::vector<std::size_t> routable = roster.routable();
 
     // The same number each, because a seat with more examples than its
     // neighbours is a seat the delegator is being nudged towards -- and the
     // nudge is invisible in the score until another seat stops being reachable.
-    CHECK_EQ(examples.size(), routable.size() * 2);
+    CHECK_EQ(examples.size(), roster.size() * 2);
 
     std::map<std::string, int> seen;
     const std::vector<std::string> labels = roster.router_labels();
@@ -1705,8 +1873,8 @@ TEST(every_expert_gets_the_same_number_of_worked_examples) {
         CHECK(std::find(labels.begin(), labels.end(), answer) != labels.end());
         ++seen[answer];
     }
-    for (const std::size_t index : routable) {
-        CHECK_EQ(seen[roster.at(index).name], 2);
+    for (const Expert& expert : roster.experts()) {
+        CHECK_EQ(seen[expert.name], 2);
     }
 }
 
@@ -1778,36 +1946,51 @@ TEST(keyword_router_picks_the_obvious_subject) {
     CHECK(route_of("proofread this paragraph for tone")         == "language");
 }
 
-TEST(keyword_router_falls_back_when_nothing_matches) {
+TEST(keyword_router_names_nobody_when_nothing_matches) {
     KeywordRouter router(shipped());
     const RouteDecision decision = router.route("hello there", {});
-    // Fallback is the seat for an undecidable prompt. Reporting zero confidence
-    // says "no decision" rather than inventing one.
-    CHECK(decision.expert    == "fallback");
+    // An empty expert is what "no decision" means. Naming a seat here would be
+    // inventing one, and the route policy is what decides where an undecided
+    // prompt actually goes.
+    CHECK(decision.expert.empty());
     CHECK(decision.source     == RouteSource::Fallback);
     CHECK(decision.confidence == 0.0F);
 }
 
-TEST(fallback_carries_no_keywords_so_it_never_wins_on_score) {
-    // Fallback must not compete with the subjects: it is reached by the
-    // no-match path. A prompt with real keywords must still go to its subject.
+TEST(a_seat_with_no_keywords_never_wins_on_score) {
+    // A prompt with real keywords goes to its expert.
     CHECK(route_of("compute the derivative of this polynomial") == "mathematics");
     CHECK(route_of("balance this reaction and find the enthalpy") == "chemistry");
 
-    // And the reverse: a prompt with nothing to match reaches Fallback.
-    KeywordRouter router(shipped());
-    CHECK(router.route("mmm", {}).expert == "fallback");
+    // A seat that gave the keyword scorer nothing to match on scores zero and
+    // is never chosen by it -- which is the honest outcome, not a special case.
+    Roster roster = Roster::defaults();
+    Expert quiet;
+    quiet.name     = "Quiet";
+    quiet.blurb    = "a seat with no keywords at all";
+    quiet.keywords = {};  // add() would derive some, so they are cleared below
+    std::string error;
+    CHECK(roster.add(quiet, error));
+    if (const std::optional<std::size_t> found = roster.find("quiet")) {
+        Expert stripped = roster.at(*found);
+        stripped.keywords.clear();
+        CHECK(roster.update("quiet", stripped));
+    }
+
+    KeywordRouter router(std::make_shared<const Roster>(roster));
+    CHECK(router.route("mmm", {}).expert.empty());
+    CHECK(router.route("compute the derivative", {}).expert == "mathematics");
 }
 
 TEST(keyword_router_matches_whole_words_only) {
     // Keywords hide inside ordinary words: "ion" (Chemistry) sits in "question"
     // and "opinion", "cell" (Biology) sits in "excellent". None of them should
-    // count, so this prompt matches nothing and falls through to General.
-    // Substring matching would score Chemistry three times and route there.
-    CHECK(route_of("an excellent question about your opinion") == "fallback");
+    // count, so this prompt matches nothing and nobody is named. Substring
+    // matching would score Chemistry three times and route there.
+    CHECK(route_of("an excellent question about your opinion").empty());
 
     // "gene" (Biology) hides inside both "generate" and "general".
-    CHECK(route_of("generate a general overview") == "fallback");
+    CHECK(route_of("generate a general overview").empty());
 
     // The same words as whole words must still match.
     CHECK(route_of("what is an ion")            == "chemistry");
@@ -1837,6 +2020,8 @@ TEST(keyword_router_confidence_reflects_ambiguity) {
 namespace {
 
 /// A config with the named seats filled, so policy tests read as a sentence.
+/// The first is nominated as the default expert unless a test says otherwise --
+/// that is the seat that plays the part the built-in Fallback used to.
 Config config_with(std::initializer_list<ExpertId> filled) {
     Config config;
     for (const ExpertId& seat : filled) {
@@ -1855,42 +2040,44 @@ RouteDecision proposal(ExpertId expert, float confidence, RouteSource source) {
 
 }  // namespace
 
-TEST(a_decision_nobody_made_names_the_fallback_seat) {
+TEST(a_decision_nobody_made_names_nobody) {
     // A default-constructed decision is what the engine gets when the delegator
-    // could not run -- no model assigned, or a load that failed. It has to name
-    // the seat that means "undecided", because whatever it names is where the
-    // prompt goes: defaulting to a real subject sent every such prompt to that
-    // subject's expert as though something had chosen it.
+    // could not run -- no model assigned, or a load that failed. It must not
+    // name a real expert: whatever it names is where the prompt goes, and
+    // defaulting to a seat would send every such prompt there as though
+    // something had chosen it.
     const RouteDecision nothing;
-    CHECK(nothing.expert == "fallback");
+    CHECK(nothing.expert.empty());
     CHECK(nothing.source == RouteSource::Fallback);
     CHECK(nothing.confidence == 0.0F);
 }
 
 TEST(a_confident_route_to_a_filled_seat_stands) {
-    const Config config = config_with({"physics", "fallback"});
+    const Config config = config_with({"physics", "language"});
     const RouteDecision out =
         apply_route_policy(proposal("physics", 0.95F, RouteSource::Model), config);
     CHECK(out.expert == "physics");
     CHECK(out.source  == RouteSource::Model);
 }
 
-TEST(an_unconfident_route_goes_to_the_fallback_seat) {
-    Config config = config_with({"physics", "fallback"});
+TEST(an_unconfident_route_goes_to_the_nominated_default) {
+    Config config = config_with({"physics", "language"});
     config.routing.min_confidence = 0.60F;
+    config.routing.default_expert = "language";
 
     const RouteDecision out =
         apply_route_policy(proposal("physics", 0.40F, RouteSource::Model), config);
     // Below the floor the delegator is treated as having made no decision.
-    CHECK(out.expert == "fallback");
+    CHECK(out.expert == "language");
     CHECK(out.source  == RouteSource::Fallback);
     CHECK(out.detail.find("undecided") != std::string::npos);
     CHECK(out.detail.find("Physics")   != std::string::npos);
 }
 
 TEST(a_pinned_route_ignores_the_confidence_floor) {
-    Config config = config_with({"physics", "fallback"});
+    Config config = config_with({"physics", "language"});
     config.routing.min_confidence = 0.99F;
+    config.routing.default_expert = "language";
 
     // The user chose this expert; second-guessing them would be wrong even at
     // a confidence the model never reports.
@@ -1901,23 +2088,25 @@ TEST(a_pinned_route_ignores_the_confidence_floor) {
 }
 
 TEST(a_zero_floor_disables_the_confidence_check) {
-    Config config = config_with({"physics", "fallback"});
+    Config config = config_with({"physics", "language"});
     config.routing.min_confidence = 0.0F;
+    config.routing.default_expert = "language";
     const RouteDecision out =
         apply_route_policy(proposal("physics", 0.01F, RouteSource::Model), config);
     CHECK(out.expert == "physics");
 }
 
-TEST(an_empty_seat_sends_work_to_the_fallback) {
-    const Config config = config_with({"physics", "fallback"});
+TEST(an_empty_seat_sends_work_to_the_nominated_default) {
+    Config config = config_with({"physics", "language"});
+    config.routing.default_expert = "language";
     const RouteDecision out =
         apply_route_policy(proposal("chemistry", 0.95F, RouteSource::Model), config);
-    CHECK(out.expert == "fallback");
+    CHECK(out.expert == "language");
     CHECK(out.source  == RouteSource::Fallback);
     CHECK(out.detail.find("Chemistry has no model") != std::string::npos);
 }
 
-TEST(with_no_fallback_configured_any_filled_seat_is_used) {
+TEST(with_no_default_nominated_any_filled_seat_is_used) {
     // A partly-configured install should still answer rather than fail, and
     // should say plainly that it substituted.
     const Config config = config_with({"physics"});
@@ -1932,16 +2121,22 @@ TEST(with_nothing_configured_the_route_reports_it) {
     const Config config;
     const RouteDecision out =
         apply_route_policy(proposal("chemistry", 0.95F, RouteSource::Model), config);
-    CHECK(out.detail.find("no experts configured") != std::string::npos);
+    CHECK(out.detail.find("no experts have a model") != std::string::npos);
 }
 
-TEST(disabling_the_fallback_expert_skips_it_for_empty_seats) {
-    Config config = config_with({"physics", "fallback"});
-    config.routing.use_fallback_expert = false;
+TEST(an_uncertain_route_with_no_default_is_taken_at_face_value) {
+    // The old behaviour sent this to a built-in Fallback seat that on most
+    // installs had no model either, so the prompt failed instead of being
+    // answered by the delegator's best guess. With nothing nominated, the guess
+    // stands and the transcript records the doubt.
+    Config config = config_with({"physics"});
+    config.routing.min_confidence = 0.60F;
 
     const RouteDecision out =
-        apply_route_policy(proposal("chemistry", 0.95F, RouteSource::Model), config);
+        apply_route_policy(proposal("physics", 0.20F, RouteSource::Model), config);
     CHECK(out.expert == "physics");
+    CHECK(out.source  == RouteSource::Model);
+    CHECK(out.detail.find("undecided") != std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
@@ -2346,9 +2541,12 @@ TEST(the_config_shape_the_readme_documents_actually_loads) {
                    "how do I pin a self-referential struct"],
       "keywords": ["tokio", "futures", "pinning", "async"],
       "model": "" },
-    { "id": "fallback", "builtin": true, "model": "generalist-q4_k_m.gguf" }
+    { "id": "general",
+      "name": "General",
+      "blurb": "anything that does not obviously belong to one of the others",
+      "model": "generalist-q4_k_m.gguf" }
   ],
-  "routing": { "min_confidence": 0.60, "use_fallback_expert": true },
+  "routing": { "min_confidence": 0.60, "default_expert": "general" },
   "tools": { "web_search": false, "workshop": false,
              "workshop_run": true, "workshop_timeout": 120 }
 })";
@@ -2358,7 +2556,8 @@ TEST(the_config_shape_the_readme_documents_actually_loads) {
     const Config config = load_config(file, warnings);
 
     CHECK_EQ(config.roster.size(), std::size_t{5});
-    CHECK_EQ(config.roster.at(config.roster.size() - 1).id, std::string(kFallbackId));
+    CHECK_EQ(config.routing.default_expert, ExpertId("general"));
+    CHECK(config.has_expert("general"));
 
     // A built-in written as just its id gets its identity back from the table.
     const std::optional<std::size_t> maths = config.roster.find("mathematics");
@@ -2404,11 +2603,11 @@ TEST(an_ejected_expert_does_not_come_back_on_the_next_load) {
     // The built-in table is a set of defaults, not a floor. Quietly restoring a
     // seat the user ejected would make /ejectexpert a no-op across restarts.
     CHECK(!reloaded.roster.find("chemistry").has_value());
-    CHECK_EQ(reloaded.roster.size(), std::size_t{9});
+    CHECK_EQ(reloaded.roster.size(), std::size_t{8});
     CHECK(reloaded.roster.find("physics").has_value());
 }
 
-TEST(a_config_whose_experts_are_all_gone_keeps_only_the_fallback) {
+TEST(a_config_whose_experts_are_all_gone_loads_as_an_empty_roundtable) {
     TempDir dir;
     const auto file = dir.path() / "config.json";
     {
@@ -2419,12 +2618,11 @@ TEST(a_config_whose_experts_are_all_gone_keeps_only_the_fallback) {
     std::vector<std::string> warnings;
     const Config config = load_config(file, warnings);
 
-    // Someone who deleted every seat wanted every seat deleted. The fallback
-    // stays because the engine needs somewhere to send work that fits nowhere,
-    // and it is not a specialist the delegator can choose.
-    CHECK_EQ(config.roster.size(), std::size_t{1});
-    CHECK_EQ(config.roster.at(0).id, std::string(kFallbackId));
+    // Someone who deleted every seat wanted every seat deleted. Silently
+    // restoring nine of them would make /ejectexpert a no-op across restarts.
+    CHECK(config.roster.experts().empty());
     CHECK(config.roster.router_labels().empty());
+    CHECK(config.configured_experts().empty());
 }
 
 TEST(a_hand_written_expert_needs_only_an_id_and_a_blurb) {

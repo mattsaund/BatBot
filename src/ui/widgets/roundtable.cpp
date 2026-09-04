@@ -2,10 +2,8 @@
 //
 // The roundtable.
 //
-// Crucible on the left with a dot of his own, the experts in a column beside him
-// with a dot each, and the fallback at the bottom of that column -- it is not
-// one of the nine, and the bottom of the list is where the thing that catches
-// what the others did not belongs.
+// Crucible on the left with a dot of his own, and the experts in a column beside
+// him with a dot each, drawn in roster order.
 //
 // A line joins Crucible's dot to whichever seat the delegation chose, for as long
 // as work is flowing to it. The dots say what is happening rather than what is
@@ -156,9 +154,7 @@ std::string link_row(int row, int from, int to) {
 
 Element roundtable(const Snapshot& snapshot, const CrucibleSprite& sprite, std::size_t tick,
                    bool compact) {
-    // The roster is drawn in its own order, which already puts the fallback
-    // last: it is not one of the specialists, and the bottom of the list is
-    // where the thing that catches what the others did not belongs.
+    // Drawn in roster order, which is the order the user put them in.
     const Roster& roster = snapshot.roster ? *snapshot.roster : *kEmptyRoster();
     const std::size_t rows = roster.size();
 

@@ -75,8 +75,8 @@ int main(int argc, char** argv) {
                 static_cast<double>(model->params()) / 1e9,
                 static_cast<double>(model->bytes()) / (1024.0 * 1024.0 * 1024.0));
 
-    // Fallback is not in the grammar, so it can never appear here. This
-    // measures the delegator's job -- picking a specialist -- and nothing else.
+    // Every seat on the roster is scored, and the scorer can only answer with
+    // one of them. This measures the delegator's job and nothing else.
     // Measured against the shipped roster, which is what the benchmark cases
     // are written for. A user's own config may have added seats or taken some
     // away; scoring against that would be measuring their roundtable, not the
@@ -144,22 +144,21 @@ int main(int argc, char** argv) {
     // delegator can score 85% while never once choosing one of the nine, and
     // that seat is then unreachable however good the model is.
     std::printf("\n%-14s %-8s %-8s  where the misses went\n", "expert", "found", "chosen");
-    for (const std::size_t index : roster->routable()) {
-        const ExpertId& id = roster->at(index).id;
+    for (const Expert& expert : roster->experts()) {
+        const ExpertId& id = expert.id;
         std::string went;
-        for (const std::size_t other_index : roster->routable()) {
-            const ExpertId& other = roster->at(other_index).id;
-            const int count = confusion[id][other];
-            if (other != id && count > 0) {
+        for (const Expert& other : roster->experts()) {
+            const int count = confusion[id][other.id];
+            if (other.id != id && count > 0) {
                 if (!went.empty()) {
                     went += ", ";
                 }
-                went += roster->at(other_index).name + " x" + std::to_string(count);
+                went += other.name + " x" + std::to_string(count);
             }
         }
         // "chosen" counts how often the delegator picked this expert for
         // anything at all. A zero there is a seat nothing can reach.
-        std::printf("%-14s %d/%-6d %-8d  %s\n", roster->at(index).name.c_str(),
+        std::printf("%-14s %d/%-6d %-8d  %s\n", expert.name.c_str(),
                     confusion[id][id], expected[id], chosen[id], went.c_str());
     }
 

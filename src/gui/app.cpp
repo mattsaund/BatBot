@@ -579,11 +579,9 @@ void App::draw_experts() {
             ImGui::EndCombo();
         }
 
-        if (expert.routable) {
-            ImGui::SameLine();
-            if (ImGui::Button("Eject")) {
-                eject = expert.id;
-            }
+        ImGui::SameLine();
+        if (ImGui::Button("Eject")) {
+            eject = expert.id;
         }
         ImGui::Dummy(ImVec2(0, em(0.25F)));
         ImGui::PopID();

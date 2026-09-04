@@ -139,7 +139,7 @@ ftxui::Color step_color(const CookStep& step) {
     if (step.kind == "write") {
         return theme::kSeatActive;
     }
-    if (step.kind == "run" || step.kind == "done") {
+    if (step.kind == "run" || step.kind == "done" || step.kind == "handoff") {
         return theme::kAccent;
     }
     return theme::kMeta;
@@ -182,7 +182,7 @@ Element App::render_cook(const Cook& cook) const {
     for (std::size_t i = from; i < cook.steps.size(); ++i) {
         const CookStep& step = cook.steps[i];
         std::string verb = step.kind;
-        verb.resize(7, ' ');
+        verb.resize(8, ' ');
         rows.push_back(hbox({
             text("     "),
             text(verb) | color(step_color(step)),

@@ -228,7 +228,7 @@ bool save_config(const Config& config, const std::filesystem::path& file) {
         }},
         {"routing", json{
             {"min_confidence",       tidy(config.routing.min_confidence)},
-            {"use_fallback_expert", config.routing.use_fallback_expert},
+            {"default_expert",       config.routing.default_expert},
             {"keep_delegator_loaded", config.routing.keep_delegator_loaded},
         }},
         {"tools", json{
@@ -331,7 +331,7 @@ void write_default_config(const std::filesystem::path& file) {
         }},
         {"routing", json{
             {"min_confidence",       defaults.routing.min_confidence},
-            {"use_fallback_expert", defaults.routing.use_fallback_expert},
+            {"default_expert",       defaults.routing.default_expert},
             {"keep_delegator_loaded", defaults.routing.keep_delegator_loaded},
         }},
         {"tools", json{
@@ -412,8 +412,8 @@ Config load_config(const std::filesystem::path& file, std::vector<std::string>& 
     // The roster comes from the file when the file has one, and from the
     // built-in defaults when it does not. An "experts" key that is present but
     // empty is taken at its word: someone who deleted every seat wanted every
-    // seat deleted, and silently restoring nine of them would be worse than a
-    // roundtable with only a fallback on it.
+    // seat deleted, and silently restoring nine of them would be worse than an
+    // empty roundtable the UI can explain.
     if (const auto experts = doc.find("experts"); experts != doc.end()) {
         config.roster = Roster::bare();
 
@@ -454,9 +454,6 @@ Config load_config(const std::filesystem::path& file, std::vector<std::string>& 
             params.inherit_from(config.defaults);
             config.experts[id] = std::move(params);
 
-            if (id == kFallbackId) {
-                continue;  // planted by Roster::bare(); only its model is read
-            }
             Expert expert;
             if (!read_expert_identity(*entry, id, expert, warnings)) {
                 continue;
@@ -489,7 +486,7 @@ Config load_config(const std::filesystem::path& file, std::vector<std::string>& 
                    "routing", warnings);
         read_field(*routing, "keep_delegator_loaded", config.routing.keep_delegator_loaded,
                    "routing", warnings);
-        read_field(*routing, "use_fallback_expert", config.routing.use_fallback_expert,
+        read_field(*routing, "default_expert",       config.routing.default_expert,
                    "routing", warnings);
     }
 

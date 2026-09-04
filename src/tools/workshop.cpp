@@ -11,6 +11,7 @@
 #include <system_error>
 #include <thread>
 
+#include "crucible/util/diff.hpp"
 #include "crucible/util/format.hpp"
 #include "crucible/util/subprocess.hpp"
 
@@ -25,7 +26,7 @@ struct Verb {
 // Upper case, followed by a colon. Upper case because it is what a model
 // reliably reproduces from an instruction and what almost never occurs by
 // accident in prose, and a colon because it makes the argument obvious.
-constexpr std::array<Verb, 8> kVerbs{{
+constexpr std::array<Verb, 9> kVerbs{{
     {"LIST",   ToolKind::List},
     {"READ",   ToolKind::Read},
     {"WRITE",  ToolKind::Write},
@@ -34,6 +35,7 @@ constexpr std::array<Verb, 8> kVerbs{{
     {"ASK",    ToolKind::Ask},
     {"NOTE",   ToolKind::Note},
     {"DONE",   ToolKind::Done},
+    {"HANDOFF", ToolKind::Handoff},
 }};
 
 std::string trim(std::string_view text) {
@@ -361,24 +363,40 @@ ToolResult do_write(const ToolCall& call, const WorkshopSettings& settings) {
     std::filesystem::create_directories(file->parent_path(), ec);
 
     const bool existed = std::filesystem::exists(*file, ec);
+
+    // Read before overwriting, so the journal can say what changed rather than
+    // only that something did. "updated calc.py" is true and almost useless: it
+    // does not distinguish one character moving from the file being replaced
+    // with something unrelated.
+    std::string previous;
+    if (existed) {
+        std::ifstream in(*file, std::ios::binary);
+        std::ostringstream buffer;
+        buffer << in.rdbuf();
+        previous = buffer.str();
+    }
+
+    std::string written = call.content;
+    if (written.back() != '\n') {
+        written += '\n';
+    }
     {
         std::ofstream out(*file, std::ios::binary | std::ios::trunc);
         if (!out) {
             return failure("cannot write " + call.argument);
         }
-        out << call.content;
-        if (call.content.back() != '\n') {
-            out << '\n';
-        }
+        out << written;
     }
+
+    const util::DiffStat stat = util::diff_stat(previous, written);
 
     ToolResult result;
     result.ok      = true;
     result.changed = {call.argument};
-    result.summary = (existed ? "updated " : "created ") + call.argument + " ("
-                   + std::to_string(std::count(call.content.begin(), call.content.end(), '\n') + 1)
-                   + " lines)";
-    result.output  = "wrote " + call.argument;
+    result.detail  = util::unified_diff(previous, written);
+    result.summary = (existed ? "updated " : "created ") + call.argument
+                   + "  " + stat.summary();
+    result.output  = "wrote " + call.argument + " (" + stat.summary() + ")";
     return result;
 }
 
@@ -445,7 +463,8 @@ ToolResult do_run(const ToolCall& call, const WorkshopSettings& settings,
                                 ? "  -- stopped"
                                 : "  -- exit " + std::to_string(status));
 
-    result.output = "$ " + call.argument + "\n" + clamp_output(output, settings.max_output_bytes);
+    result.detail = clamp_output(output, settings.max_output_bytes);
+    result.output = "$ " + call.argument + "\n" + result.detail;
     if (timed_out.load(std::memory_order_relaxed)) {
         result.output += "\n(killed after " + std::to_string(settings.run_timeout_seconds)
                        + " seconds)";
@@ -484,7 +503,8 @@ std::string_view tool_kind_name(ToolKind kind) {
         case ToolKind::Search: return "search";
         case ToolKind::Ask:    return "ask";
         case ToolKind::Note:   return "note";
-        case ToolKind::Done:   return "done";
+        case ToolKind::Done:    return "done";
+        case ToolKind::Handoff: return "handoff";
         case ToolKind::None:   break;
     }
     return "none";
@@ -621,11 +641,12 @@ ToolResult run_tool(const ToolCall& call, const WorkshopSettings& settings,
         }
         case ToolKind::Ask:
         case ToolKind::Done:
+        case ToolKind::Handoff:
         case ToolKind::None:
             break;
     }
-    // Ask and Done are answers to the cook loop rather than actions, and it
-    // handles them before ever reaching here.
+    // Ask, Done and Handoff are answers to the cook loop rather than actions,
+    // and it handles them before ever reaching here.
     return failure("nothing to do");
 }
 
@@ -647,6 +668,11 @@ std::string workshop_instructions(const WorkshopSettings& settings) {
         "NOTE: <what you are doing>  recorded in the log, no other effect\n"
         "ASK: <question>            ask the user something you cannot work out\n"
         "DONE: <what you changed>   this piece of work is finished\n"
+        "HANDOFF: <the next work>   this piece is done and the next needs a "
+        "different\n"
+        "                           kind of expertise -- say what it is, in one "
+        "line,\n"
+        "                           and the right expert will be brought in\n"
         "\nThe colon is required. One call per reply, on its own line, and nothing "
         "after it. Paths are relative to the project root and cannot leave it.\n"
         // A worked example, because the rules alone are not enough. Told only

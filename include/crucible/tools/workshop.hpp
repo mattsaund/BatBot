@@ -48,7 +48,12 @@ enum class ToolKind {
     Search,  ///< SEARCH: <query>
     Ask,     ///< ASK: <question>   -- pauses the cook for an answer
     Note,    ///< NOTE: <what it is doing>, journalled and shown, no effect
-    Done,    ///< DONE: <summary>   -- this iteration is finished
+    Done,    ///< DONE: <summary>   -- this piece of work is finished
+    /// HANDOFF: <the next piece of work> -- ends the iteration and sends that
+    /// line back through the delegator, which may put a different expert in the
+    /// seat. How a programming expert that has finished the code says the next
+    /// thing needed is documentation.
+    Handoff,
 };
 
 std::string_view tool_kind_name(ToolKind kind);
@@ -67,6 +72,13 @@ struct ToolResult {
     bool        ok = false;
     std::string output;
     std::string summary;
+
+    /// The long form, for a reader rather than for the model: a diff for a
+    /// WRITE, the captured output for a RUN. Kept apart from `summary` because
+    /// a journal has to stay scannable -- this is what a step expands into,
+    /// not what it says at rest.
+    std::string detail;
+
     /// Paths this call changed, relative to the root. The journal's record of
     /// what a cook actually did to the project.
     std::vector<std::string> changed;

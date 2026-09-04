@@ -69,6 +69,7 @@ add_library(crucible_core STATIC
     # util: small standalone helpers with no Crucible dependencies
     src/util/text.cpp
     src/util/format.cpp
+    src/util/diff.cpp
     src/util/markdown.cpp
     src/util/resources.cpp
     src/util/subprocess.cpp

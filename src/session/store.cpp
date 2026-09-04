@@ -145,14 +145,14 @@ Turn turn_from_json(const json& entry) {
         // The id is stored verbatim and read back verbatim, with no check
         // that it still names a seat. A conversation with an expert that has
         // since been ejected is history, and history is what it was, not what
-        // the roundtable happens to hold today; the transcript falls back to
-        // showing the id when the name is gone.
-        decision.expert = route->value("expert", std::string(kFallbackId));
+        // the roundtable happens to hold today; the transcript shows the id
+        // when the name is gone.
+        decision.expert = route->value("expert", std::string{});
         decision.confidence = route->value("confidence", 0.0F);
         decision.detail     = route->value("detail", "");
-        // Restore how it was actually routed. Defaulting this to Fallback
-        // would relabel every resumed turn as one the delegator declined,
-        // which is a different -- and untrue -- claim about the history.
+        // Restore how it was actually routed. Defaulting this would relabel
+        // every resumed turn as one the delegator declined, which is a
+        // different -- and untrue -- claim about the history.
         decision.source = route_source_from_name(route->value("source", ""));
         turn.route      = decision;
     }

@@ -243,6 +243,69 @@ Engine::CookRound Engine::cook_round(LoadedModel& model, const ModelParams& para
 }
 
 // ---------------------------------------------------------------------------
+// Who is in the seat
+// ---------------------------------------------------------------------------
+
+Engine::CookSeat Engine::take_the_seat(const std::string& work, const CookSeat& current) {
+    // Routed like any other prompt, which is the point: the delegator that
+    // picks an expert for a question is the same one that picks an expert for
+    // the next piece of work, and it does it from the same roster with the same
+    // measured prompt.
+    Request routing;
+    routing.kind   = RequestKind::Prompt;
+    routing.prompt = work;
+    const RouteDecision decision = resolve(routing);
+
+    CookSeat seat;
+    seat.id   = decision.expert;
+    seat.name = expert_label(config_.roster, decision.expert);
+
+    if (!config_.has_expert(seat.id)) {
+        seat.error = seat.name.empty()
+            ? "no expert model is configured to cook with"
+            : seat.name + " has no model, and nothing else is configured either";
+        return seat;
+    }
+
+    seat.params = config_.expert(seat.id);
+
+    // The common case, and the one that must not cost a reload: the delegator
+    // chose whoever is already in the chair. A cook that swapped models every
+    // iteration because it re-asked the same question would spend most of its
+    // budget loading weights.
+    if (current.model != nullptr && current.id == seat.id) {
+        seat.model = current.model;
+        return seat;
+    }
+
+    state_.set_mood(Mood::Loading, "swapping in " + seat.name);
+    state_.set_seat(seat.id, SeatPhase::Loading, 0.0F);
+    state_.set_linked(seat.id);
+    if (wake_) {
+        wake_();
+    }
+
+    // acquire_expert frees whoever was resident before loading the next, which
+    // is the whole memory argument for the design: the peak is the larger of
+    // the two experts, never their sum.
+    std::string error;
+    seat.model = host_->acquire_expert(
+        seat.id, seat.params,
+        [this, &seat](float progress) { state_.set_seat_progress(seat.id, progress); },
+        error);
+    if (seat.model == nullptr) {
+        seat.error = error;
+        state_.set_seat(seat.id, SeatPhase::Dormant);
+        return seat;
+    }
+    state_.set_resident(seat.id);
+    if (wake_) {
+        wake_();
+    }
+    return seat;
+}
+
+// ---------------------------------------------------------------------------
 // The loop
 // ---------------------------------------------------------------------------
 
@@ -278,49 +341,19 @@ void Engine::do_cook(const std::string& goal, int budget_seconds,
     search.max_results     = config_.tools.search_results;
     search.timeout_seconds = config_.tools.search_timeout;
 
-    // Routed once. The goal does not change, so re-asking the delegator every
-    // iteration would buy nothing and cost a model swap each time -- which,
-    // with the delegator set to load on demand, is the most expensive thing in
-    // the loop.
-    Request routing;
-    routing.kind   = RequestKind::Prompt;
-    routing.prompt = goal;
-    const RouteDecision decision = resolve(routing);
-    const std::string expert_name = expert_label(config_.roster, decision.expert);
-    state_.set_linked(decision.expert);
-
-    if (!config_.has_expert(decision.expert)) {
-        cook_.state   = CookState::Failed;
-        cook_.outcome = "no expert model is configured to cook with";
+    // Who is in the seat, which is no longer fixed for the whole cook: see
+    // take_the_seat and the HANDOFF verb.
+    CookSeat seat = take_the_seat(goal, CookSeat{});
+    if (seat.model == nullptr) {
+        cook_.state      = CookState::Failed;
+        cook_.outcome    = seat.error.empty()
+            ? std::string("no expert model is configured to cook with") : seat.error;
         cook_.ended_unix = static_cast<std::int64_t>(std::time(nullptr));
         publish_cook();
         state_.set_mood(Mood::Error, cook_.outcome);
         cooking_.store(false, std::memory_order_relaxed);
         return;
     }
-
-    const ModelParams params = config_.expert(decision.expert);
-    std::string error;
-    state_.set_mood(Mood::Loading, "swapping in " + expert_name);
-    state_.set_seat(decision.expert, SeatPhase::Loading, 0.0F);
-    if (wake_) {
-        wake_();
-    }
-    LoadedModel* model = host_->acquire_expert(
-        decision.expert, params,
-        [this, &decision](float progress) { state_.set_seat_progress(decision.expert, progress); },
-        error);
-    if (model == nullptr) {
-        cook_.state      = CookState::Failed;
-        cook_.outcome    = error;
-        cook_.ended_unix = static_cast<std::int64_t>(std::time(nullptr));
-        publish_cook();
-        state_.set_seat(decision.expert, SeatPhase::Dormant);
-        state_.set_mood(Mood::Error, error);
-        cooking_.store(false, std::memory_order_relaxed);
-        return;
-    }
-    state_.set_resident(decision.expert);
 
     const std::string system = cook_system_prompt(config_, goal, workshop, root);
     // The exchanges since the last trim. The goal and the running account are
@@ -378,11 +411,11 @@ void Engine::do_cook(const std::string& goal, int budget_seconds,
                         recent.end());
         messages.push_back({"user", next_instruction});
 
-        state_.set_mood(Mood::Thinking, expert_name + " is working");
+        state_.set_mood(Mood::Thinking, seat.name + " is working");
         if (wake_) {
             wake_();
         }
-        const CookRound round = cook_round(*model, params, messages);
+        const CookRound round = cook_round(*seat.model, seat.params, messages);
         if (cancel_.load(std::memory_order_relaxed)) {
             break;
         }
@@ -399,7 +432,7 @@ void Engine::do_cook(const std::string& goal, int budget_seconds,
             // it back on the protocol.
             CookStep step;
             step.iteration = cook_.iterations;
-            step.expert    = decision.expert;
+            step.expert    = seat.id;
             step.kind      = "think";
             step.summary   = round.answer.empty() ? std::string("(said nothing)")
                                                   : round.answer.substr(0, 200);
@@ -444,7 +477,7 @@ void Engine::do_cook(const std::string& goal, int budget_seconds,
             cook_.question = call->argument;
             CookStep step;
             step.iteration = cook_.iterations;
-            step.expert    = decision.expert;
+            step.expert    = seat.id;
             step.kind      = "ask";
             step.summary   = "asked: " + call->argument;
             step.ms        = round.ms;
@@ -466,10 +499,55 @@ void Engine::do_cook(const std::string& goal, int budget_seconds,
             continue;
         }
 
+        if (call->kind == tools::ToolKind::Handoff) {
+            const std::string work = call->argument.empty() ? goal : call->argument;
+
+            CookStep step;
+            step.iteration = cook_.iterations;
+            step.expert    = seat.id;
+            step.kind      = "handoff";
+            step.summary   = work;
+            step.ms        = round.ms;
+            note_step(std::move(step));
+
+            const CookSeat next = take_the_seat(work, seat);
+            if (next.model == nullptr) {
+                // Nobody could take it. Rather than end the cook, the expert
+                // that is already loaded carries on with the work it described
+                // -- a worse specialist finishing the job beats no job.
+                CookStep note;
+                note.iteration = cook_.iterations;
+                note.expert    = seat.id;
+                note.kind      = "note";
+                note.ok        = false;
+                note.summary   = next.error + " -- carrying on with " + seat.name;
+                note_step(std::move(note));
+            } else {
+                if (next.id != seat.id) {
+                    CookStep note;
+                    note.iteration = cook_.iterations;
+                    note.expert    = next.id;
+                    note.kind      = "note";
+                    note.summary   = seat.name + " handed over to " + next.name;
+                    note_step(std::move(note));
+                }
+                seat = next;
+            }
+
+            // A new expert has none of the old one's conversation, and giving
+            // it one would be giving it someone else's turns as its own. The
+            // running account, which is rebuilt from the journal every round,
+            // is what carries the history across the handover.
+            ++cook_.iterations;
+            recent.clear();
+            next_instruction = "Do this now: " + work;
+            continue;
+        }
+
         if (call->kind == tools::ToolKind::Done) {
             CookStep step;
             step.iteration = cook_.iterations;
-            step.expert    = decision.expert;
+            step.expert    = seat.id;
             step.kind      = "done";
             step.summary   = call->argument.empty() ? std::string("finished a piece of work")
                                                     : call->argument;
@@ -478,11 +556,18 @@ void Engine::do_cook(const std::string& goal, int budget_seconds,
 
             // A piece of work is finished, not the cook. The loop is driven by
             // the budget, and the whole point is that it comes back round.
+            //
+            // Asking for the next piece of work as a HANDOFF line rather than
+            // just saying "carry on" is what lets the roster change hands: the
+            // line goes back through the delegator, and if it describes
+            // documentation rather than code, a writing expert takes the seat.
             ++cook_.iterations;
             recent.clear();
             next_instruction =
-                "That piece is done. Look at the project again and find the next "
-                "most valuable improvement towards the goal, then make it.";
+                "That piece is done. Say what the next most valuable piece of work "
+                "towards the goal is, in one line, as:\n\nHANDOFF: <the next piece "
+                "of work>\n\nSay nothing else. If it needs a different kind of "
+                "expertise than this one, say so plainly in that line.";
             continue;
         }
 
@@ -492,9 +577,10 @@ void Engine::do_cook(const std::string& goal, int budget_seconds,
 
         CookStep step;
         step.iteration = cook_.iterations;
-        step.expert    = decision.expert;
+        step.expert    = seat.id;
         step.kind      = std::string(tools::tool_kind_name(call->kind));
         step.summary   = result.summary;
+        step.detail    = result.detail;
         step.ok        = result.ok;
         step.ms        = ms_between(started);
         step.changed   = result.changed;
@@ -529,7 +615,7 @@ void Engine::do_cook(const std::string& goal, int budget_seconds,
             looping = true;
             CookStep note;
             note.iteration = cook_.iterations;
-            note.expert    = decision.expert;
+            note.expert    = seat.id;
             note.kind      = "note";
             note.ok        = false;
             note.summary   = "stopped: going in circles with nothing changing";
@@ -572,7 +658,7 @@ void Engine::do_cook(const std::string& goal, int budget_seconds,
     if (!interrupted) {
         cook_.state = CookState::Finishing;
         publish_cook();
-        state_.set_mood(Mood::Thinking, expert_name + " is finishing up");
+        state_.set_mood(Mood::Thinking, seat.name + " is finishing up");
         if (wake_) {
             wake_();
         }
@@ -598,7 +684,7 @@ void Engine::do_cook(const std::string& goal, int budget_seconds,
             }
             messages.push_back({"user", instruction});
 
-            const CookRound round = cook_round(*model, params, messages);
+            const CookRound round = cook_round(*seat.model, seat.params, messages);
             const std::optional<tools::ToolCall> call =
                 tools::parse_tool_call(round.answer, round.reasoning);
 
@@ -613,9 +699,10 @@ void Engine::do_cook(const std::string& goal, int budget_seconds,
 
             CookStep step;
             step.iteration = cook_.iterations;
-            step.expert    = decision.expert;
+            step.expert    = seat.id;
             step.kind      = std::string(tools::tool_kind_name(call->kind));
             step.summary   = result.summary;
+            step.detail    = result.detail;
             step.ok        = result.ok;
             step.ms        = ms_between(started);
             step.changed   = result.changed;

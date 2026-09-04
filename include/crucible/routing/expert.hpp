@@ -65,37 +65,32 @@ struct Expert {
     /// Only affects what `/ejectexpert` warns about and what a reset restores;
     /// a built-in expert is otherwise an ordinary row and can be removed.
     bool builtin = false;
-
-    /// Whether the delegator may name this expert.
-    ///
-    /// False only for the fallback seat, and deliberately: the delegator's job
-    /// is to pick a specialist, and offering it an "anything else" option is
-    /// exactly what an earlier prompt did -- it answered that for almost
-    /// everything and routing collapsed to 16%. The engine decides when to fall
-    /// back; the delegator is never asked to.
-    bool routable = true;
 };
 
-/// The id of the seat that catches what the delegator could not place. Always
-/// present, never routable, never removable.
-inline constexpr std::string_view kFallbackId = "fallback";
-
-/// The live roster, in the order the seats are drawn, with the fallback last.
+/// The live roster, in the order the seats are drawn.
 ///
 /// Every artefact the delegator consumes is generated from this list rather
 /// than stored beside it, so adding a seat cannot leave the system prompt
 /// describing eight experts while the label set offers nine.
 class Roster {
 public:
-    /// The nine that ship, plus the fallback.
+    /// The nine that ship.
     ///
     /// Their blurbs, examples and keyword sets are measured rather than
     /// guessed: this exact table is what scores 96% on the routing benchmark,
     /// and it is the reference a user-made expert is trying to look like.
+    ///
+    /// There is no catch-all among them. There used to be a tenth seat called
+    /// Fallback that the delegator was never allowed to choose and the engine
+    /// sent work to when nothing else fit. It is gone: with a roster the user
+    /// owns, a general-purpose expert is something they can add and name
+    /// themselves, and `RoutingConfig::default_expert` says which seat plays
+    /// that part. One less special case in the type, one more thing the user
+    /// decides.
     static Roster defaults();
 
-    /// An empty roster carrying only the fallback seat. What a config with an
-    /// explicit empty expert list loads as.
+    /// A roster with nothing on it. What a config with an explicit empty expert
+    /// list loads as, and a state the UI explains rather than crashing on.
     static Roster bare();
 
     std::size_t size() const { return experts_.size(); }
@@ -107,23 +102,16 @@ public:
     /// reason `/math`, `/MATH` and `/mathematics` all reach the same seat.
     std::optional<std::size_t> find(std::string_view key) const;
 
-    /// Index of the fallback seat. Always valid: `defaults()` and `bare()` both
-    /// provide one, and `remove` refuses to take it away.
-    std::size_t   fallback_index() const;
-    const Expert& fallback() const { return at(fallback_index()); }
-
-    /// Indices the delegator may choose between, in roster order.
-    std::vector<std::size_t> routable() const;
-
-    /// Add a seat, keeping the fallback last.
+    /// Add a seat at the end.
     ///
     /// Fills in the id, tag and keywords if they are blank, and refuses a name
     /// that collides with a seat already present. Returns false and sets
     /// `error` to something a user can act on.
     bool add(Expert expert, std::string& error);
 
-    /// Remove by id, tag or name. Refuses the fallback, which the engine
-    /// requires to exist.
+    /// Remove by id, tag or name. An empty roster is allowed: someone who
+    /// ejected every expert meant to, and the UI says so rather than quietly
+    /// putting one back.
     bool remove(std::string_view key, std::string& error);
 
     /// Replace one seat's mutable fields, matched by id. Used by the settings
@@ -132,11 +120,11 @@ public:
 
     // --- everything the delegator sees, generated from the list above ------
 
-    /// The labels the delegator chooses between, parallel to `routable()`.
+    /// The labels the delegator chooses between, in roster order.
     std::vector<std::string> router_labels() const;
 
-    /// The system prompt handed to the delegator, listing every routable seat
-    /// and its remit.
+    /// The system prompt handed to the delegator, listing every seat and its
+    /// remit.
     std::string router_system_prompt() const;
 
     /// Worked examples as (question, label) pairs.
@@ -148,9 +136,6 @@ public:
     std::vector<std::pair<std::string, std::string>> router_examples() const;
 
 private:
-    /// Put the fallback back at the end. Called after every mutation.
-    void reorder();
-
     std::vector<Expert> experts_;
 };
 

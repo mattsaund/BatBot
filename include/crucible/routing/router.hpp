@@ -24,13 +24,13 @@ namespace crucible {
 enum class RouteSource {
     Model,      ///< the router model chose it
     Keyword,    ///< keyword scoring chose it
-    Fallback,   ///< nothing chose it; this is the only or default expert
+    Fallback,   ///< nothing chose it; policy substituted this one
     Forced,     ///< the user pinned a subject with a slash command
 };
 
 struct RouteDecision {
-    /// The fallback seat, because that is what "nobody has decided yet" means.
-    /// A default-constructed decision reaches the engine whenever the delegator
+    /// Empty, because that is what "nobody has decided yet" means. A
+    /// default-constructed decision reaches the engine whenever the delegator
     /// could not run at all, and defaulting to a real expert sent every one of
     /// those prompts to that expert as though it had been chosen.
     ///
@@ -38,7 +38,7 @@ struct RouteDecision {
     /// roster it was made against -- it is written into the session history and
     /// read back weeks later -- and an index would then name whichever expert
     /// had since moved into that slot.
-    ExpertId    expert     = ExpertId(kFallbackId);
+    ExpertId    expert;
     float       confidence = 0.0F;
     RouteSource source     = RouteSource::Fallback;
     std::string detail;     ///< short human-readable note for the status line
@@ -113,7 +113,7 @@ public:
     void set_calibration(float strength) { calibration_ = strength; }
 
     /// The raw label scores for one prompt, uncalibrated, parallel to
-    /// `Roster::routable()`. For crucible-routebench --explain, which is how a
+    /// `Roster::experts()`. For crucible-routebench --explain, which is how a
     /// delegator that never picks one of the seats gets diagnosed.
     std::vector<float> raw_scores(const std::string& prompt);
 
@@ -161,7 +161,7 @@ private:
     std::shared_ptr<const Roster> roster_;
     std::string   system_prompt_;
     std::vector<std::pair<std::string, std::string>> examples_;
-    std::vector<ExpertId>    ids_;     ///< the routable seats, in roster order
+    std::vector<ExpertId>    ids_;     ///< the seats, in roster order
     std::vector<std::string> labels_;  ///< their names, parallel to ids_
 
     /// What the delegator answers when it is asked nothing at all.

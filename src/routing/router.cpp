@@ -105,17 +105,12 @@ RouteDecision KeywordRouter::route(const std::string& prompt, const CancelCallba
     const std::string haystack = to_lower(prompt);
     const std::vector<Expert>& experts = roster_->experts();
 
-    // Scored per seat rather than per subject-enum slot. The fallback carries
-    // no keywords, so it scores zero and is reached by the no-match path below
-    // rather than by competing -- which is the same behaviour the old fixed
-    // table had, now for the structural reason rather than by a hand-written
-    // empty entry.
+    // A seat with no keywords simply scores zero and is never chosen by this
+    // router, which is the honest outcome: it has told the keyword scorer
+    // nothing to match on.
     std::vector<int> scores(experts.size(), 0);
     int total = 0;
     for (std::size_t i = 0; i < experts.size(); ++i) {
-        if (!experts[i].routable) {
-            continue;
-        }
         int score = 0;
         for (const std::string& word : experts[i].keywords) {
             if (word.empty()) {
@@ -137,10 +132,10 @@ RouteDecision KeywordRouter::route(const std::string& prompt, const CancelCallba
     const int best_score = *best;
 
     if (best_score == 0) {
-        // Nothing matched, so there is no decision to report. The fallback is
-        // the seat for exactly this, and the engine will substitute if it is
-        // empty.
-        decision.expert     = ExpertId(kFallbackId);
+        // Nothing matched, so there is no decision to report. An empty expert
+        // is what "nobody chose" means; the route policy decides where that
+        // goes.
+        decision.expert.clear();
         decision.confidence = 0.0F;
         decision.source     = RouteSource::Fallback;
         decision.detail     = "no expert keywords matched";
@@ -178,11 +173,12 @@ ModelRouter::ModelRouter(LoadedModel& model, ModelParams params,
     examples_ = roster_->router_examples();
     labels_   = roster_->router_labels();
 
-    // Parallel to labels_, and built in the same pass over the same list, so
+    // Parallel to labels_, and built from the same list in the same order, so
     // the index the scorer returns cannot name a different seat than the label
     // it scored.
-    for (const std::size_t index : roster_->routable()) {
-        ids_.push_back(roster_->at(index).id);
+    ids_.reserve(roster_->size());
+    for (const Expert& expert : roster_->experts()) {
+        ids_.push_back(expert.id);
     }
 }
 
@@ -242,6 +238,15 @@ std::vector<float> ModelRouter::raw_scores(const std::string& prompt) {
 }
 
 RouteDecision ModelRouter::route(const std::string& prompt, const CancelCallback& cancel) {
+    if (labels_.empty()) {
+        // Nothing to choose between. Scoring an empty label set is not a
+        // degenerate case to handle further down -- it is a question with no
+        // possible answer, and saying so here keeps every caller below simple.
+        RouteDecision decision;
+        decision.source = RouteSource::Fallback;
+        decision.detail = "no experts on the roster";
+        return decision;
+    }
     if (!calibrated_) {
         calibrate();
     }

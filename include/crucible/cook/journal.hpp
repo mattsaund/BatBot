@@ -61,6 +61,12 @@ struct CookStep {
     std::string kind;
     /// One line, as it appears on screen and in the history.
     std::string summary;
+
+    /// What the step expands into: a diff for a write, the captured output for
+    /// a run. Empty for the rest. Kept apart from `summary` so a journal of a
+    /// hundred steps stays scannable and still holds what actually happened.
+    std::string detail;
+
     bool        ok = true;
     long        ms = 0;
     /// Paths this step changed, relative to the project root.
@@ -93,6 +99,13 @@ struct Cook {
     /// Every distinct path any step changed, in the order first touched.
     /// The answer to "what did this cook actually do to my project".
     std::vector<std::string> files_touched() const;
+
+    /// Every expert that held the seat, in the order they took it.
+    ///
+    /// A cook is not one expert: a HANDOFF sends the next piece of work back
+    /// through the delegator, so a long one may pass from a programming expert
+    /// to a writing one and back. This is who worked on it.
+    std::vector<ExpertId> experts_used() const;
 
     /// How long it ran. Uses the wall clock while it is still running.
     std::chrono::seconds duration() const;

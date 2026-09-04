@@ -188,6 +188,28 @@ private:
     CookRound cook_round(LoadedModel& model, const ModelParams& params,
                          const std::vector<ChatMessage>& messages);
 
+    /// Who is in the seat for a cook, and the model behind them.
+    ///
+    /// A cook is not one expert any more. It starts with whoever the goal
+    /// routes to, and any HANDOFF sends the next piece of work back through the
+    /// delegator -- so a programming expert that has finished the code can say
+    /// the next thing needed is documentation and have a writing expert put in
+    /// its place.
+    struct CookSeat {
+        ExpertId     id;
+        std::string  name;
+        ModelParams  params;
+        LoadedModel* model = nullptr;
+        std::string  error;   ///< set when the model could not be loaded
+    };
+
+    /// Route `work` and make the winner resident, freeing whoever was there.
+    ///
+    /// Returns the seat that is actually loaded. On failure `model` is null and
+    /// `error` says why. A no-op when the delegator picks whoever is already in
+    /// the chair, which is the common case and must not cost a reload.
+    CookSeat take_the_seat(const std::string& work, const CookSeat& current);
+
     /// Block until the user answers the question a cook is waiting on, or the
     /// cook is stopped. Returns the answer, or nothing if it was stopped.
     std::optional<std::string> await_cook_answer();

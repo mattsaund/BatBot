@@ -131,6 +131,17 @@ std::vector<std::string> Cook::files_touched() const {
     return files;
 }
 
+std::vector<ExpertId> Cook::experts_used() const {
+    std::vector<ExpertId> experts;
+    std::set<ExpertId>    seen;
+    for (const CookStep& step : steps) {
+        if (!step.expert.empty() && seen.insert(step.expert).second) {
+            experts.push_back(step.expert);
+        }
+    }
+    return experts;
+}
+
 std::chrono::seconds Cook::duration() const {
     // A cook still running is measured against now, so the timer on screen
     // moves. One that has finished is measured against when it did.
@@ -215,6 +226,7 @@ bool CookLog::save(const Cook& cook, std::string& error) const {
             {"expert",    step.expert},
             {"kind",      step.kind},
             {"summary",   step.summary},
+            {"detail",    step.detail},
             {"ok",        step.ok},
             {"ms",        step.ms},
             {"changed",   step.changed},
@@ -342,6 +354,7 @@ std::optional<Cook> CookLog::load(const std::string& id) const {
             step.expert    = entry.value("expert", "");
             step.kind      = entry.value("kind", "");
             step.summary   = entry.value("summary", "");
+            step.detail    = entry.value("detail", "");
             step.ok        = entry.value("ok", true);
             step.ms        = entry.value("ms", 0L);
             if (const auto changed = entry.find("changed");

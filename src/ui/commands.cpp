@@ -299,8 +299,8 @@ bool App::handle_command(const std::string& text) {
         save_settings(/*announce=*/false);
 
         say(seat.name + " has left the roundtable"
-            + (seat.builtin ? " -- it was one of the built-in nine, and /settings "
-                              "cannot bring it back; re-add it with /newexpert"
+            + (seat.builtin ? " -- it was one of the built-in nine; re-add it with "
+                              "/newexpert"
                             : ""));
         return true;
     }
@@ -430,7 +430,7 @@ bool App::commit_new_expert(const ExpertForm::Result& form) {
     // The new seat starts with no model. It appears on the roundtable
     // immediately, drawn hollow, which is the honest picture: the delegator can
     // route to it as soon as it reloads, and until a GGUF is assigned that
-    // route lands on the fallback.
+    // route is redirected by the policy in route_policy.hpp.
     const ExpertId id = make_expert_id(form.name);
     edited.experts[id] = ModelParams{};
     settings_.set_config(std::move(edited));

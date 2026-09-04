@@ -106,9 +106,16 @@ void SettingsView::build_rows() {
     rows_.push_back({Kind::Bool, "Keep delegator loaded",
                      "off frees it after each decision, leaving the expert the whole card",
                      nullptr, nullptr, nullptr, &config_.routing.keep_delegator_loaded, {}});
-    rows_.push_back({Kind::Bool, "Use fallback expert",
-                     "empty seats send work to Fallback rather than elsewhere",
-                     nullptr, nullptr, nullptr, &config_.routing.use_fallback_expert, {}});
+    // Cycled through the roster by id, with "" meaning none. Any seat can play
+    // the part the built-in Fallback used to; which one is the user's choice.
+    std::vector<std::string> backstops{""};
+    for (const Expert& seat : config_.roster.experts()) {
+        backstops.push_back(seat.id);
+    }
+    rows_.push_back({Kind::Enum, "Default expert",
+                     "takes prompts the delegator could not place, or that hit an empty seat",
+                     &config_.routing.default_expert, nullptr, nullptr, nullptr,
+                     std::move(backstops)});
 
     header("DEFAULTS");
     ModelParams& d = config_.defaults;
@@ -318,7 +325,13 @@ std::string SettingsView::value_of(const Row& row) const {
             return config_.resolved_models_dir().string();
         case Kind::ModelRef:
         case Kind::Text:
-        case Kind::Enum:     return row.text != nullptr ? *row.text : std::string{};
+        // An empty enum value reads as "(none)" rather than as a blank cell,
+        // which is indistinguishable from a row that failed to render.
+        case Kind::Enum:
+            if (row.text == nullptr) {
+                return std::string{};
+            }
+            return row.text->empty() ? std::string("(none)") : *row.text;
         case Kind::Int:      return row.integer != nullptr ? std::to_string(*row.integer)
                                                            : std::string{};
         case Kind::Float:    return row.real != nullptr ? format_float(*row.real) : std::string{};
