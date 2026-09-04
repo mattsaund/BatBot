@@ -534,6 +534,52 @@ TEST(reading_and_writing_a_file_works_and_says_what_it_did) {
     CHECK(do_call(write, settings).summary.find("updated") != std::string::npos);
 }
 
+TEST(a_write_target_that_is_a_sentence_is_refused) {
+    TempDir dir;
+    const tools::WorkshopSettings settings = workshop_at(dir.path());
+
+    // Every one of these is a real WRITE target a small expert produced during
+    // a cook, and every one of them created a file with that name.
+    for (const char* junk : {"Run python src/calc.py",
+                             "The fix is complete and verified.",
+                             "src/calc.py:2: return a + b",
+                             "python -c \"import os\" && python src/calc.py"}) {
+        tools::ToolCall write;
+        write.kind     = tools::ToolKind::Write;
+        write.argument = junk;
+        write.content  = "x = 1";
+        const tools::ToolResult result = do_call(write, settings);
+        CHECK(!result.ok);
+        // The message has to say what a path looks like, or the model tries the
+        // same thing again with different words.
+        CHECK(result.output.find("relative to the project root") != std::string::npos);
+    }
+
+    // Nothing was created. A project that comes back from a cook with a file
+    // called "The fix is complete and verified." in it is worse than one where
+    // the write was refused.
+    int entries = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(dir.path())) {
+        (void)entry;
+        ++entries;
+    }
+    CHECK_EQ(entries, 0);
+}
+
+TEST(an_ordinary_path_is_still_written) {
+    TempDir dir;
+    const tools::WorkshopSettings settings = workshop_at(dir.path());
+
+    for (const char* path : {"calc.py", "src/calc.py", "a/b/c/deep-file.txt",
+                             "./relative.md", "with_underscores.and.dots"}) {
+        tools::ToolCall write;
+        write.kind     = tools::ToolKind::Write;
+        write.argument = path;
+        write.content  = "x = 1";
+        CHECK(do_call(write, settings).ok);
+    }
+}
+
 TEST(a_write_with_no_body_is_refused_rather_than_emptying_the_file) {
     TempDir dir;
     const auto root = dir.path();
@@ -622,6 +668,63 @@ TEST(listing_a_file_says_which_command_to_use_instead) {
     list.argument = "nope.py";
     CHECK(tools::run_tool(list, workshop_at(dir.path()), tools::SearchSettings{}, {})
               .output.find("does not exist") != std::string::npos);
+}
+
+TEST(a_read_only_verb_still_works_without_its_colon) {
+    // Models drop it. Measured: an expert spent a whole cook writing
+    // `READ /path` and `WRITE /path "text"`, and every one was read as prose
+    // over one character.
+    const auto call = [](const char* reply) { return tools::parse_tool_call(reply, ""); };
+
+    const std::optional<tools::ToolCall> read = call("READ src/main.cpp");
+    CHECK(read.has_value());
+    if (read) {
+        CHECK(read->kind == tools::ToolKind::Read);
+        CHECK_EQ(read->argument, std::string("src/main.cpp"));
+    }
+    const std::optional<tools::ToolCall> list = call("LIST .");
+    CHECK(list.has_value());
+    if (list) {
+        CHECK(list->kind == tools::ToolKind::List);
+    }
+}
+
+TEST(a_colon_is_still_required_where_being_wrong_costs_something) {
+    // `RUN the tests first` is a sentence, and running it because the line
+    // opens with a verb would be far worse than not running it. `WRITE /path
+    // "fixed the bug"` is worse still: the quoted text is a description of the
+    // change, and obeying it would put the description into the file in place
+    // of the code.
+    CHECK(!tools::parse_tool_call("RUN the tests first", "").has_value());
+    CHECK(!tools::parse_tool_call("WRITE calc.py \"Fixed add function\"", "").has_value());
+    CHECK(!tools::parse_tool_call("DONE", "").has_value());
+}
+
+TEST(a_near_miss_is_recognised_so_it_can_be_corrected) {
+    // Not executed -- named, so the cook loop can answer with the syntax
+    // instead of a generic "take an action", which is how a whole cook goes by
+    // with nothing written.
+    CHECK(tools::attempted_tool_call("WRITE calc.py \"Fixed it\"", "")
+          == tools::ToolKind::Write);
+    CHECK(tools::attempted_tool_call("RUN ./calc.py", "") == tools::ToolKind::Run);
+    CHECK(tools::attempted_tool_call("DONE", "") == tools::ToolKind::Done);
+
+    // A correct call is not a near miss, and neither is ordinary prose.
+    CHECK(tools::attempted_tool_call("WRITE: calc.py", "") == tools::ToolKind::None);
+    CHECK(tools::attempted_tool_call("I will fix the add function.", "")
+          == tools::ToolKind::None);
+}
+
+TEST(the_instructions_show_the_write_shape_rather_than_only_describing_it) {
+    tools::WorkshopSettings settings;
+    settings.enabled = true;
+    const std::string text = tools::workshop_instructions(settings);
+
+    // Told only the rules, models write `WRITE path "a description"` and expect
+    // it to be applied. A worked example is the cheapest thing that stops that.
+    CHECK(text.find("WRITE: src/calc.py") != std::string::npos);
+    CHECK(text.find("```") != std::string::npos);
+    CHECK(text.find("The colon is required") != std::string::npos);
 }
 
 TEST(a_command_runs_in_the_project_and_reports_its_status) {

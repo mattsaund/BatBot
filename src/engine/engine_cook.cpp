@@ -29,6 +29,7 @@
 // a cook killed at minute fifty can still say what it changed.
 #include "crucible/engine/engine.hpp"
 
+#include <cctype>
 #include <chrono>
 #include <ctime>
 #include <deque>
@@ -404,9 +405,37 @@ void Engine::do_cook(const std::string& goal, int budget_seconds,
                                                   : round.answer.substr(0, 200);
             step.ms        = round.ms;
             note_step(std::move(step));
-            next_instruction =
-                "Take one action now, using exactly one of the commands you were "
-                "given, on a line of its own.";
+
+            // Distinguish "did not try" from "tried and got the syntax wrong".
+            // A model writing `WRITE /path "fixed it"` is doing the work and
+            // failing on one character, and answering it with a generic "take
+            // an action" is how a whole cook goes by with nothing written.
+            const tools::ToolKind attempted =
+                tools::attempted_tool_call(round.answer, round.reasoning);
+            if (attempted == tools::ToolKind::Write) {
+                next_instruction =
+                    "That was nearly right, but it cannot be run. WRITE needs a colon "
+                    "after it, and the new contents of the file go in a fenced block "
+                    "on the following lines -- never on the same line, and never as a "
+                    "description of the change. Exactly this shape:\n\n"
+                    "WRITE: path/to/file\n```\n<the complete new contents>\n```\n\n"
+                    "Try that again.";
+            } else if (attempted != tools::ToolKind::None) {
+                // Named in upper case, because that is how the protocol wants
+                // it back -- the lower-case spelling is the journal's.
+                std::string verb(tools::tool_kind_name(attempted));
+                for (char& c : verb) {
+                    c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                }
+                next_instruction =
+                    "That was nearly right, but it cannot be run: " + verb
+                    + " needs a colon after it, like `" + verb
+                    + ": ...`. Write it again with the colon.";
+            } else {
+                next_instruction =
+                    "Take one action now, using exactly one of the commands you were "
+                    "given, on a line of its own, with its colon.";
+            }
             continue;
         }
 

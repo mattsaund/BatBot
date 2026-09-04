@@ -113,6 +113,18 @@ struct WorkshopSettings {
 /// shell command is not a request to run it.
 std::optional<ToolCall> parse_tool_call(std::string_view answer, std::string_view reasoning);
 
+/// The verb a reply was reaching for but wrote wrongly, or None.
+///
+/// A line that opens with WRITE, RUN, ASK or DONE and no colon is a tool call
+/// with a typo in it, not prose -- but it cannot be executed, because the
+/// argument is not reliably an argument. `WRITE /path "fixed the bug"` means
+/// the quoted text as a description, and obeying it would put the description
+/// into the file instead of the code.
+///
+/// So it is detected rather than guessed at, and the caller answers with the
+/// syntax. Returns None for a reply that was not trying to call anything.
+ToolKind attempted_tool_call(std::string_view answer, std::string_view reasoning);
+
 /// Resolve `relative` inside `root`.
 ///
 /// Returns nothing when the result would be outside it -- an absolute path, a

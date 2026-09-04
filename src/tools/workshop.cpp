@@ -69,6 +69,26 @@ std::string unquote(std::string_view text) {
     return out;
 }
 
+/// Whether a colon may be left off this verb.
+///
+/// Models drop it. Measured: an expert given a cook wrote `WRITE /path "text"`
+/// and `READ /path` for a solid minute, and every one was read as prose because
+/// of one character.
+///
+/// Accepting the colon-less form is only safe where being wrong is free, so it
+/// is allowed for the two read-only verbs whose argument is a single path, and
+/// refused for everything else. `RUN the tests first` is a sentence, and
+/// executing it because it opens with a verb would be much worse than not
+/// running it. `WRITE /path "some text"` is worse still: the model that writes
+/// that means the text as a description, and obeying it would put the
+/// description into the file in place of the code.
+///
+/// The cook loop notices the colon-less form of the strict verbs and replies
+/// with the syntax rather than guessing -- see engine_cook.cpp.
+bool colon_optional(ToolKind kind) {
+    return kind == ToolKind::List || kind == ToolKind::Read;
+}
+
 /// The verb a line opens with, or None.
 ///
 /// The line must *begin* with it, ignoring indentation. A sentence that happens
@@ -77,18 +97,24 @@ std::string unquote(std::string_view text) {
 ToolKind verb_of(std::string_view line, std::string& argument) {
     const std::string trimmed = trim(line);
     for (const Verb& verb : kVerbs) {
-        if (trimmed.size() > verb.word.size() &&
-            trimmed.compare(0, verb.word.size(), verb.word) == 0 &&
-            trimmed[verb.word.size()] == ':') {
-            argument = trim(std::string_view(trimmed).substr(verb.word.size() + 1));
-            // Everything but RUN names a thing rather than a command line, and
-            // a quoted name is the same name. RUN keeps its argument verbatim:
-            // quoting is meaningful to a shell.
-            if (verb.kind != ToolKind::Run) {
-                argument = unquote(argument);
-            }
-            return verb.kind;
+        if (trimmed.size() <= verb.word.size() ||
+            trimmed.compare(0, verb.word.size(), verb.word) != 0) {
+            continue;
         }
+        const char after = trimmed[verb.word.size()];
+        const bool separated = after == ':'
+                            || (colon_optional(verb.kind) && (after == ' ' || after == '\t'));
+        if (!separated) {
+            continue;
+        }
+        argument = trim(std::string_view(trimmed).substr(verb.word.size() + 1));
+        // Everything but RUN names a thing rather than a command line, and a
+        // quoted name is the same name. RUN keeps its argument verbatim:
+        // quoting is meaningful to a shell.
+        if (verb.kind != ToolKind::Run) {
+            argument = unquote(argument);
+        }
+        return verb.kind;
     }
     return ToolKind::None;
 }
@@ -199,6 +225,29 @@ std::optional<std::filesystem::path> resolve_argument(const std::filesystem::pat
     return resolve_in_root(root, argument);
 }
 
+/// Whether `target` is plausibly the name of a file rather than a sentence.
+///
+/// This exists because of what actually happens. Given a cook, an expert wrote
+/// `WRITE: Run python src/calc.py`, `WRITE: The fix is complete and verified.`
+/// and `WRITE: src/calc.py:2: return a + b` -- and each one created a file with
+/// that name. Refusing junk is not tidiness: a project that comes back from a
+/// cook with a file called "The fix is complete and verified." in it is worse
+/// than one where the write was refused and the model was told why.
+///
+/// Whitespace is the strongest signal and the rule is therefore blunt: a path
+/// with a space in it is refused. Real ones exist, and the cost of refusing one
+/// is a clear message the model can act on; the cost of accepting a sentence is
+/// a file named after it.
+bool plausible_path(std::string_view target) {
+    if (target.empty() || target.size() > 200) {
+        return false;
+    }
+    // A colon is how "src/calc.py:2: return a + b" gets in, and it has no place
+    // in a relative path inside a project.
+    constexpr std::string_view kRefused = " \t\n\r\"\'`&|;<>*?$()[]{}:";
+    return target.find_first_of(kRefused) == std::string_view::npos;
+}
+
 ToolResult failure(std::string message) {
     ToolResult result;
     result.ok      = false;
@@ -290,6 +339,12 @@ ToolResult do_read(const ToolCall& call, const WorkshopSettings& settings) {
 
 /// WRITE
 ToolResult do_write(const ToolCall& call, const WorkshopSettings& settings) {
+    if (!plausible_path(call.argument)) {
+        return failure("\"" + call.argument.substr(0, 60)
+                     + "\" is not a file name. WRITE takes a path relative to the "
+                       "project root, with no spaces, and the contents go in a fenced "
+                       "block on the lines after it");
+    }
     const std::optional<std::filesystem::path> file =
         resolve_in_root(settings.root, call.argument);
     if (!file) {
@@ -465,6 +520,34 @@ std::optional<ToolCall> parse_tool_call(std::string_view answer, std::string_vie
     return std::nullopt;
 }
 
+ToolKind attempted_tool_call(std::string_view answer, std::string_view reasoning) {
+    const auto scan = [](std::string_view text) {
+        for (const std::string& line : split_lines(text)) {
+            const std::string trimmed = trim(line);
+            for (const Verb& verb : kVerbs) {
+                if (colon_optional(verb.kind)) {
+                    continue;  // those already parse without one
+                }
+                if (trimmed.size() > verb.word.size() &&
+                    trimmed.compare(0, verb.word.size(), verb.word) == 0 &&
+                    trimmed[verb.word.size()] != ':') {
+                    return verb.kind;
+                }
+                // A bare verb on a line of its own -- "DONE" -- is the same
+                // mistake with nothing after it.
+                if (trimmed == verb.word) {
+                    return verb.kind;
+                }
+            }
+        }
+        return ToolKind::None;
+    };
+    if (const ToolKind kind = scan(answer); kind != ToolKind::None) {
+        return kind;
+    }
+    return trim(answer).empty() ? scan(reasoning) : ToolKind::None;
+}
+
 std::optional<std::filesystem::path> resolve_in_root(const std::filesystem::path& root,
                                                      std::string_view relative) {
     if (root.empty()) {
@@ -564,9 +647,20 @@ std::string workshop_instructions(const WorkshopSettings& settings) {
         "NOTE: <what you are doing>  recorded in the log, no other effect\n"
         "ASK: <question>            ask the user something you cannot work out\n"
         "DONE: <what you changed>   this piece of work is finished\n"
-        "\nOne call per reply, on its own line, and nothing after it. Paths are "
-        "relative to the project root and cannot leave it. WRITE replaces the whole "
-        "file, so READ it first unless you are creating it.\n";
+        "\nThe colon is required. One call per reply, on its own line, and nothing "
+        "after it. Paths are relative to the project root and cannot leave it.\n"
+        // A worked example, because the rules alone are not enough. Told only
+        // the shape, models write `WRITE path "a description of the change"`
+        // and expect that to be applied -- which would put the description into
+        // the file in place of the code.
+        "\nWRITE replaces the whole file and the new contents go in a fenced block "
+        "on the following lines, never on the same line. Like this:\n"
+        "\nWRITE: src/calc.py\n"
+        "```\n"
+        "def add(a, b):\n"
+        "    return a + b\n"
+        "```\n"
+        "\nRead a file before rewriting it, unless you are creating it.\n";
     return text;
 }
 
