@@ -819,6 +819,38 @@ TEST(a_command_runs_in_the_project_and_reports_its_status) {
     CHECK(failed.summary.find("exit 3") != std::string::npos);
 }
 
+TEST(a_command_starts_in_the_project_but_is_not_confined_to_it) {
+    TempDir dir;
+    const auto root = dir.path() / "project";
+    std::filesystem::create_directories(root);
+    { std::ofstream(dir.path() / "outside.txt") << "reachable\n"; }
+
+    tools::ToolCall run;
+    run.kind     = tools::ToolKind::Run;
+    run.argument = "pwd";
+    const tools::ToolResult where =
+        tools::run_tool(run, workshop_at(root), tools::SearchSettings{}, {});
+    CHECK(where.ok);
+    CHECK(where.output.find(root.filename().string()) != std::string::npos);
+
+    // And the part worth stating out loud rather than discovering later: a
+    // shell can leave. The file verbs are confined; this is not, which is why
+    // it is a switch of its own and why the interface says so. Asserting the
+    // real behaviour here means a future sandbox has to update this test
+    // deliberately rather than quietly appearing to have always worked.
+    run.argument = "cat ../outside.txt";
+    const tools::ToolResult escaped =
+        tools::run_tool(run, workshop_at(root), tools::SearchSettings{}, {});
+    CHECK(escaped.ok);
+    CHECK(escaped.output.find("reachable") != std::string::npos);
+
+    // Whereas the same reach through a file verb is refused.
+    tools::ToolCall read;
+    read.kind     = tools::ToolKind::Read;
+    read.argument = "../outside.txt";
+    CHECK(!tools::run_tool(read, workshop_at(root), tools::SearchSettings{}, {}).ok);
+}
+
 TEST(a_command_that_never_finishes_is_killed) {
     TempDir dir;
     tools::WorkshopSettings settings = workshop_at(dir.path());

@@ -9,15 +9,33 @@
 //
 // Three things are load-bearing here and none of them is the tool list.
 //
-// The first is that every path is resolved inside one root and anything that
-// escapes it is refused. An expert that can write outside the project is not a
-// coding assistant, it is a remote shell, and the difference has to be
-// structural rather than a matter of the model behaving.
+// The first is that every path LIST, READ and WRITE are given is resolved
+// inside one root and anything that escapes it is refused. An expert that can
+// write outside the project is not a coding assistant, it is a remote shell,
+// and the difference has to be structural rather than a matter of the model
+// behaving.
 //
-// The second is that this is off until it is switched on, and the folder has to
-// have been trusted. `crucible` is meant to be run by cd-ing into a project, and
-// the trust gate has always said it would eventually read and write files
-// there. This is that.
+// RUN is the exception, and it is worth being exact about rather than
+// comfortable. The command starts with the project root as its working
+// directory, and that is the whole of the containment: a shell can `cd`
+// anywhere, read anything the user can read, and reach the network. This was
+// observed rather than reasoned about -- an expert given a cook wrote
+// `RUN: cd /tmp/... && grep -r add src/` and it ran, exactly as a shell should.
+//
+// That is not a hole to be plugged with a blocklist. `cd`, `..`, `$(...)`, an
+// absolute path and `find /` are five ways to do the same thing and there are
+// fifty more; refusing a subset while claiming confinement would be worse than
+// saying plainly what this is. Real confinement means a sandbox -- bubblewrap,
+// Landlock, seatbelt -- which is per-platform and is not here yet. So RUN is a
+// second switch, off-able on its own, and the interface says what it does:
+// letting a model edit a project you already trusted and letting it run
+// commands as you are different decisions, and only one of them is bounded by
+// a directory.
+//
+// The second is that all of this is off until it is switched on, and the folder
+// has to have been trusted. `crucible` is meant to be run by cd-ing into a
+// project, and the trust gate has always said it would eventually read and
+// write files there. This is that.
 //
 // The third is that the protocol is text. llama.cpp applies a chat template, it
 // does not negotiate a tool schema, and Crucible cannot know which model is in
@@ -44,7 +62,7 @@ enum class ToolKind {
     List,    ///< LIST: <dir>
     Read,    ///< READ: <file>
     Write,   ///< WRITE: <file>, followed by a block
-    Run,     ///< RUN: <command>
+    Run,     ///< RUN: <command>, in the project root but not confined to it
     Search,  ///< SEARCH: <query>
     Ask,     ///< ASK: <question>   -- pauses the cook for an answer
     Note,    ///< NOTE: <what it is doing>, journalled and shown, no effect
@@ -92,9 +110,13 @@ struct WorkshopSettings {
     /// Normally the project directory the user started Crucible in.
     std::filesystem::path root;
 
-    /// Whether RUN is available. Reading and writing a project you already
-    /// trusted is one decision; executing arbitrary commands in it is another,
-    /// and some people will want the first without the second.
+    /// Whether RUN is available.
+    ///
+    /// Reading and writing a project you already trusted is one decision;
+    /// executing arbitrary commands as you is another, and some people will
+    /// want the first without the second. It is a separate switch because a
+    /// command is not bounded by the root the way a path is -- see the note at
+    /// the top of this file.
     bool allow_run = true;
 
     /// How long a single command may take before it is killed. A build is

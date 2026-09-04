@@ -412,10 +412,14 @@ ToolResult do_run(const ToolCall& call, const WorkshopSettings& settings,
 
     util::Subprocess child;
     std::string      error;
-    // Through a shell, because that is what the command was written for:
-    // pipes, redirections and `&&` are how anyone describes running a project,
-    // and an argv split would break all three. The shell's cwd is the project
-    // root, which is also the only directory the rest of this file will touch.
+    // Through a shell, because that is what the command was written for: pipes,
+    // redirections and `&&` are how anyone describes running a project, and an
+    // argv split would break all three.
+    //
+    // The shell starts in the project root and that is the whole of the
+    // containment -- a shell can cd out of it, and one has, in testing. The
+    // file verbs above are confined; this is not, which is why it is a separate
+    // switch and why the interface says so. See workshop.hpp.
     if (!child.start({"/bin/sh", "-c", call.argument}, settings.root, {}, error)) {
         return failure("could not run: " + error);
     }

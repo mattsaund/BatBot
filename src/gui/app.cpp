@@ -989,8 +989,9 @@ void App::draw_settings() {
             section("WORKSHOP");
             wrapped(theme::kTextDim,
                     "What a cook is allowed to do to this project. Off, Crucible only "
-                    "answers questions about it. Every path an expert names is resolved "
-                    "inside the project folder and anything that escapes it is refused.");
+                    "answers questions about it. Every file an expert reads or writes is "
+                    "resolved inside the project folder and anything that escapes it is "
+                    "refused.");
             text_coloured(theme::kFlame, "%s", store_->project().root.string().c_str());
 
             bool workshop = config_.tools.workshop;
@@ -1005,9 +1006,15 @@ void App::draw_settings() {
                     config.tools.workshop_run = allow_run;
                 });
             }
+            if (config_.tools.workshop_run) {
+                wrapped(theme::kError,
+                        "A command starts in the project folder but is not confined to "
+                        "it: a shell can cd anywhere and read anything you can. This is "
+                        "a separate switch for that reason.");
+            }
             ImGui::SetItemTooltip(
-                "A separate decision: editing a project you trusted and executing "
-                "arbitrary commands in it are not the same thing.");
+                "Editing a project you trusted and running commands as you are not the "
+                "same decision.");
 
             int timeout = config_.tools.workshop_timeout;
             ImGui::SetNextItemWidth(em(12.0F));

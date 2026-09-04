@@ -173,7 +173,7 @@ describe it:
 | `LIST:` | what is in a directory |
 | `READ:` | a file, with line numbers |
 | `WRITE:` | replace a file |
-| `RUN:` | run a command in the project root |
+| `RUN:` | run a command, starting in the project root |
 | `SEARCH:` | look something up (needs web search on) |
 | `ASK:` | ask you something |
 | `HANDOFF:` | this piece is done and the next needs a different expert |
@@ -181,17 +181,30 @@ describe it:
 
 Three things are load-bearing and none of them is the tool list.
 
-**Every path is resolved inside the project root and anything that escapes is
-refused** — absolute paths, `..`, and symlinks, which are resolved *before* the
-check rather than after. Containment compares path components rather than
-strings, because `/home/me/proj` is a text prefix of `/home/me/project-two` and
-is not a parent of it. An expert that can write outside the project is not a
-coding assistant, it is a remote shell, and the difference has to be structural.
+**Every file an expert reads or writes is resolved inside the project root, and
+anything that escapes is refused** — absolute paths, `..`, and symlinks, which
+are resolved *before* the check rather than after. Containment compares path
+components rather than strings, because `/home/me/proj` is a text prefix of
+`/home/me/project-two` and is not a parent of it. An expert that can write
+outside the project is not a coding assistant, it is a remote shell, and the
+difference has to be structural.
 
-**It is two switches, not one.** Letting a model edit a project you already
-trusted and letting it execute arbitrary commands there are different decisions;
-`RUN` can be off while the rest is on. Both sit on top of the folder-trust
-prompt Crucible already asks on first use in a directory.
+**`RUN` is the exception, and it is worth being exact about.** A command starts
+with the project root as its working directory and that is the whole of the
+containment: a shell can `cd` anywhere, read anything you can read, and reach
+the network. That is not theoretical — an expert on a test cook wrote
+`RUN: cd /tmp/… && grep -r add src/` and it ran, exactly as a shell should.
+
+It is not fixed with a blocklist. `cd`, `..`, `$(…)`, an absolute path and
+`find /` are five ways to do one thing and there are fifty more; refusing a
+subset while claiming confinement would be worse than saying plainly what this
+is. Real confinement means a sandbox — bubblewrap, Landlock, seatbelt — which is
+per-platform and is not here yet.
+
+**So it is two switches, not one.** Letting a model edit a project you already
+trusted and letting it run commands *as you* are different decisions, and only
+the first is bounded by a directory. `RUN` can be off while the rest is on. Both
+sit on top of the folder-trust prompt Crucible asks on first use in a directory.
 
 **It is a text protocol.** llama.cpp applies a chat template, it does not
 negotiate a tool schema, and Crucible cannot know which model is in the seat. A
@@ -661,6 +674,8 @@ src/
       picker, rendered markdown and a resizable sidebar
 - [x] **Handover mid-cook** — the next piece of work goes back through the
       delegator, so a cook can pass from a code expert to a writing one
+- [ ] **Sandbox `RUN`** — bubblewrap on Linux, seatbelt on macOS, so a command
+      is confined the way a file path already is
 - [ ] Prefix caching so an unchanged conversation is not re-ingested every turn
 - [ ] Diffs in the cook journal, so a step says what changed and not only that
       something did
