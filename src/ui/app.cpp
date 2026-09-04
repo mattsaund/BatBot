@@ -60,6 +60,10 @@ App::App(Config config, const std::vector<std::string>& warnings)
     engine_ = std::make_unique<Engine>(config_, state_, [this] {
         screen_.PostEvent(Event::Custom);
     });
+    // Cooks are journalled beside this project's conversations, and for the
+    // same reason: Crucible is started inside a directory and is about that
+    // directory.
+    engine_->set_journal_dir(store_.project().dir);
 
     InputOption option;
     option.multiline = false;  // FTXUI 7 defaults this on; we want Enter to send
@@ -562,6 +566,22 @@ void App::on_submit() {
 
     if (handle_command(text)) {
         return;
+    }
+
+    // A cook parked on a question takes the next thing typed as the answer.
+    // Anything else would be strange: the screen is showing a question, and the
+    // only reasonable reading of a line typed under it is that it answers it.
+    if (const std::shared_ptr<const Cook> cook = state_.cook();
+        cook && cook->state == CookState::Asking) {
+        engine_->answer_cook(text);
+        follow_ = true;
+        return;
+    }
+
+    if (engine_->cooking()) {
+        // Queued behind the cook rather than refused. There is one engine and
+        // it is busy for the next hour; saying so beats silently waiting.
+        say("still cooking -- this will be answered when it finishes, or /stop it");
     }
 
     state_.clear_notices();

@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "crucible/config/config.hpp"
+#include "crucible/cook/journal.hpp"
 #include "crucible/llm/model_host.hpp"
 #include "crucible/routing/router.hpp"
 #include "crucible/routing/expert.hpp"
@@ -121,6 +122,15 @@ struct Snapshot {
     /// in preference to the session average, because while an answer is
     /// arriving that is the number being asked about.
     double live_tokens_per_second = 0.0;
+
+    /// The cook in progress, or nothing.
+    ///
+    /// A shared pointer for the same reason the roster is one: it grows to
+    /// hundreds of steps over an hour, and copying that into every frame to
+    /// draw the last twenty of them would be the most expensive thing on the
+    /// screen. The engine publishes a new one after each step; the renderer
+    /// reads whichever it was handed.
+    std::shared_ptr<const Cook> cook;
 };
 
 class AppState {
@@ -192,6 +202,10 @@ public:
     void set_busy(bool busy);
     bool busy() const;
 
+    /// Publish the cook in progress, or nothing when one ends.
+    void set_cook(std::shared_ptr<const Cook> cook);
+    std::shared_ptr<const Cook> cook() const;
+
 private:
     /// Index of `id` in the current roster, or nullopt. Call with the lock
     /// held; it does not take one.
@@ -210,6 +224,7 @@ private:
     std::vector<Turn>                    turns_;
     std::vector<std::string>             notices_;
     bool                                 busy_ = false;
+    std::shared_ptr<const Cook>          cook_;
     TokenUsage                           session_usage_;
     TokenUsage                           project_usage_;
     double                               live_rate_ = 0.0;

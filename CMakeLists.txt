@@ -83,6 +83,9 @@ add_library(crucible_core STATIC
     src/session/usage.cpp
     src/session/store.cpp
 
+    # cook: the long-running improvement loop and the record it keeps
+    src/cook/journal.cpp
+
     # routing: the expert roster, the two routers, and the command list
     src/routing/expert.cpp
     src/routing/router.cpp
@@ -94,6 +97,7 @@ add_library(crucible_core STATIC
     src/llm/model_shape.cpp
     src/llm/response_filter.cpp
     src/tools/web_search.cpp
+    src/tools/workshop.cpp
     src/llm/sampling.cpp
     src/llm/loaded_model.cpp
     src/llm/model_host.cpp
@@ -102,6 +106,7 @@ add_library(crucible_core STATIC
     src/engine/state.cpp
     src/engine/route_policy.cpp
     src/engine/engine.cpp
+    src/engine/engine_cook.cpp
 
     # app: process-level actions that are not the TUI
     src/app/cli.cpp

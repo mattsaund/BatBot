@@ -31,6 +31,7 @@ Snapshot AppState::snapshot() const {
     copy.mood     = mood_;
     copy.status   = status_;
     copy.roster   = roster_;
+    copy.cook     = cook_;
     copy.seats    = seats_;
     copy.resident        = resident_;
     copy.linked          = linked_;
@@ -154,6 +155,16 @@ void AppState::set_linked(std::optional<ExpertId> id) {
             seats_[*index].phase = SeatPhase::Active;
         }
     }
+}
+
+void AppState::set_cook(std::shared_ptr<const Cook> cook) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    cook_ = std::move(cook);
+}
+
+std::shared_ptr<const Cook> AppState::cook() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return cook_;
 }
 
 void AppState::set_delegator_ready(bool ready) {

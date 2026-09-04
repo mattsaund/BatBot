@@ -16,7 +16,10 @@
 #include <string>
 #include <thread>
 
+#include <filesystem>
+
 #include "crucible/config/config.hpp"
+#include "crucible/cook/journal.hpp"
 #include "crucible/llm/model_host.hpp"
 #include "crucible/routing/router.hpp"
 #include "crucible/engine/state.hpp"
@@ -64,6 +67,38 @@ public:
     /// it will answer the next question with no idea what came before.
     void restore_history(std::vector<ChatMessage> history);
 
+    /// Where cooks are journalled: the project's history folder.
+    ///
+    /// Set once at startup rather than passed with each cook. Which project a
+    /// cook belongs to is a property of the session -- Crucible is started
+    /// inside a directory and is about that directory -- not of the goal.
+    void set_journal_dir(std::filesystem::path project_dir);
+
+    /// Start a cook: work on the project towards `goal`, taking actions rather
+    /// than describing them, until the budget runs out or the user stops it.
+    ///
+    /// `budget_seconds` of 0 means "until I stop it". `root` is the directory
+    /// every file the cook touches must be inside -- the project the user
+    /// started Crucible in, and one they have already trusted.
+    ///
+    /// Queued like any other request, and once it starts it holds the worker
+    /// for its whole duration. Prompts submitted while it runs wait behind it,
+    /// which is the truthful behaviour: there is one engine and it is busy.
+    void start_cook(std::string goal, int budget_seconds, std::filesystem::path root);
+
+    /// Ask the running cook to wrap up.
+    ///
+    /// Not a kill: the cook stops taking new work, makes a finishing pass to
+    /// leave the project in a working state, and writes what it did. That pass
+    /// is the whole reason this is different from cancel().
+    void stop_cook();
+
+    /// Answer the question a cook is waiting on, releasing it to carry on.
+    void answer_cook(std::string answer);
+
+    /// True from the moment a cook starts until its finishing pass is done.
+    bool cooking() const { return cooking_.load(std::memory_order_relaxed); }
+
     /// Ask the delegator to write worked examples for a seat that has none.
     ///
     /// Two example questions per expert are worth seven points of routing
@@ -104,7 +139,7 @@ private:
     /// expert releases on the same queue as prompts, so they are applied in
     /// order and never race with a generation in flight.
     enum class RequestKind { Prompt, ReleaseExpert, ReloadModels, ApplyConfig,
-                             WriteExamples };
+                             WriteExamples, Cook };
 
     struct Request {
         RequestKind             kind = RequestKind::Prompt;
@@ -112,6 +147,10 @@ private:
         std::optional<ExpertId> pinned;
         Config                  config;
         ExpertId                expert;  ///< for WriteExamples
+
+        // for Cook
+        int                   budget_seconds = 0;
+        std::filesystem::path root;
     };
 
     void run();
@@ -128,6 +167,30 @@ private:
     void release_router();
     void do_apply_config(Config config);
     void do_write_examples(const ExpertId& id);
+
+    // --- the cook loop, in engine_cook.cpp --------------------------------
+    void do_cook(const std::string& goal, int budget_seconds,
+                 const std::filesystem::path& root);
+
+    /// Record a step, publish the journal and write it to disk.
+    void note_step(CookStep step);
+
+    /// Publish the current journal to the UI. Called after every change.
+    void publish_cook();
+
+    /// One round: render the conversation, generate, and return what the expert
+    /// said. Empty when it could not run at all.
+    struct CookRound {
+        std::string answer;
+        std::string reasoning;
+        long        ms = 0;
+    };
+    CookRound cook_round(LoadedModel& model, const ModelParams& params,
+                         const std::vector<ChatMessage>& messages);
+
+    /// Block until the user answers the question a cook is waiting on, or the
+    /// cook is stopped. Returns the answer, or nothing if it was stopped.
+    std::optional<std::string> await_cook_answer();
 
     /// Pick the expert that will actually answer. The router names a subject;
     /// this decides what to do when that subject has no model configured.
@@ -153,6 +216,18 @@ private:
     /// `mutex_`, which the worker holds while it waits for work.
     std::mutex written_mutex_;
     std::vector<std::pair<ExpertId, std::vector<std::string>>> written_examples_;
+
+    /// The cook in progress. Touched only by the worker thread, except for the
+    /// two atomics below, which the UI thread sets.
+    Cook                         cook_;
+    std::unique_ptr<CookLog>     cook_log_;
+    std::atomic<bool>            cooking_{false};
+    std::atomic<bool>            cook_stop_{false};
+
+    /// The answer to a question a cook asked, handed across from the UI thread.
+    std::mutex                   cook_answer_mutex_;
+    std::condition_variable      cook_answered_;
+    std::optional<std::string>   cook_answer_;
 
     std::thread             worker_;
     std::mutex              mutex_;

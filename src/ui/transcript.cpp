@@ -126,6 +126,121 @@ Element App::render_welcome() const {
     });
 }
 
+/// The colour a step's verb takes.
+///
+/// Only the two that change something get heat. A cook is mostly reading and
+/// thinking, and colouring all of it would make the two lines that matter --
+/// the file it wrote, the command that failed -- impossible to find while
+/// scrolling.
+ftxui::Color step_color(const CookStep& step) {
+    if (!step.ok) {
+        return theme::kError;
+    }
+    if (step.kind == "write") {
+        return theme::kSeatActive;
+    }
+    if (step.kind == "run" || step.kind == "done") {
+        return theme::kAccent;
+    }
+    return theme::kMeta;
+}
+
+Element App::render_cook(const Cook& cook) const {
+    Elements rows;
+
+    // The header answers the two questions someone watching a cook actually
+    // has: what is it trying to do, and how much longer.
+    std::string clock = format_duration(cook.duration());
+    if (cook.budget_seconds > 0 && cook.state == CookState::Working) {
+        const long left = cook.budget_seconds - cook.duration().count();
+        clock += left > 0 ? "  ·  " + format_duration(std::chrono::seconds{left}) + " left"
+                          : "  ·  time up";
+    }
+
+    rows.push_back(hbox({
+        text("cook ") | color(theme::kAccent) | bold,
+        text("▸ ") | color(theme::kMeta),
+        paragraph(cook.goal) | flex,
+    }));
+    rows.push_back(hbox({
+        text("     "),
+        text(std::string(cook_state_name(cook.state))) | color(theme::kAccent),
+        text("  ·  round " + std::to_string(cook.iterations)) | color(theme::kMeta),
+        text("  ·  " + clock) | color(theme::kMeta),
+    }));
+    rows.push_back(text(" "));
+
+    // The last few steps, not all of them. A cook runs to hundreds and the
+    // transcript already scrolls; what belongs on screen is what it is doing
+    // now. The whole record is in /cooks and on disk.
+    constexpr std::size_t kVisible = 14;
+    const std::size_t from = cook.steps.size() > kVisible ? cook.steps.size() - kVisible : 0;
+    if (from > 0) {
+        rows.push_back(text("     ... " + std::to_string(from) + " earlier steps")
+                       | color(theme::kMeta) | dim);
+    }
+    for (std::size_t i = from; i < cook.steps.size(); ++i) {
+        const CookStep& step = cook.steps[i];
+        std::string verb = step.kind;
+        verb.resize(7, ' ');
+        rows.push_back(hbox({
+            text("     "),
+            text(verb) | color(step_color(step)),
+            paragraph(step.summary) | color(step.ok ? theme::kPanelText : theme::kError) | flex,
+        }));
+    }
+
+    if (cook.state == CookState::Asking && !cook.question.empty()) {
+        rows.push_back(text(" "));
+        rows.push_back(hbox({
+            text("   ? ") | color(theme::kAccent) | bold,
+            paragraph(cook.question) | bold | flex,
+        }));
+        rows.push_back(hbox({
+            text("     "),
+            text("type an answer and press enter") | color(theme::kMeta) | dim,
+        }));
+    }
+
+    if (!cook.outcome.empty()) {
+        rows.push_back(text(" "));
+        rows.push_back(hbox({
+            text("     "),
+            paragraph(cook.outcome) | color(theme::kNotice) | flex,
+        }));
+    }
+
+    const std::vector<std::string> files = cook.files_touched();
+    const bool finished = cook.state == CookState::Done || cook.state == CookState::Stopped
+                       || cook.state == CookState::Failed;
+    if (!files.empty()) {
+        rows.push_back(text(" "));
+        std::string list;
+        for (std::size_t i = 0; i < files.size(); ++i) {
+            list += (i == 0 ? "" : ", ") + files[i];
+        }
+        rows.push_back(hbox({
+            text("     changed  ") | color(theme::kMeta),
+            paragraph(list) | color(theme::kSeatActive) | flex,
+        }));
+    } else if (finished) {
+        // Said plainly, because the outcome above is the expert's account of
+        // itself and this is the fact. They disagree more often than you would
+        // like: a model that talked its way through an edit it never made will
+        // write a confident summary of having made it, and the only thing that
+        // catches that is the journal saying nothing was written.
+        rows.push_back(text(" "));
+        rows.push_back(hbox({
+            text("     changed  ") | color(theme::kMeta),
+            text("no files -- whatever it says above, nothing on disk moved")
+                | color(theme::kError) | flex,
+        }));
+    }
+
+    rows.push_back(text(" "));
+    return vbox(std::move(rows));
+}
+
 Element App::render_transcript(const Snapshot& snapshot) const {
     Elements rows;
 
@@ -149,6 +264,12 @@ Element App::render_transcript(const Snapshot& snapshot) const {
 
     for (const Turn& turn : snapshot.turns) {
         rows.push_back(render_turn(turn));
+    }
+
+    // Below the conversation, because it is the newest thing and the transcript
+    // follows the bottom.
+    if (snapshot.cook) {
+        rows.push_back(render_cook(*snapshot.cook));
     }
 
     // Scrolling by exact lines. `focusPosition` puts the frame's focus at an

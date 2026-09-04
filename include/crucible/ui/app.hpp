@@ -66,6 +66,8 @@ private:
     ftxui::Element render_transcript(const Snapshot& snapshot) const;
     ftxui::Element render_turn(const Turn& turn) const;
     ftxui::Element render_welcome() const;
+    /// The live cook: its goal, its clock, and the last few things it did.
+    ftxui::Element render_cook(const Cook& cook) const;
     ftxui::Element render_status(const Snapshot& snapshot) const;
     /// The token counters: session totals, project totals, and the live rate.
     ftxui::Element render_usage(const Snapshot& snapshot) const;

@@ -242,6 +242,30 @@ void Engine::run() {
             continue;
         }
 
+        if (request.kind == RequestKind::Cook) {
+            busy_.store(true, std::memory_order_relaxed);
+            state_.set_busy(true);
+            // Contained like every other request. A cook is an hour of running
+            // whatever a model asks for, so an exception escaping here would
+            // take the process down and leave the terminal in raw mode.
+            try {
+                do_cook(request.prompt, request.budget_seconds, request.root);
+            } catch (const std::exception& e) {
+                state_.set_mood(Mood::Error, e.what());
+                state_.add_notice(std::string("cook failed: ") + e.what());
+                cooking_.store(false, std::memory_order_relaxed);
+            } catch (...) {
+                state_.set_mood(Mood::Error, "cook failed");
+                cooking_.store(false, std::memory_order_relaxed);
+            }
+            busy_.store(false, std::memory_order_relaxed);
+            state_.set_busy(false);
+            if (wake_) {
+                wake_();
+            }
+            continue;
+        }
+
         if (request.kind == RequestKind::WriteExamples) {
             // Wrapped for the same reason a prompt is: llama.cpp reports a
             // corrupt GGUF by throwing, and a new expert failing to get its

@@ -24,6 +24,8 @@
 #include "crucible/llm/model_shape.hpp"
 #include "crucible/llm/response_filter.hpp"
 #include "crucible/tools/web_search.hpp"
+#include "crucible/cook/journal.hpp"
+#include "crucible/tools/workshop.hpp"
 #include "crucible/util/markdown.hpp"
 #include "crucible/util/resources.hpp"
 #include "crucible/config/paths.hpp"
@@ -387,6 +389,515 @@ TEST(a_preamble_line_is_not_mistaken_for_a_question) {
         "Sure, here you go:\nok\nWhat is the yield strength of 6061-T6 aluminium?\n");
     CHECK_EQ(got.size(), std::size_t{1});
     CHECK_EQ(got[0], std::string("What is the yield strength of 6061-T6 aluminium?"));
+}
+
+
+// ---------------------------------------------------------------------------
+// The workshop
+// ---------------------------------------------------------------------------
+
+namespace {
+
+tools::WorkshopSettings workshop_at(const std::filesystem::path& root) {
+    tools::WorkshopSettings settings;
+    settings.enabled = true;
+    settings.root    = root;
+    return settings;
+}
+
+tools::ToolResult do_call(const tools::ToolCall& call, const tools::WorkshopSettings& settings) {
+    return tools::run_tool(call, settings, tools::SearchSettings{}, {});
+}
+
+}  // namespace
+
+TEST(a_tool_call_is_a_verb_at_the_start_of_a_line) {
+    const std::optional<tools::ToolCall> call =
+        tools::parse_tool_call("Let me look.\nREAD: src/main.cpp\n", "");
+    CHECK(call.has_value());
+    if (!call) {
+        return;
+    }
+    CHECK(call->kind == tools::ToolKind::Read);
+    CHECK_EQ(call->argument, std::string("src/main.cpp"));
+}
+
+TEST(a_verb_in_the_middle_of_a_sentence_is_prose_not_a_call) {
+    // An expert explaining a command must not thereby execute it. This is the
+    // difference between a coding assistant and a program that runs whatever
+    // appears in its own output.
+    CHECK(!tools::parse_tool_call("You could just RUN: make clean here.", "").has_value());
+    CHECK(!tools::parse_tool_call("The output said ERROR: RUN: failed", "").has_value());
+}
+
+TEST(a_write_body_is_taken_from_a_fence_a_sentinel_or_the_rest) {
+    const auto body = [](const char* reply) {
+        const std::optional<tools::ToolCall> call = tools::parse_tool_call(reply, "");
+        return call ? call->content : std::string("<none>");
+    };
+
+    // A fence is what a model reaches for by reflex, whatever it was told.
+    CHECK_EQ(body("WRITE: a.py\n```python\nprint(1)\nprint(2)\n```\n"),
+             std::string("print(1)\nprint(2)"));
+    // The explicit sentinel, for a model that followed the letter of it.
+    CHECK_EQ(body("WRITE: a.py\n<<<\nprint(1)\n>>>\n"), std::string("print(1)"));
+    // And neither: everything up to the next verb.
+    CHECK_EQ(body("WRITE: a.py\nprint(1)\nDONE: wrote it\n"), std::string("print(1)"));
+}
+
+TEST(a_reply_that_says_something_is_answering_not_calling_a_tool) {
+    // Same rule the search tool follows. The reasoning channel is only read
+    // when there is nothing for the user, or a programming expert showing you
+    // a shell command would run it.
+    CHECK(!tools::parse_tool_call("Here is what I would do.", "RUN: rm -rf /").has_value());
+
+    const std::optional<tools::ToolCall> call = tools::parse_tool_call("", "RUN: ls");
+    CHECK(call.has_value());
+    if (call) {
+        CHECK(call->kind == tools::ToolKind::Run);
+    }
+}
+
+TEST(a_path_cannot_leave_the_project) {
+    TempDir dir;
+    const auto root = dir.path() / "project";
+    std::filesystem::create_directories(root / "src");
+    { std::ofstream(root / "src" / "main.cpp") << "int main() {}\n"; }
+    { std::ofstream(dir.path() / "secret.txt") << "not yours\n"; }
+
+    CHECK(tools::resolve_in_root(root, "src/main.cpp").has_value());
+    CHECK(tools::resolve_in_root(root, "./src/../src/main.cpp").has_value());
+    CHECK(tools::resolve_in_root(root, (root / "src" / "main.cpp").string()).has_value());
+
+    // The three ways out, all refused.
+    CHECK(!tools::resolve_in_root(root, "../secret.txt").has_value());
+    CHECK(!tools::resolve_in_root(root, "src/../../secret.txt").has_value());
+    CHECK(!tools::resolve_in_root(root, "/etc/passwd").has_value());
+}
+
+TEST(a_symlink_out_of_the_project_is_refused) {
+    TempDir dir;
+    const auto root = dir.path() / "project";
+    std::filesystem::create_directories(root);
+    { std::ofstream(dir.path() / "secret.txt") << "not yours\n"; }
+
+    std::error_code ec;
+    std::filesystem::create_symlink(dir.path() / "secret.txt", root / "escape.txt", ec);
+    if (ec) {
+        return;  // a filesystem without symlinks has nothing to test here
+    }
+
+    // Resolved before the check, not after. A string comparison would see
+    // "project/escape.txt", say it was inside, and then open the file outside.
+    CHECK(!tools::resolve_in_root(root, "escape.txt").has_value());
+}
+
+TEST(a_sibling_directory_with_a_shared_prefix_is_outside) {
+    TempDir dir;
+    const auto root = dir.path() / "proj";
+    std::filesystem::create_directories(root);
+    std::filesystem::create_directories(dir.path() / "project-two");
+    { std::ofstream(dir.path() / "project-two" / "x.txt") << "x\n"; }
+
+    // "/tmp/x/proj" is a text prefix of "/tmp/x/project-two" and is not a
+    // parent of it. Comparing strings rather than path components is the exact
+    // bug this guards.
+    CHECK(!tools::resolve_in_root(root, "../project-two/x.txt").has_value());
+}
+
+TEST(reading_and_writing_a_file_works_and_says_what_it_did) {
+    TempDir dir;
+    const auto root = dir.path();
+    const tools::WorkshopSettings settings = workshop_at(root);
+
+    tools::ToolCall write;
+    write.kind     = tools::ToolKind::Write;
+    write.argument = "src/hello.py";
+    write.content  = "print('hi')";
+    const tools::ToolResult wrote = do_call(write, settings);
+    CHECK(wrote.ok);
+    CHECK(wrote.summary.find("created") != std::string::npos);
+    CHECK_EQ(wrote.changed.size(), std::size_t{1});
+    CHECK(std::filesystem::exists(root / "src" / "hello.py"));
+
+    tools::ToolCall read;
+    read.kind     = tools::ToolKind::Read;
+    read.argument = "src/hello.py";
+    const tools::ToolResult got = do_call(read, settings);
+    CHECK(got.ok);
+    // Numbered, because the next thing an expert wants to say about a file is
+    // which line to change.
+    CHECK(got.output.find("1\tprint('hi')") != std::string::npos);
+
+    // Writing again reports an update rather than a creation.
+    write.content = "print('bye')";
+    CHECK(do_call(write, settings).summary.find("updated") != std::string::npos);
+}
+
+TEST(a_write_with_no_body_is_refused_rather_than_emptying_the_file) {
+    TempDir dir;
+    const auto root = dir.path();
+    { std::ofstream(root / "keep.txt") << "important\n"; }
+
+    tools::ToolCall write;
+    write.kind     = tools::ToolKind::Write;
+    write.argument = "keep.txt";
+    // A WRITE whose body failed to parse looks exactly like a WRITE of an empty
+    // file, and one of those two destroys the file the expert was working on.
+    const tools::ToolResult result = do_call(write, workshop_at(root));
+    CHECK(!result.ok);
+
+    std::ifstream in(root / "keep.txt");
+    std::string   line;
+    std::getline(in, line);
+    CHECK_EQ(line, std::string("important"));
+}
+
+TEST(writing_outside_the_project_is_refused) {
+    TempDir dir;
+    const auto root = dir.path() / "project";
+    std::filesystem::create_directories(root);
+
+    tools::ToolCall write;
+    write.kind     = tools::ToolKind::Write;
+    write.argument = "../escaped.txt";
+    write.content  = "should not exist";
+    CHECK(!do_call(write, workshop_at(root)).ok);
+    CHECK(!std::filesystem::exists(dir.path() / "escaped.txt"));
+}
+
+TEST(a_listing_skips_the_directories_nobody_wants_read) {
+    TempDir dir;
+    const auto root = dir.path();
+    std::filesystem::create_directories(root / ".git" / "objects");
+    std::filesystem::create_directories(root / "node_modules");
+    std::filesystem::create_directories(root / "src");
+    { std::ofstream(root / "README.md") << "hi\n"; }
+
+    tools::ToolCall list;
+    list.kind     = tools::ToolKind::List;
+    list.argument = ".";
+    const tools::ToolResult result = do_call(list, workshop_at(root));
+    CHECK(result.ok);
+    CHECK(result.output.find("README.md") != std::string::npos);
+    CHECK(result.output.find("src/") != std::string::npos);
+    // A project's .git is thousands of files, and listing it is the fastest way
+    // to fill a context window with nothing.
+    CHECK(result.output.find(".git") == std::string::npos);
+    CHECK(result.output.find("node_modules") == std::string::npos);
+}
+
+TEST(a_quoted_path_is_the_same_path) {
+    // Measured, not guessed: a small expert wrote LIST: `calc.py` forty times
+    // and was told forty times that the backticked name was not a directory.
+    const auto arg = [](const char* reply) {
+        const std::optional<tools::ToolCall> call = tools::parse_tool_call(reply, "");
+        return call ? call->argument : std::string("<none>");
+    };
+    CHECK_EQ(arg("READ: `src/main.cpp`"),  std::string("src/main.cpp"));
+    CHECK_EQ(arg("READ: \"src/main.cpp\""), std::string("src/main.cpp"));
+    CHECK_EQ(arg("READ: 'src/main.cpp'"),  std::string("src/main.cpp"));
+    CHECK_EQ(arg("LIST: `.`"),             std::string("."));
+
+    // RUN keeps its argument verbatim, because quoting means something to a
+    // shell and stripping it would change the command.
+    CHECK_EQ(arg("RUN: echo \"hello world\""), std::string("echo \"hello world\""));
+}
+
+TEST(listing_a_file_says_which_command_to_use_instead) {
+    TempDir dir;
+    { std::ofstream(dir.path() / "calc.py") << "x = 1\n"; }
+
+    tools::ToolCall list;
+    list.kind     = tools::ToolKind::List;
+    list.argument = "calc.py";
+    const tools::ToolResult result =
+        tools::run_tool(list, workshop_at(dir.path()), tools::SearchSettings{}, {});
+
+    CHECK(!result.ok);
+    // Telling a model only what it did wrong leaves it guessing, which is how
+    // one ends up making the same call twenty times.
+    CHECK(result.output.find("READ:") != std::string::npos);
+
+    list.argument = "nope.py";
+    CHECK(tools::run_tool(list, workshop_at(dir.path()), tools::SearchSettings{}, {})
+              .output.find("does not exist") != std::string::npos);
+}
+
+TEST(a_command_runs_in_the_project_and_reports_its_status) {
+    TempDir dir;
+    const tools::WorkshopSettings settings = workshop_at(dir.path());
+
+    tools::ToolCall run;
+    run.kind     = tools::ToolKind::Run;
+    run.argument = "pwd && echo hello";
+    const tools::ToolResult result = do_call(run, settings);
+    CHECK(result.ok);
+    CHECK(result.output.find("hello") != std::string::npos);
+    CHECK(result.output.find("exit status 0") != std::string::npos);
+
+    run.argument = "exit 3";
+    const tools::ToolResult failed = do_call(run, settings);
+    CHECK(!failed.ok);
+    CHECK(failed.summary.find("exit 3") != std::string::npos);
+}
+
+TEST(a_command_that_never_finishes_is_killed) {
+    TempDir dir;
+    tools::WorkshopSettings settings = workshop_at(dir.path());
+    settings.run_timeout_seconds = 1;
+
+    tools::ToolCall run;
+    run.kind     = tools::ToolKind::Run;
+    run.argument = "sleep 30";
+
+    const auto start = std::chrono::steady_clock::now();
+    const tools::ToolResult result = do_call(run, settings);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - start);
+
+    // A cook that waits forever on a stuck command has stopped cooking.
+    CHECK(!result.ok);
+    CHECK(elapsed.count() < 10);
+    CHECK(result.summary.find("timed out") != std::string::npos);
+}
+
+TEST(running_can_be_switched_off_on_its_own) {
+    TempDir dir;
+    tools::WorkshopSettings settings = workshop_at(dir.path());
+    settings.allow_run = false;
+
+    tools::ToolCall run;
+    run.kind     = tools::ToolKind::Run;
+    run.argument = "echo nope";
+    const tools::ToolResult result = do_call(run, settings);
+    CHECK(!result.ok);
+    // Reading and writing a project you already trusted is one decision;
+    // executing arbitrary commands in it is another.
+    CHECK(result.output.find("switched off") != std::string::npos);
+}
+
+TEST(nothing_runs_while_the_workshop_is_off) {
+    TempDir dir;
+    tools::WorkshopSettings settings = workshop_at(dir.path());
+    settings.enabled = false;
+
+    tools::ToolCall write;
+    write.kind     = tools::ToolKind::Write;
+    write.argument = "made.txt";
+    write.content  = "x";
+    CHECK(!do_call(write, settings).ok);
+    CHECK(!std::filesystem::exists(dir.path() / "made.txt"));
+}
+
+TEST(long_output_keeps_its_head_and_its_tail) {
+    std::string log;
+    for (int i = 0; i < 500; ++i) {
+        log += "line " + std::to_string(i) + "\n";
+    }
+    const std::string clamped = tools::clamp_output(log, 400);
+
+    CHECK(clamped.size() < log.size());
+    // A compiler puts the first error at the top and the summary at the bottom,
+    // and the middle of a long log is the part nobody reads.
+    CHECK(clamped.find("line 0") != std::string::npos);
+    CHECK(clamped.find("line 499") != std::string::npos);
+    CHECK(clamped.find("not shown") != std::string::npos);
+    CHECK(clamped.find("line 250") == std::string::npos);
+}
+
+TEST(the_instructions_only_offer_what_the_settings_allow) {
+    tools::WorkshopSettings settings;
+    CHECK(tools::workshop_instructions(settings).empty());  // off: say nothing
+
+    settings.enabled = true;
+    const std::string on = tools::workshop_instructions(settings);
+    CHECK(on.find("READ:") != std::string::npos);
+    CHECK(on.find("RUN:") != std::string::npos);
+
+    settings.allow_run = false;
+    const std::string no_run = tools::workshop_instructions(settings);
+    CHECK(no_run.find("READ:") != std::string::npos);
+    // Offering a verb that will be refused wastes a whole round trip and
+    // teaches the model the protocol is unreliable.
+    CHECK(no_run.find("RUN:") == std::string::npos);
+}
+
+
+// ---------------------------------------------------------------------------
+// The cook journal
+// ---------------------------------------------------------------------------
+
+TEST(a_bare_number_of_minutes_is_what_people_mean_by_a_cook_time) {
+    // "give it twenty" means twenty minutes. Nobody sets a cook for twenty
+    // seconds, so the bare unit is the one that is actually said out loud.
+    CHECK(parse_duration_seconds("30")  == 1800);
+    CHECK(parse_duration_seconds("30m") == 1800);
+    CHECK(parse_duration_seconds("2h")  == 7200);
+    CHECK(parse_duration_seconds("45s") == 45);
+    CHECK(parse_duration_seconds("90min") == 5400);
+    CHECK(parse_duration_seconds(" 15m") == 900);
+}
+
+TEST(a_goal_that_starts_with_a_word_is_not_a_duration) {
+    // This is what tells "/cook 30m fix the tests" from "/cook fix the tests".
+    CHECK(!parse_duration_seconds("fix").has_value());
+    CHECK(!parse_duration_seconds("").has_value());
+    // And a number followed by something that is not a unit is part of a
+    // sentence: "/cook 3 tests are failing".
+    CHECK(!parse_duration_seconds("3tests").has_value());
+    CHECK(!parse_duration_seconds("999999999").has_value());
+}
+
+TEST(a_cook_reports_the_files_it_touched_in_the_order_it_touched_them) {
+    Cook cook;
+    cook.steps.push_back({1, "programming", "write", "created src/a.py", true, 0, {"src/a.py"}});
+    cook.steps.push_back({1, "programming", "run",   "$ pytest",         true, 0, {}});
+    cook.steps.push_back({2, "programming", "write", "created src/b.py", true, 0, {"src/b.py"}});
+    cook.steps.push_back({2, "programming", "write", "updated src/a.py", true, 0, {"src/a.py"}});
+
+    // First-touched order, not sorted: it reads as the story of the cook.
+    const std::vector<std::string> files = cook.files_touched();
+    CHECK_EQ(files.size(), std::size_t{2});
+    CHECK_EQ(files[0], std::string("src/a.py"));
+    CHECK_EQ(files[1], std::string("src/b.py"));
+}
+
+TEST(a_running_cook_measures_against_now_and_a_finished_one_against_its_end) {
+    Cook running;
+    running.started_unix = static_cast<std::int64_t>(std::time(nullptr)) - 120;
+    // The timer on screen has to move while it is still going.
+    CHECK(running.duration().count() >= 119);
+
+    Cook finished = running;
+    finished.ended_unix = finished.started_unix + 45;
+    CHECK_EQ(finished.duration().count(), 45);
+}
+
+TEST(a_cook_round_trips_through_disk) {
+    TempDir dir;
+    const CookLog log(dir.path());
+
+    Cook cook;
+    cook.id             = CookLog::new_id();
+    cook.goal           = "make the failing tests pass";
+    cook.state          = CookState::Done;
+    cook.budget_seconds = 1800;
+    cook.started_unix   = 1'700'000'000;
+    cook.ended_unix     = 1'700'001'000;
+    cook.iterations     = 4;
+    cook.outcome        = "fixed the parser and added two tests";
+    cook.steps.push_back({1, "programming", "read",  "read src/parse.py", true, 12, {}});
+    cook.steps.push_back({1, "programming", "write", "updated src/parse.py", true, 8,
+                          {"src/parse.py"}});
+    cook.steps.push_back({2, "programming", "run",   "$ pytest -- exit 1", false, 4200, {}});
+
+    std::string error;
+    CHECK(log.save(cook, error));
+    CHECK(error.empty());
+
+    const std::optional<Cook> back = log.load(cook.id);
+    CHECK(back.has_value());
+    if (!back) {
+        return;
+    }
+    CHECK_EQ(back->goal, cook.goal);
+    CHECK(back->state == CookState::Done);
+    CHECK_EQ(back->iterations, 4);
+    CHECK_EQ(back->outcome, cook.outcome);
+    CHECK_EQ(back->steps.size(), std::size_t{3});
+    // Whether a step failed is the thing you most want back: a run that exited
+    // non-zero is the whole reason to read a journal.
+    CHECK(!back->steps[2].ok);
+    CHECK_EQ(back->steps[2].ms, 4200L);
+    CHECK_EQ(back->steps[1].changed.size(), std::size_t{1});
+    CHECK_EQ(back->duration().count(), 1000);
+}
+
+TEST(cooks_are_listed_newest_first_with_what_they_changed) {
+    TempDir dir;
+    const CookLog log(dir.path());
+
+    for (int i = 1; i <= 3; ++i) {
+        Cook cook;
+        cook.id           = "2026090" + std::to_string(i) + "-120000";
+        cook.goal         = "goal " + std::to_string(i);
+        cook.state        = CookState::Done;
+        cook.started_unix = 1'700'000'000 + i;
+        cook.ended_unix   = cook.started_unix + 600;
+        cook.steps.push_back({1, "programming", "write", "wrote a", true, 0, {"a.txt"}});
+        cook.steps.push_back({1, "programming", "write", "wrote a again", true, 0, {"a.txt"}});
+        std::string error;
+        CHECK(log.save(cook, error));
+    }
+
+    const std::vector<CookSummary> found = log.list();
+    CHECK_EQ(found.size(), std::size_t{3});
+    CHECK_EQ(found[0].goal, std::string("goal 3"));
+    CHECK_EQ(found[2].goal, std::string("goal 1"));
+    // Two steps touching one file is one file, which is the number worth
+    // reporting: "what did this cook do to my project".
+    CHECK_EQ(found[0].files, 1);
+    CHECK_EQ(found[0].steps, 2);
+    CHECK_EQ(found[0].duration.count(), 600);
+}
+
+TEST(an_unreadable_cook_file_does_not_hide_the_others) {
+    TempDir dir;
+    const CookLog log(dir.path());
+
+    Cook cook;
+    cook.id   = "20260901-120000";
+    cook.goal = "a real one";
+    std::string error;
+    CHECK(log.save(cook, error));
+
+    std::filesystem::create_directories(log.dir());
+    { std::ofstream(log.dir() / "20260902-120000.json") << "{ this is not json"; }
+
+    const std::vector<CookSummary> found = log.list();
+    CHECK_EQ(found.size(), std::size_t{1});
+    CHECK_EQ(found[0].goal, std::string("a real one"));
+}
+
+TEST(a_cook_can_be_deleted_and_its_state_round_trips_by_name) {
+    TempDir dir;
+    const CookLog log(dir.path());
+
+    Cook cook;
+    cook.id    = CookLog::new_id();
+    cook.state = CookState::Stopped;
+    std::string error;
+    CHECK(log.save(cook, error));
+    CHECK(log.load(cook.id).has_value());
+    CHECK(log.load(cook.id)->state == CookState::Stopped);
+
+    CHECK(log.remove(cook.id, error));
+    CHECK(!log.load(cook.id).has_value());
+    CHECK(!log.remove(cook.id, error));
+}
+
+TEST(every_cook_state_survives_a_round_trip_through_its_name) {
+    for (const CookState state : {CookState::Idle, CookState::Working, CookState::Asking,
+                                  CookState::Finishing, CookState::Done, CookState::Stopped,
+                                  CookState::Failed}) {
+        CHECK(cook_state_from_name(cook_state_name(state)) == state);
+    }
+    // An unknown name reads as Idle rather than as something that happened.
+    CHECK(cook_state_from_name("who knows") == CookState::Idle);
+}
+
+TEST(the_headline_says_files_steps_and_how_long) {
+    Cook cook;
+    cook.started_unix = 1'700'000'000;
+    cook.ended_unix   = cook.started_unix + 2460;  // 41 minutes
+    cook.steps.push_back({1, "programming", "write", "a", true, 0, {"x.py"}});
+    cook.steps.push_back({1, "programming", "run",   "b", true, 0, {}});
+
+    const std::string headline = cook.headline();
+    CHECK(headline.find("1 file") != std::string::npos);
+    CHECK(headline.find("2 steps") != std::string::npos);
+    CHECK(headline.find("41 minutes") != std::string::npos);
 }
 
 // ---------------------------------------------------------------------------

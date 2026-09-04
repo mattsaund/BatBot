@@ -13,6 +13,7 @@
 #include <sstream>
 
 #include "crucible/config/paths.hpp"
+#include "crucible/cook/journal.hpp"
 #include "crucible/llm/model_catalog.hpp"
 #include "crucible/runtime/devices.hpp"
 #include "crucible/tools/web_search.hpp"
@@ -179,6 +180,86 @@ bool App::handle_command(const std::string& text) {
             say(line);
         }
         say("/newexpert adds a seat, /ejectexpert <name> removes one");
+        return true;
+    }
+
+    if (command == "cook") {
+        state_.clear_notices();
+        if (engine_->cooking()) {
+            say("already cooking -- /stop wraps it up");
+            return true;
+        }
+        if (rest.empty()) {
+            say("usage: /cook <goal>          work on it until you /stop");
+            say("       /cook 30m <goal>      work on it for thirty minutes");
+            return true;
+        }
+        if (!config_.tools.workshop) {
+            // Refused here rather than three model calls later, where it would
+            // surface as an expert being told "the workshop is switched off"
+            // over and over.
+            say("cooking needs the workshop, which is off. Turn it on in "
+                "/settings, under TOOLS.");
+            say("it lets experts read, write and run things in "
+                + store_.project().root.string());
+            return true;
+        }
+
+        // A leading duration is a budget; anything else is part of the goal.
+        std::string goal   = rest;
+        int         budget = 0;
+        if (const std::size_t space = rest.find(' '); space != std::string::npos) {
+            if (const std::optional<int> seconds =
+                    parse_duration_seconds(rest.substr(0, space))) {
+                budget = *seconds;
+                goal   = format::trim(rest.substr(space + 1));
+            }
+        }
+        if (goal.empty()) {
+            say("usage: /cook [30m] <goal>");
+            return true;
+        }
+
+        follow_ = true;
+        engine_->start_cook(goal, budget, store_.project().root);
+        say(budget > 0
+                ? "cooking for " + format_duration(std::chrono::seconds{budget})
+                      + " -- /stop wraps it up early"
+                : "cooking until you /stop it");
+        return true;
+    }
+
+    if (command == "stop") {
+        if (!engine_->cooking()) {
+            say("nothing is cooking");
+            return true;
+        }
+        engine_->stop_cook();
+        // Not a cancel. The cook stops taking new work and makes a finishing
+        // pass, which is the whole difference between /stop and Ctrl-C.
+        say("wrapping up -- finishing touches, then it will stop");
+        return true;
+    }
+
+    if (command == "cooks") {
+        state_.clear_notices();
+        const CookLog log(store_.project().dir);
+        const std::vector<CookSummary> cooks = log.list();
+        if (cooks.empty()) {
+            say("no cooks yet in " + store_.project().root.string());
+            say("start one with /cook <goal>");
+            return true;
+        }
+        say("cooks in " + store_.project().root.string() + ":");
+        for (const CookSummary& cook : cooks) {
+            say("  " + cook.when() + "  " + cook.goal);
+            say("      " + std::to_string(cook.files)
+                + (cook.files == 1 ? " file, " : " files, ")
+                + std::to_string(cook.steps)
+                + (cook.steps == 1 ? " step over " : " steps over ")
+                + format_duration(cook.duration)
+                + "  (" + std::string(cook_state_name(cook.state)) + ")");
+        }
         return true;
     }
 
