@@ -80,20 +80,29 @@ void App::draw_chat(const Snapshot& snapshot) {
     }
 }
 
-void App::draw_composer(const Snapshot& snapshot) {
+/// The chat box: one prompt, nothing else.
+///
+/// Cooking has its own screen and its own controls. Putting both on one bar
+/// meant every prompt was typed next to a Cook button that would have thrown
+/// the prompt away, which is a question the user should not be asked to answer
+/// on the way to sending a message.
+void App::draw_chat_composer(const Snapshot& snapshot) {
     const std::shared_ptr<const Cook> cook = snapshot.cook;
     const bool asking  = cook && cook->state == CookState::Asking;
     const bool cooking = engine_->cooking();
 
-    ImGui::BeginChild("composer", ImVec2(0, em(7.2F)),
+    ImGui::BeginChild("chat-composer", ImVec2(0, 0),
                       ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
 
-    const char* hint = asking  ? "answer the question above"
+    const char* hint = asking  ? "answer the question on the cook screen"
                      : cooking ? "cooking -- ask anyway and it waits its turn"
                                : "ask anything";
-    ImGui::SetNextItemWidth(-em(4.8F));
-    const bool entered = ImGui::InputTextWithHint(
-        "##prompt", hint, &prompt_, ImGuiInputTextFlags_EnterReturnsTrue);
+
+    const float button = em(5.0F);
+    const float width  = std::max(ImGui::GetContentRegionAvail().x - button
+                                      - ImGui::GetStyle().ItemSpacing.x,
+                                  em(6.0F));
+    const bool entered = grow_input("##prompt", hint, prompt_, width, kComposerLines);
     ImGui::SameLine();
     const bool send = ImGui::Button(asking ? "Answer" : "Send", ImVec2(-FLT_MIN, 0));
     if (entered || send) {
@@ -101,42 +110,6 @@ void App::draw_composer(const Snapshot& snapshot) {
         // Enter should leave the caret where it was, or every reply costs a
         // click to get back to typing.
         ImGui::SetKeyboardFocusHere(-1);
-    }
-
-    ImGui::Dummy(ImVec2(0, em(0.25F)));
-
-    if (cooking) {
-        ImGui::PushFont(theme::bold());
-        text_coloured(theme::kFlameBright, "cooking");
-        ImGui::PopFont();
-        ImGui::SameLine();
-        if (ImGui::Button("Stop and finish", ImVec2(em(9.0F), 0))) {
-            // Not a cancel: it makes a finishing pass to leave the project in a
-            // state that runs.
-            engine_->stop_cook();
-            say("wrapping up -- finishing touches, then it will stop");
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Stop now", ImVec2(em(5.6F), 0))) {
-            engine_->cancel();
-        }
-        ImGui::SetItemTooltip("Stops immediately, without the finishing pass.");
-    } else {
-        ImGui::SetNextItemWidth(-em(21.5F));
-        ImGui::InputTextWithHint("##goal", "or give it a goal to cook on", &cook_goal_);
-        ImGui::SameLine();
-
-        ImGui::BeginDisabled(cook_untimed_);
-        ImGui::SetNextItemWidth(em(6.2F));
-        ImGui::SliderInt("##minutes", &cook_minutes_, 1, 180, "%d min");
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        ImGui::Checkbox("no limit", &cook_untimed_);
-        ImGui::SetItemTooltip("Work until you stop it.");
-        ImGui::SameLine();
-        if (ImGui::Button("Cook", ImVec2(-FLT_MIN, 0))) {
-            begin_cook();
-        }
     }
 
     ImGui::EndChild();

@@ -10,6 +10,7 @@
 // touches config_ directly.
 #include "app.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <system_error>
 
@@ -213,6 +214,69 @@ void App::begin_cook() {
 // One frame
 // ---------------------------------------------------------------------------
 
+float App::composer_wanted_height(const Snapshot& snapshot) {
+    if (view_ != View::Chat && view_ != View::Cook) {
+        return 0.0F;
+    }
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float pad   = style.WindowPadding.y * 2.0F;
+    const float frame = ImGui::GetFrameHeight();
+
+    // The width the box will actually be given, so the wrapping measured here
+    // is the wrapping that gets drawn.
+    const float inner  = std::max(ImGui::GetContentRegionAvail().x
+                                      - style.WindowPadding.x * 2.0F, em(8.0F));
+    const float beside = std::max(inner - em(5.0F) - style.ItemSpacing.x, em(6.0F));
+
+    const std::shared_ptr<const Cook> cook = snapshot.cook;
+    const bool asking = cook && cook->state == CookState::Asking;
+
+    if (view_ == View::Chat) {
+        return pad + grow_input_height(prompt_, beside, kComposerLines);
+    }
+    if (asking) {
+        return pad + grow_input_height(prompt_, beside, kComposerLines);
+    }
+    if (engine_->cooking()) {
+        return pad + frame;
+    }
+    // The goal box, then the row with the budget and the Cook button.
+    return pad + grow_input_height(cook_goal_, inner, kComposerLines)
+         + style.ItemSpacing.y + frame;
+}
+
+/// The composer's height, kept to something the window can actually spare.
+///
+/// A box grown to its full height in a short window would leave the pane above
+/// it nothing, so the transcript you are typing into would disappear as you
+/// typed. Half the window is the most the composer may take.
+float App::composer_height(const Snapshot& snapshot) {
+    const float wanted = composer_wanted_height(snapshot);
+    if (wanted <= 0.0F) {
+        return 0.0F;
+    }
+    const float room = ImGui::GetContentRegionAvail().y;
+    return room > 0.0F ? std::min(wanted, room * 0.5F) : wanted;
+}
+
+void App::open_browse(BrowseFor what, const std::filesystem::path& start) {
+    browse_for_ = what;
+    browse_     = start;
+    if (browse_.empty()) {
+        browse_ = what == BrowseFor::ModelsDir ? config_.resolved_models_dir()
+                                               : store_->project().root;
+    }
+    // A path that has gone missing would leave the list empty with nothing to
+    // click, so the browser falls back to somewhere that certainly exists.
+    std::error_code ec;
+    if (!std::filesystem::is_directory(browse_, ec)) {
+        browse_ = paths::expand_user("~");
+    }
+    browse_text_       = browse_.string();
+    project_error_.clear();
+    browse_modal_open_ = true;
+}
+
 void App::draw() {
     const Snapshot snapshot = state_.snapshot();
 
@@ -236,8 +300,7 @@ void App::draw() {
 
     ImGui::BeginChild("main", ImVec2(0, 0));
     {
-        const float composer =
-            view_ == View::Chat || view_ == View::Cook ? em(7.7F) : 0.0F;
+        const float composer = composer_height(snapshot);
         ImGui::BeginChild("pane", ImVec2(0, -composer), ImGuiChildFlags_Borders);
         switch (view_) {
             case View::Chat:     draw_chat(snapshot); break;
@@ -255,14 +318,16 @@ void App::draw() {
         }
         ImGui::EndChild();
 
-        if (composer > 0.0F) {
-            draw_composer(snapshot);
+        if (view_ == View::Chat) {
+            draw_chat_composer(snapshot);
+        } else if (view_ == View::Cook) {
+            draw_cook_composer(snapshot);
         }
     }
     ImGui::EndChild();
 
     draw_new_expert_modal();
-    draw_project_modal();
+    draw_browse_modal();
     draw_trust_modal();
     ImGui::End();
 }

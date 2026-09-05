@@ -178,4 +178,68 @@ void App::draw_history() {
     }
 }
 
+/// The cook bar: a goal, how long to work, and the button that starts it.
+///
+/// Three states, because a cook has three. Before one starts this is the goal
+/// box with its budget; while one runs it is the two ways to stop; and when the
+/// cook has asked a question it is a box for the answer, which is the only
+/// thing that will move it forward.
+void App::draw_cook_composer(const Snapshot& snapshot) {
+    const std::shared_ptr<const Cook> cook = snapshot.cook;
+    const bool asking = cook && cook->state == CookState::Asking;
+
+    ImGui::BeginChild("cook-composer", ImVec2(0, 0),
+                      ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
+
+    if (asking) {
+        const float button = em(5.0F);
+        const float width  = std::max(ImGui::GetContentRegionAvail().x - button
+                                          - ImGui::GetStyle().ItemSpacing.x,
+                                      em(6.0F));
+        const bool entered = grow_input("##cook-answer", "answer the question above",
+                                        prompt_, width, kComposerLines);
+        ImGui::SameLine();
+        const bool pressed = ImGui::Button("Answer", ImVec2(-FLT_MIN, 0));
+        if (entered || pressed) {
+            submit_prompt();
+            ImGui::SetKeyboardFocusHere(-1);
+        }
+    } else if (engine_->cooking()) {
+        ImGui::PushFont(theme::bold());
+        text_coloured(theme::kFlameBright, "cooking");
+        ImGui::PopFont();
+        ImGui::SameLine();
+        if (ImGui::Button("Stop and finish", ImVec2(em(9.0F), 0))) {
+            // Not a cancel: it makes a finishing pass to leave the project in a
+            // state that runs.
+            engine_->stop_cook();
+            say("wrapping up -- finishing touches, then it will stop");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Stop now", ImVec2(em(5.6F), 0))) {
+            engine_->cancel();
+        }
+        ImGui::SetItemTooltip("Stops immediately, without the finishing pass.");
+    } else {
+        const bool entered = grow_input("##goal", "what should it work on?",
+                                        cook_goal_, ImGui::GetContentRegionAvail().x,
+                                        kComposerLines);
+
+        ImGui::BeginDisabled(cook_untimed_);
+        ImGui::SetNextItemWidth(em(10.0F));
+        ImGui::SliderInt("##minutes", &cook_minutes_, 1, 180, "%d min");
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::Checkbox("No limit", &cook_untimed_);
+        ImGui::SetItemTooltip("Work until you stop it.");
+        ImGui::SameLine();
+        const bool pressed = ImGui::Button("Cook", ImVec2(-FLT_MIN, 0));
+        if (entered || pressed) {
+            begin_cook();
+        }
+    }
+
+    ImGui::EndChild();
+}
+
 }  // namespace crucible::gui

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include "widgets.hpp"
 
+#include <imgui_stdlib.h>
+
 #include <algorithm>
 #include <cstdarg>
 #include <system_error>
@@ -39,6 +41,48 @@ void title(const char* label) {
     ImGui::PushFont(theme::heading());
     text_coloured(theme::kFlame, "%s", label);
     ImGui::PopFont();
+}
+
+float grow_input_height(const std::string& text, float width, int max_lines) {
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float       line  = ImGui::GetTextLineHeight();
+
+    // Measured at the width the text will actually wrap at, so the box is as
+    // tall as the content needs and not as tall as the character count guesses.
+    const float inner = std::max(width - style.FramePadding.x * 2.0F, line);
+    float       tall  = line;
+    if (!text.empty()) {
+        tall = ImGui::CalcTextSize(text.c_str(), text.c_str() + text.size(),
+                                   false, inner).y;
+        // A trailing newline is a line the user has started and CalcTextSize
+        // does not count, which would make the caret sit outside the box.
+        if (text.back() == '\n') {
+            tall += line;
+        }
+    }
+    const float ceiling = line * static_cast<float>(std::max(max_lines, 1));
+    return std::clamp(tall, line, ceiling) + style.FramePadding.y * 2.0F;
+}
+
+bool grow_input(const char* id, const char* hint, std::string& text,
+                float width, int max_lines) {
+    const ImGuiStyle& style  = ImGui::GetStyle();
+    const ImVec2      origin = ImGui::GetCursorScreenPos();
+    const float       height = grow_input_height(text, width, max_lines);
+
+    const bool submitted = ImGui::InputTextMultiline(
+        id, &text, ImVec2(width, height),
+        ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CtrlEnterForNewLine);
+
+    // InputTextMultiline has no WithHint form, so the placeholder is painted
+    // over the empty box rather than passed in.
+    if (text.empty() && hint != nullptr) {
+        ImGui::GetWindowDrawList()->AddText(
+            ImVec2(origin.x + style.FramePadding.x * 2.0F,
+                   origin.y + style.FramePadding.y),
+            theme::kTextFaint, hint);
+    }
+    return submitted;
 }
 
 std::string model_label(const std::string& reference) {

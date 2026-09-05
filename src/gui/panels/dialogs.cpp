@@ -92,16 +92,25 @@ void App::draw_new_expert_modal() {
     ImGui::EndPopup();
 }
 
-void App::draw_project_modal() {
-    if (project_modal_open_) {
-        ImGui::OpenPopup("Open project");
-        project_modal_open_ = false;
+void App::draw_browse_modal() {
+    const bool for_models = browse_for_ == BrowseFor::ModelsDir;
+    const char* const kTitle = "Choose a folder";
+
+    if (browse_modal_open_) {
+        ImGui::OpenPopup(kTitle);
+        browse_modal_open_ = false;
     }
 
     ImGui::SetNextWindowSize(ImVec2(em(38.0F), em(30.0F)), ImGuiCond_Appearing);
-    if (!ImGui::BeginPopupModal("Open project", nullptr, ImGuiWindowFlags_NoSavedSettings)) {
+    if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_NoSavedSettings)) {
         return;
     }
+
+    text_coloured(theme::kTextDim, "%s", for_models
+        ? "Where your GGUF files are. Crucible reads this directory; it never "
+          "writes to it and never downloads into it."
+        : "The directory Crucible will work in: its history, its cook journal "
+          "and the root the workshop is confined to.");
 
     // A browser rather than a native file dialog. Crucible has no toolkit to
     // ask for one, and a directory list is what this needs anyway: you are
@@ -166,10 +175,20 @@ void App::draw_project_modal() {
     }
 
     ImGui::Separator();
-    if (ImGui::Button("Open this folder", ImVec2(em(12.0F), 0))) {
+    if (ImGui::Button(for_models ? "Use this folder" : "Open this folder",
+                      ImVec2(em(12.0F), 0))) {
         const std::filesystem::path chosen = browse_;
         ImGui::CloseCurrentPopup();
-        open_project(chosen);
+        if (for_models) {
+            update_config([&chosen](Config& config) {
+                config.models_dir = chosen.string();
+            });
+            refresh_models();
+            say("models directory: " + chosen.string() + " -- "
+                + std::to_string(models_.size()) + " GGUF files");
+        } else {
+            open_project(chosen);
+        }
     }
     ImGui::SameLine();
     if (ImGui::Button("Cancel", ImVec2(em(5.6F), 0))) {

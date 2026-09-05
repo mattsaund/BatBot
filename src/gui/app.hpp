@@ -31,6 +31,8 @@
 #include "crucible/engine/engine.hpp"
 #include "crucible/engine/state.hpp"
 #include "crucible/llm/model_catalog.hpp"
+#include "crucible/runtime/builder.hpp"
+#include "crucible/runtime/registry.hpp"
 #include "crucible/session/store.hpp"
 
 struct GLFWwindow;
@@ -58,7 +60,9 @@ private:
     /// Which page of the settings. One list down the left and one page on the
     /// right, which is the shape every desktop application settles on because
     /// a single scrolling wall of switches cannot be navigated.
-    enum class SettingsPage { General, Experts, Hardware, Tools, About };
+    enum class SettingsPage {
+        General, Experts, Generation, Hardware, Runtimes, Tools, About
+    };
 
     // --- frame ------------------------------------------------------------
     void draw();
@@ -69,11 +73,39 @@ private:
     void draw_expert_list();
     void draw_history();
     void draw_settings();
-    void draw_composer(const Snapshot& snapshot);
+
+    /// The settings pages that are large enough to be worth their own file.
+    /// Generation is every knob llama.cpp takes; Hardware is what to run on;
+    /// Runtimes builds the backends that make hardware available at all.
+    void draw_settings_generation();
+    void draw_settings_hardware();
+    void draw_settings_runtimes();
+
+    /// The bar under each of the two working views. Chat has a prompt box and
+    /// nothing else; Cook has the goal, the budget and the buttons that start
+    /// and stop it. They are separate because the two are separate actions and
+    /// one bar could only ever do one of them.
+    void draw_chat_composer(const Snapshot& snapshot);
+    void draw_cook_composer(const Snapshot& snapshot);
+
+    /// How much room the composer needs this frame, so the pane above it can be
+    /// given the rest. Computed rather than fixed: the boxes grow with what is
+    /// typed into them.
+    float composer_wanted_height(const Snapshot& snapshot);
+    float composer_height(const Snapshot& snapshot);
 
     void draw_new_expert_modal();
-    void draw_project_modal();
+    void draw_browse_modal();
     void draw_trust_modal();
+
+    /// What the folder browser is being opened to choose. The same browser
+    /// serves both: picking a project and picking the models directory are the
+    /// same question, and two copies of a directory list would drift apart.
+    enum class BrowseFor { Project, ModelsDir };
+
+    /// Open the folder browser at `start`, or at the obvious place for `what`
+    /// when `start` is empty.
+    void open_browse(BrowseFor what, const std::filesystem::path& start = {});
 
     /// One cook step: its verb, its summary, and the diff or output it expands
     /// into.
@@ -142,9 +174,10 @@ private:
     std::string new_expert_blurb_;
     std::string expert_error_;
 
-    /// The project picker: where it is browsing, and the name of a folder to
-    /// create.
-    bool                  project_modal_open_ = false;
+    /// The folder browser: where it is looking, what it is choosing, and the
+    /// name of a folder to create.
+    bool                  browse_modal_open_ = false;
+    BrowseFor             browse_for_        = BrowseFor::Project;
     std::filesystem::path browse_;
     std::string           browse_text_;
     std::string           new_folder_;
@@ -152,6 +185,15 @@ private:
 
     /// A directory waiting on the trust question, and the answer to it.
     std::optional<std::filesystem::path> pending_trust_;
+
+    /// The runtime manager's state. Scanned on first sight of the page rather
+    /// than at startup: it touches the filesystem, and most sessions never open
+    /// it. The builder outlives a page switch on purpose -- a CUDA build takes
+    /// minutes, and clicking away from the page must not abandon it.
+    RuntimeBuilder             runtime_builder_;
+    std::vector<RuntimeStatus> runtimes_;
+    std::string                runtime_error_;
+    bool                       runtimes_scanned_ = false;
 
     std::vector<ModelFile>   models_;   ///< the models directory, rescanned on demand
     std::vector<std::string> notices_;

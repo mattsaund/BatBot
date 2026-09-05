@@ -188,6 +188,9 @@ if(CRUCIBLE_BUILD_GUI)
         src/gui/panels/cook.cpp
         src/gui/panels/experts.cpp
         src/gui/panels/settings.cpp
+        src/gui/panels/generation.cpp
+        src/gui/panels/hardware.cpp
+        src/gui/panels/runtimes.cpp
         src/gui/panels/dialogs.cpp)
     target_link_libraries(crucible-gui PRIVATE crucible::core crucible_imgui)
     if(CRUCIBLE_BACKEND_DL AND NOT WIN32)

@@ -21,6 +21,10 @@
 
 namespace crucible::gui {
 
+/// How far a prompt box may grow before it starts scrolling instead. Past this
+/// the box would be eating the conversation it belongs to.
+constexpr int kComposerLines = 8;
+
 /// Layout in multiples of the font size rather than in pixels.
 ///
 /// The interface is loaded at the display's own scale, so a sidebar written as
@@ -40,6 +44,23 @@ void section(const char* label);
 
 /// A page title.
 void title(const char* label);
+
+/// How tall a grow_input holding `text` will be, so a caller laying out the
+/// frame can reserve the room before the box is drawn.
+float grow_input_height(const std::string& text, float width, int max_lines);
+
+/// A text box that grows downward as its content wraps, rather than scrolling
+/// sideways and hiding everything but the tail.
+///
+/// Enter submits and Ctrl+Enter starts a new line. That is the right way round
+/// for a prompt box: sending is the common action, and a multi-line prompt is
+/// the exception that can afford a modifier.
+///
+/// Returns true on submit. Grows to `max_lines` and then scrolls, because a box
+/// that can grow without limit eventually leaves no room for the conversation
+/// it belongs to.
+bool grow_input(const char* id, const char* hint, std::string& text,
+                float width, int max_lines);
 
 /// A model reference as it should be read.
 ///

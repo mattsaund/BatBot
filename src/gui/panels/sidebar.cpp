@@ -70,11 +70,7 @@ void App::draw_sidebar(const Snapshot& snapshot) {
     ImGui::SetItemTooltip("%s", store_->project().root.string().c_str());
 
     if (ImGui::Button("Open project", ImVec2(-FLT_MIN, 0))) {
-        project_modal_open_ = true;
-        browse_             = store_->project().root;
-        browse_text_        = browse_.string();
-        new_folder_.clear();
-        project_error_.clear();
+        open_browse(BrowseFor::Project, store_->project().root);
     }
 
     const std::vector<Project> recents = recent_projects(6);

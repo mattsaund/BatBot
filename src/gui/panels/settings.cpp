@@ -36,11 +36,13 @@ void App::draw_settings() {
         }
     };
     ImGui::Dummy(ImVec2(0, em(0.2F)));
-    page("General",  SettingsPage::General);
-    page("Experts",  SettingsPage::Experts);
-    page("Hardware", SettingsPage::Hardware);
-    page("Tools",    SettingsPage::Tools);
-    page("About",    SettingsPage::About);
+    page("General",    SettingsPage::General);
+    page("Experts",    SettingsPage::Experts);
+    page("Generation", SettingsPage::Generation);
+    page("Hardware",   SettingsPage::Hardware);
+    page("Runtimes",   SettingsPage::Runtimes);
+    page("Tools",      SettingsPage::Tools);
+    page("About",      SettingsPage::About);
     ImGui::EndChild();
 
     ImGui::SameLine();
@@ -99,17 +101,33 @@ void App::draw_settings() {
             text_coloured(theme::kTextDim, "%s",
                           config_.resolved_models_dir().string().c_str());
             std::string dir = config_.models_dir;
-            ImGui::SetNextItemWidth(-em(6.5F));
+            ImGui::SetNextItemWidth(-em(7.5F));
             if (ImGui::InputTextWithHint("##models-dir", "path to your GGUF files", &dir,
                                          ImGuiInputTextFlags_EnterReturnsTrue)) {
                 update_config([&dir](Config& config) { config.models_dir = dir; });
                 refresh_models();
             }
             ImGui::SameLine();
-            if (ImGui::Button("Rescan", ImVec2(-FLT_MIN, 0))) {
+            // Typing a path is fine when you know it; the button is for when
+            // you do not, which is most of the time on a machine whose models
+            // live somewhere a package manager chose.
+            if (ImGui::Button("Browse...", ImVec2(-FLT_MIN, 0))) {
+                open_browse(BrowseFor::ModelsDir);
+            }
+            if (ImGui::Button("Rescan", ImVec2(em(7.0F), 0))) {
                 refresh_models();
                 say("found " + std::to_string(models_.size()) + " GGUF files");
             }
+            ImGui::SameLine();
+            if (ImGui::Button("Reset to default", ImVec2(em(11.0F), 0))) {
+                update_config([](Config& config) { config.models_dir.clear(); });
+                refresh_models();
+                say("models directory reset to "
+                    + config_.resolved_models_dir().string());
+            }
+            ImGui::SetItemTooltip("Back to %s",
+                                  paths::models_dir().string().c_str());
+            text_coloured(theme::kTextFaint, "%zu GGUF files here", models_.size());
 
             section("APPEARANCE");
             bool reasoning = config_.ui.show_reasoning;
@@ -153,53 +171,9 @@ void App::draw_settings() {
             break;
         }
 
-        case SettingsPage::Hardware: {
-            title("Hardware");
-
-            section("DEVICES");
-            const std::vector<ComputeDevice> devices = compute_devices();
-            if (devices.empty()) {
-                wrapped(theme::kTextDim,
-                        "No compute devices -- no runtime is installed. Install one from "
-                        "the terminal app with /runtimes: it compiles a GPU backend for "
-                        "this machine, which takes minutes and wants a log rather than a "
-                        "progress bar.");
-            }
-            for (const ComputeDevice& device : devices) {
-                text_coloured(theme::kTextDim, "[%d] %s  %s", device.index,
-                              device.label().c_str(), device.backend.c_str());
-            }
-
-            section("SPLIT");
-            bool gpu_only = config_.gpu.gpu_only;
-            if (ImGui::Checkbox("Keep every layer on the GPU", &gpu_only)) {
-                update_config([gpu_only](Config& config) {
-                    config.gpu.gpu_only = gpu_only;
-                });
-            }
-            ImGui::SetItemTooltip(
-                "A model 90%% offloaded runs at roughly the speed of one not offloaded "
-                "at all.");
-            bool vram_only = config_.gpu.vram_only;
-            if (ImGui::Checkbox("Refuse a model that will not fit in VRAM", &vram_only)) {
-                update_config([vram_only](Config& config) {
-                    config.gpu.vram_only = vram_only;
-                });
-            }
-            ImGui::SetItemTooltip(
-                "Otherwise the driver spills into system RAM and the model runs about "
-                "twenty times slower with nothing on screen to say why.");
-
-            int context = config_.defaults.n_ctx;
-            ImGui::SetNextItemWidth(em(14.0F));
-            if (ImGui::InputInt("Context size", &context, 1024, 4096)) {
-                context = std::clamp(context, 512, 1 << 20);
-                update_config([context](Config& config) {
-                    config.defaults.n_ctx = context;
-                });
-            }
-            break;
-        }
+        case SettingsPage::Generation: draw_settings_generation(); break;
+        case SettingsPage::Hardware:   draw_settings_hardware();   break;
+        case SettingsPage::Runtimes:   draw_settings_runtimes();   break;
 
         case SettingsPage::Tools: {
             title("Tools");
@@ -267,6 +241,53 @@ void App::draw_settings() {
                                              ImGuiInputTextFlags_EnterReturnsTrue)) {
                     update_config([&endpoint](Config& config) {
                         config.tools.search_endpoint = endpoint;
+                    });
+                }
+
+                // Brave is the only provider that takes one, so the box is only
+                // worth showing for Brave. It is stored in the config as typed,
+                // which the label says rather than leaving it to be discovered.
+                if (config_.tools.search_provider == "brave") {
+                    std::string key = config_.tools.search_api_key;
+                    ImGui::SetNextItemWidth(em(22.0F));
+                    if (ImGui::InputTextWithHint("API key", "stored in plain text", &key,
+                                                 ImGuiInputTextFlags_Password |
+                                                 ImGuiInputTextFlags_EnterReturnsTrue)) {
+                        update_config([&key](Config& config) {
+                            config.tools.search_api_key = key;
+                        });
+                    }
+                    ImGui::SetItemTooltip(
+                        "Written to config.json as typed. Anyone who can read your "
+                        "config can read the key.");
+                }
+
+                int results = config_.tools.search_results;
+                ImGui::SetNextItemWidth(em(10.0F));
+                if (ImGui::SliderInt("Results", &results, 1, 20)) {
+                    update_config([results](Config& config) {
+                        config.tools.search_results = results;
+                    });
+                }
+                ImGui::SetItemTooltip("How many hits are handed to the expert.");
+
+                int rounds = config_.tools.search_rounds;
+                ImGui::SetNextItemWidth(em(10.0F));
+                if (ImGui::SliderInt("Rounds", &rounds, 1, 6)) {
+                    update_config([rounds](Config& config) {
+                        config.tools.search_rounds = rounds;
+                    });
+                }
+                ImGui::SetItemTooltip(
+                    "How many times one prompt may search before it has to answer. "
+                    "A model that searches, reads, and searches again is usually "
+                    "avoiding the question.");
+
+                int search_timeout = config_.tools.search_timeout;
+                ImGui::SetNextItemWidth(em(10.0F));
+                if (ImGui::SliderInt("Search timeout (s)", &search_timeout, 2, 60)) {
+                    update_config([search_timeout](Config& config) {
+                        config.tools.search_timeout = search_timeout;
                     });
                 }
             }
