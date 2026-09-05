@@ -15,8 +15,13 @@
 #include "crucible/app/uninstall.hpp"
 #include "crucible/config/config.hpp"
 #include "crucible/ui/app.hpp"
+#include "crucible/util/platform.hpp"
 
 int main(int argc, char** argv) {
+    // Before anything is printed: --help draws the mark, and the mark is not
+    // ASCII.
+    crucible::util::use_utf8_console();
+
     const crucible::app::Options options = crucible::app::parse_arguments(argc, argv);
     if (options.should_exit) {
         return options.exit_code;

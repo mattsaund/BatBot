@@ -53,6 +53,10 @@ std::filesystem::path where_to_open(bool from_a_terminal) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Started from a terminal, `crucible-gui --help` prints the same braille
+    // mark the other binary does, and on Windows that needs saying first.
+    crucible::util::use_utf8_console();
+
     const crucible::app::Options options = crucible::app::parse_arguments(argc, argv);
     if (options.should_exit) {
         return options.exit_code;

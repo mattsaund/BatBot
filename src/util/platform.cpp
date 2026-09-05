@@ -27,6 +27,14 @@ bool stdin_is_a_terminal() {
 #endif
 }
 
+void use_utf8_console() {
+#if defined(_WIN32)
+    // Output only. The input code page is FTXUI's business, and changing it
+    // from under a console that is already reading would be rude.
+    ::SetConsoleOutputCP(CP_UTF8);
+#endif
+}
+
 std::filesystem::path executable_path() {
 #if defined(_WIN32)
     // GetModuleFileNameW truncates rather than failing, and says so only by

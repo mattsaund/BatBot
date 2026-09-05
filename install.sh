@@ -440,19 +440,23 @@ ok()    { note "    ${C_GRN}✓${C_RESET} $*"; }
 die()   { block_clear; show_cursor; printf '\n%serror:%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
 
 banner() {
+# packaging/flame.txt, verbatim. Quoted here-doc, so nothing in it is
+# expanded, and UTF-8 braille rather than ASCII because every terminal a
+# shell installer runs in has had a Unicode font for fifteen years.
 cat <<'ART'
 
-         ^
-        (^)
-       (/^\)
-   ,-----------,     Crucible
-   \ ~~~~~~~~~ /     a local forge: experts on demand, projects that cook
-    \         /
-     \_______/
-      /|   |\
-     / |___| \
-    /         \
-   '-----------'
+      ⠀⠀⠀⠀⠀⠀⢱⣆⠀⠀⠀⠀⠀⠀
+      ⠀⠀⠀⠀⠀⠀⠈⣿⣷⡀⠀⠀⠀⠀
+      ⠀⠀⠀⠀⠀⠀⢸⣿⣿⣷⣧⠀⠀⠀
+      ⠀⠀⠀⠀⡀⢠⣿⡟⣿⣿⣿⡇⠀⠀
+      ⠀⠀⠀⠀⣳⣼⣿⡏⢸⣿⣿⣿⢀⠀   Crucible
+      ⠀⠀⠀⣰⣿⣿⡿⠁⢸⣿⣿⡟⣼⡆   a local forge: experts on demand, projects that cook
+      ⢰⢀⣾⣿⣿⠟⠀⠀⣾⢿⣿⣿⣿⣿
+      ⢸⣿⣿⣿⡏⠀⠀⠀⠃⠸⣿⣿⣿⡿
+      ⢳⣿⣿⣿⠀⠀⠀⠀⠀⠀⢹⣿⡿⡁
+      ⠀⠹⣿⣿⡄⠀⠀⠀⠀⠀⢠⣿⡞⠁
+      ⠀⠀⠈⠛⢿⣄⠀⠀⠀⣠⠞⠋⠀⠀
+      ⠀⠀⠀⠀⠀⠀⠉⠀⠀⠀⠀⠀⠀⠀
 
 ART
 }

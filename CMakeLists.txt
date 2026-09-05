@@ -146,7 +146,7 @@ add_executable(crucible
     src/ui/app.cpp
     src/ui/commands.cpp
     src/ui/transcript.cpp
-    src/ui/widgets/crucible_sprite.cpp
+    src/ui/widgets/flame_sprite.cpp
     src/ui/widgets/expert_panel.cpp
     src/ui/widgets/markdown_view.cpp
     src/ui/widgets/scroll.cpp
@@ -265,8 +265,13 @@ if(CRUCIBLE_BUILD_TESTS)
         tests/test_config.cpp
         tests/test_devices.cpp
         tests/test_runtime.cpp
-        tests/test_session.cpp)
-    target_link_libraries(crucible_tests PRIVATE crucible::core)
+        tests/test_session.cpp
+        tests/test_sprite.cpp
+        # The flame's own source, because it lives in the terminal program
+        # rather than in the core library. It draws text and nothing else, so it
+        # costs the test binary a link against FTXUI's colour type and no more.
+        src/ui/widgets/flame_sprite.cpp)
+    target_link_libraries(crucible_tests PRIVATE crucible::core ftxui::screen)
     target_include_directories(crucible_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
     if(CRUCIBLE_WARNINGS AND (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
         target_compile_options(crucible_tests PRIVATE ${_crucible_warnings})

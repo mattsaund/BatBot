@@ -53,6 +53,13 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# The banner is braille and the notes carry arrows, and Windows PowerShell 5.1
+# writes both as question marks unless the console is told otherwise. PowerShell
+# 7 is already UTF-8; this costs nothing there. Wrapped because a host without a
+# real console -- the ISE, an embedded runspace -- throws on the assignment, and
+# a mangled banner is not worth failing an install over.
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
+
 $RepoUrl = 'https://github.com/mattsaund/Crucible.git'
 $SrcDir  = Join-Path $env:LOCALAPPDATA 'crucible\src'
 
@@ -64,19 +71,22 @@ $SrcDir  = Join-Path $env:LOCALAPPDATA 'crucible\src'
 # information is the point, not the object stream.
 # ---------------------------------------------------------------------------
 function Write-Banner {
+    # packaging/flame.txt, verbatim. A single-quoted here-string, so nothing
+    # in it is expanded or escaped.
     Write-Host @'
 
-         ^
-        (^)
-       (/^\)
-   ,-----------,     Crucible
-   \ ~~~~~~~~~ /     a local forge: experts on demand, projects that cook
-    \         /
-     \_______/
-      /|   |\
-     / |___| \
-    /         \
-   '-----------'
+      ⠀⠀⠀⠀⠀⠀⢱⣆⠀⠀⠀⠀⠀⠀
+      ⠀⠀⠀⠀⠀⠀⠈⣿⣷⡀⠀⠀⠀⠀
+      ⠀⠀⠀⠀⠀⠀⢸⣿⣿⣷⣧⠀⠀⠀
+      ⠀⠀⠀⠀⡀⢠⣿⡟⣿⣿⣿⡇⠀⠀
+      ⠀⠀⠀⠀⣳⣼⣿⡏⢸⣿⣿⣿⢀⠀   Crucible
+      ⠀⠀⠀⣰⣿⣿⡿⠁⢸⣿⣿⡟⣼⡆   a local forge: experts on demand, projects that cook
+      ⢰⢀⣾⣿⣿⠟⠀⠀⣾⢿⣿⣿⣿⣿
+      ⢸⣿⣿⣿⡏⠀⠀⠀⠃⠸⣿⣿⣿⡿
+      ⢳⣿⣿⣿⠀⠀⠀⠀⠀⠀⢹⣿⡿⡁
+      ⠀⠹⣿⣿⡄⠀⠀⠀⠀⠀⢠⣿⡞⠁
+      ⠀⠀⠈⠛⢿⣄⠀⠀⠀⣠⠞⠋⠀⠀
+      ⠀⠀⠀⠀⠀⠀⠉⠀⠀⠀⠀⠀⠀⠀
 
 '@ -ForegroundColor DarkYellow
 }

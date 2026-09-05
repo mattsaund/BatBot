@@ -19,7 +19,7 @@
 #include "crucible/session/store.hpp"
 #include "crucible/routing/completion.hpp"
 #include "crucible/ui/session_picker.hpp"
-#include "crucible/ui/widgets/crucible_sprite.hpp"
+#include "crucible/ui/widgets/flame_sprite.hpp"
 #include "crucible/ui/widgets/expert_form.hpp"
 #include "crucible/ui/settings/runtime_view.hpp"
 #include "crucible/ui/settings/gpu_order_view.hpp"
@@ -108,7 +108,7 @@ private:
 
     Config                  config_;
     AppState                state_;
-    CrucibleSprite               sprite_;
+    FlameSprite             sprite_;
     SettingsView            settings_;
     RuntimeView             runtimes_;
     GpuOrderView            gpu_order_;

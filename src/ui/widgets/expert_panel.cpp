@@ -152,7 +152,7 @@ std::string link_row(int row, int from, int to) {
 
 }  // namespace
 
-Element expert_panel(const Snapshot& snapshot, const CrucibleSprite& sprite, std::size_t tick,
+Element expert_panel(const Snapshot& snapshot, const FlameSprite& sprite, std::size_t tick,
                    bool compact) {
     // Drawn in roster order, which is the order the user put them in.
     const Roster& roster = snapshot.roster ? *snapshot.roster : *kEmptyRoster();
@@ -216,7 +216,7 @@ Element expert_panel(const Snapshot& snapshot, const CrucibleSprite& sprite, std
     for (const std::string& line : sprite.render(snapshot.mood, tick, compact)) {
         sprite_lines.push_back(text(line) | color(mood_color(snapshot.mood)));
     }
-    Element vessel = vbox(std::move(sprite_lines));
+    Element mark = vbox(std::move(sprite_lines));
 
     // The label goes on the row directly above the dot, so the two read as one
     // thing rather than as a heading over the whole column.
@@ -238,14 +238,21 @@ Element expert_panel(const Snapshot& snapshot, const CrucibleSprite& sprite, std
         }
     }
 
+    // All three columns are centred against each other, not just the mark.
+    //
+    // The mark is a fixed seven rows however hard the flame is burning, and a
+    // roster is however many experts you have -- so one of the two is always
+    // shorter than the panel. Centring only the mark left the seats hanging off
+    // the top with the flame beside their tail, and the connector reaching down
+    // out of a name into nothing.
     Element table = hbox({
-        vbox({filler(), std::move(vessel), filler()}),
+        vbox({filler(), std::move(mark), filler()}),
         text("  "),
         // Wide enough for the name above the dot. It was six when the name was
         // six characters long; "Crucible" is eight, and a column sized to the
         // old name silently clipped it to "Crucib".
-        vbox(std::move(dot_column)) | size(WIDTH, EQUAL, 9),
-        vbox(std::move(seat_rows)),
+        vbox({filler(), vbox(std::move(dot_column)), filler()}) | size(WIDTH, EQUAL, 9),
+        vbox({filler(), vbox(std::move(seat_rows)), filler()}),
     });
 
     const std::string bubble = thought_bubble(snapshot.mood, snapshot.status, tick);

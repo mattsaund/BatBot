@@ -145,29 +145,39 @@ ImFont* first_available(const char* const* candidates, std::size_t count, float 
 /// and it is why this is a concave fill -- an earlier version was three stacked
 /// convex teardrops, which had no notch and looked like a leaf with highlights.
 ///
+/// It is narrow: a bounding box about four units wide to seven tall. An earlier
+/// version bulged a long way out to the left and read as a plump teardrop at
+/// icon sizes, where the silhouette is all there is. Taking the belly in is the
+/// whole difference between a mark and a blob.
+///
 /// `lean` scales the sideways offset of the tip, so the core can lean the other
 /// way from the body. Coordinates are fractions of `radius` about `base`, which
 /// is the point the flame stands on.
+///
+/// packaging/crucible.svg is these same numbers. Reshape one and reshape both.
 void flame_path(ImDrawList* draw, ImVec2 base, float radius, float lean) {
     const auto at = [&](float x, float y) {
         return ImVec2(base.x + x * radius, base.y + y * radius);
     };
 
     draw->PathClear();
-    draw->PathLineTo(at(0.00F, 0.16F));                       // the notch
-    // Down and out to the left foot. The notch is shallow on purpose: an
-    // earlier version cut a third of the way up and the shape read as a paw.
-    draw->PathBezierCubicCurveTo(at(-0.12F, 0.34F), at(-0.26F, 0.42F), at(-0.40F, 0.40F));
+    draw->PathLineTo(at(0.00F, 0.22F));                       // the notch
+    // Down and out to the left foot. The notch is shallow on purpose: it rises
+    // a fifth of the radius above the feet and no more. Cut deeper -- an
+    // earlier version went to 0.14 -- and the two feet read as the arms of a
+    // chevron rather than as the bottom of a flame, which at 16 pixels is the
+    // only thing anyone sees.
+    draw->PathBezierCubicCurveTo(at(-0.10F, 0.34F), at(-0.24F, 0.36F), at(-0.34F, 0.34F));
     // Up the left side in two sweeps, which is what gives it a waist. One long
     // curve from foot to tip bulges in the middle and looks like a leaf.
-    draw->PathBezierCubicCurveTo(at(-0.62F, 0.06F), at(-0.52F, -0.20F), at(-0.34F, -0.42F));
-    draw->PathBezierCubicCurveTo(at(-0.20F, -0.72F), at(-0.04F, -0.86F),
-                                 at(0.10F * lean, -1.00F));   // the tip, leaning
+    draw->PathBezierCubicCurveTo(at(-0.46F, 0.10F), at(-0.42F, -0.18F), at(-0.28F, -0.44F));
+    draw->PathBezierCubicCurveTo(at(-0.18F, -0.68F), at(-0.06F, -0.84F),
+                                 at(0.14F * lean, -1.00F));   // the tip, leaning
     // And down the right, which is straighter -- a flame is not symmetric, and
     // making it so is the difference between fire and a teardrop.
-    draw->PathBezierCubicCurveTo(at(0.28F, -0.74F), at(0.34F, -0.48F), at(0.34F, -0.24F));
-    draw->PathBezierCubicCurveTo(at(0.33F, -0.02F), at(0.42F, 0.16F), at(0.42F, 0.36F));
-    draw->PathBezierCubicCurveTo(at(0.32F, 0.42F), at(0.14F, 0.32F), at(0.00F, 0.16F));
+    draw->PathBezierCubicCurveTo(at(0.24F, -0.76F), at(0.30F, -0.50F), at(0.31F, -0.24F));
+    draw->PathBezierCubicCurveTo(at(0.32F, -0.02F), at(0.36F, 0.16F), at(0.34F, 0.34F));
+    draw->PathBezierCubicCurveTo(at(0.24F, 0.40F), at(0.10F, 0.34F), at(0.00F, 0.22F));
 }
 
 }  // namespace
@@ -257,7 +267,15 @@ void draw_flame(ImDrawList* draw, ImVec2 centre, float radius, float alpha) {
     // Nothing here moves. An earlier version flickered the whole mark with the
     // engine's pulse, which is the sort of thing that looks alive for a minute
     // and then makes a window impossible to sit next to.
-    const ImVec2 base{centre.x, centre.y + radius * 0.62F};
+    //
+    // The offsets that centre the silhouette on `centre`. Measured, not
+    // eyeballed: the drawn outline runs -0.411..0.346 across and -1.000..0.364
+    // down about the point the flame stands on, so the foot goes half of that
+    // vertical span below the centre and the whole shape a little to the right
+    // of it. Curves overshoot their control points, which is why this cannot be
+    // read off the numbers in flame_path by eye -- and why the launcher icon is
+    // fitted to a measured box rather than placed by hand.
+    const ImVec2 base{centre.x + radius * 0.03F, centre.y + radius * 0.32F};
     flame_path(draw, base, radius, 1.0F);
     draw->PathFillConcave(fade(kFlame));
 

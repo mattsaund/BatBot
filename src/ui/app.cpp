@@ -485,9 +485,9 @@ void App::save_settings(bool announce) {
     }
 
     // The engine applies it between requests; the UI-side copy is updated here
-    // so the expert panel and the crucible pick up cosmetic changes immediately.
+    // so the expert panel and the mark pick up cosmetic changes immediately.
     config_ = edited;
-    sprite_ = CrucibleSprite(config_.ui.unicode);
+    sprite_ = FlameSprite(config_.ui.unicode);
     show_experts_ = config_.ui.show_experts;
     state_.configure_seats(config_);
     engine_->apply_config(std::move(edited));

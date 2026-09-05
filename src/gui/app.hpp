@@ -227,7 +227,6 @@ private:
     BrowseFor             browse_for_        = BrowseFor::Project;
     std::filesystem::path browse_;
     std::string           browse_text_;
-    std::string           new_folder_;
     std::string           project_error_;
 
     /// A directory waiting on the trust question, and the answer to it.

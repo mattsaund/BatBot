@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: MIT
 //
-// The three modals: new expert, open project, and the folder-trust question.
+// The three modals: new expert, choose a folder, and the folder-trust question.
 //
 // A modal is used where the answer changes what the rest of the window means
-// -- a different project is a different history, journal and workshop root --
-// and nowhere else.
+// -- a different working directory is a different history, journal and
+// workshop root -- and nowhere else.
+//
+// The folder browser is one dialog serving two questions, because they are the
+// same question: which directory. Where the models are, and where Crucible
+// works.
 //
 // The trust dialog is the one that matters: it asks before Crucible is allowed
 // to read and write a directory, and it goes through the same store the
@@ -106,11 +110,14 @@ void App::draw_browse_modal() {
         return;
     }
 
-    text_coloured(theme::kTextDim, "%s", for_models
+    // Wrapped, not printed: both of these are longer than the dialog is wide,
+    // and an unwrapped line is simply cut off at the edge mid-word.
+    wrapped(theme::kTextDim, for_models
         ? "Where your GGUF files are. Crucible reads this directory; it never "
           "writes to it and never downloads into it."
-        : "The directory Crucible will work in: its history, its cook journal "
-          "and the root the workshop is confined to.");
+        : "The directory Crucible works in: its history, its cook journal and "
+          "the root the workshop is confined to.");
+    ImGui::Dummy(ImVec2(0, em(0.3F)));
 
     // A browser rather than a native file dialog. Crucible has no toolkit to
     // ask for one, and a directory list is what this needs anyway: you are
@@ -139,7 +146,11 @@ void App::draw_browse_modal() {
 
     text_coloured(theme::kTextFaint, "%s", browse_.string().c_str());
 
-    ImGui::BeginChild("dirs", ImVec2(0, em(15.0F)), ImGuiChildFlags_Borders);
+    // Sized to what is left rather than to a fixed height: the "create folder"
+    // row that used to sit under it is gone, and a list that kept its old
+    // height would just leave a strip of nothing where it was.
+    const float reserve = em(3.4F) + (project_error_.empty() ? 0.0F : em(1.8F));
+    ImGui::BeginChild("dirs", ImVec2(0, -reserve), ImGuiChildFlags_Borders);
     for (const std::filesystem::path& entry : subdirectories(browse_)) {
         ImGui::PushID(entry.c_str());
         if (ImGui::Selectable((entry.filename().string() + "/").c_str())) {
@@ -150,26 +161,11 @@ void App::draw_browse_modal() {
     }
     ImGui::EndChild();
 
-    // Creating a folder here rather than sending someone to a file manager:
-    // "start a new project" is the other half of "open one", and both are the
-    // same question about the same directory.
-    ImGui::SetNextItemWidth(-em(9.0F));
-    ImGui::InputTextWithHint("##new-folder", "new folder name", &new_folder_);
-    ImGui::SameLine();
-    if (ImGui::Button("Create", ImVec2(-FLT_MIN, 0)) && !format::trim(new_folder_).empty()) {
-        const std::filesystem::path made = browse_ / format::trim(new_folder_);
-        std::error_code ec;
-        std::filesystem::create_directories(made, ec);
-        if (ec) {
-            project_error_ = "could not create " + made.string() + ": " + ec.message();
-        } else {
-            browse_      = made;
-            browse_text_ = made.string();
-            new_folder_.clear();
-            project_error_.clear();
-        }
-    }
-
+    // There is no "create project" here any more. It made this dialog two
+    // things -- a browser and a folder-maker -- for a program that has no
+    // notion of a project beyond "the directory it is pointed at". A new
+    // project is a new folder, made wherever you make folders, and then opened
+    // like any other.
     if (!project_error_.empty()) {
         wrapped(theme::kError, project_error_);
     }

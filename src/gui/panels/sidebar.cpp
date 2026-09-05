@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //
-// The left column: the mark, the project, recent projects, the experts and
-// the view switcher.
+// The left column: the mark, the working directory, the experts and the view
+// switcher.
 //
 // Everything in it is either navigation or a statement of where you are. It
 // holds no state of its own -- the width and whether it is open live on App,
@@ -35,7 +35,7 @@ void App::draw_sidebar(const Snapshot& snapshot) {
     {
         const ImVec2 origin = ImGui::GetCursorScreenPos();
         theme::draw_flame(ImGui::GetWindowDrawList(),
-                          ImVec2(origin.x + em(0.9F), origin.y + em(1.0F)), em(0.95F));
+                          ImVec2(origin.x + em(0.9F), origin.y + em(1.3F)), em(0.95F));
 
         ImGui::SetCursorScreenPos(ImVec2(origin.x + em(2.4F), origin.y + em(0.15F)));
         ImGui::PushFont(theme::bold());
@@ -62,28 +62,14 @@ void App::draw_sidebar(const Snapshot& snapshot) {
     text_coloured(theme::kTextFaint, "%s", tail_of(store_->project().root, 34).c_str());
     ImGui::SetItemTooltip("%s", store_->project().root.string().c_str());
 
-    if (ImGui::Button("Open project", ImVec2(-FLT_MIN, 0))) {
+    // One button, and it opens the same folder browser the models directory
+    // uses. There used to be a RECENT list under it -- six projects you might
+    // have meant instead of the one you are in -- which made the top of the
+    // sidebar a menu of places rather than a statement of where you are. The
+    // list is still kept, because it is how a launcher start picks a folder,
+    // but it is not something to navigate by.
+    if (ImGui::Button("Change folder", ImVec2(-FLT_MIN, 0))) {
         open_browse(BrowseFor::Project, store_->project().root);
-    }
-
-    const std::vector<Project> recents = recent_projects(6);
-    bool any_other = false;
-    for (const Project& project : recents) {
-        any_other = any_other || project.root != store_->project().root;
-    }
-    if (any_other) {
-        section("RECENT");
-        for (const Project& project : recents) {
-            if (project.root == store_->project().root) {
-                continue;
-            }
-            ImGui::PushID(project.root.c_str());
-            if (ImGui::Selectable(project.name.c_str(), false, 0, ImVec2(0, em(1.3F)))) {
-                open_project(project.root);
-            }
-            ImGui::SetItemTooltip("%s", project.root.string().c_str());
-            ImGui::PopID();
-        }
     }
 
     // --- the experts ---------------------------------------------------

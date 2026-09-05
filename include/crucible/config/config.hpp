@@ -203,7 +203,7 @@ struct ToolsConfig {
 struct UiConfig {
     int  animation_ms   = 90;    ///< frame interval while Crucible is busy
     bool show_experts = true; ///< draw the ring (toggle at runtime with Ctrl-T)
-    bool unicode        = true;  ///< false falls back to a pure-ASCII crucible
+    bool unicode        = true;  ///< false falls back to plain ASCII
 
     /// Keep a reasoning model's working on screen after it has answered.
     ///

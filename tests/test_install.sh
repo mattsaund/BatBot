@@ -783,5 +783,67 @@ else
 fi
 
 echo
+echo "  one mark, and it is a flame"
+
+# The program used to be drawn as a crucible: a pot on a stand with a fire under
+# it, copied by hand into the banner, both installers, the README and the
+# terminal sprite. Five copies of one picture, which is four too many to keep in
+# step -- and the desktop window and the launcher icon had already moved on to
+# the flame.
+#
+# These pin the removal rather than the drawing. The vessel is gone from every
+# file that carried it, and every place that shows a mark shows the same one.
+ROOT="$HERE/.."
+
+# The pot's rim and its stand. Distinctive enough that no ordinary line of
+# prose, shell or C++ contains them, and the pieces most likely to be left
+# behind by a half-finished edit.
+# This file is excluded because it is the one place the vessel is still written
+# down: the patterns above are what it is looking for.
+for _art in ",-----------," "'-----------'" "\\_______/" "(/^\\)"; do
+    check_not "no file still draws \"$_art\"" \
+              grep -rqF --exclude=test_install.sh -- "$_art" \
+                   "$ROOT/src" "$ROOT/include" "$ROOT/tests" \
+                   "$ROOT/README.md" "$ROOT/install.sh" "$ROOT/install.ps1"
+done
+
+# The still mark is packaging/flame.txt, pasted into four places. Checked by a
+# row of the drawing rather than by the whole thing: a row is enough to tell a
+# stale copy from a current one, and the whole art in a test file is a fifth
+# copy to keep in step.
+FLAME_ROW="$(sed -n '7p' "$ROOT/packaging/flame.txt")"
+check_not "the mark exists to be pasted from" [ -z "$FLAME_ROW" ]
+for _where in install.sh install.ps1 src/app/cli.cpp README.md; do
+    check "$_where carries the flame from packaging/flame.txt" \
+          grep -qF -- "$FLAME_ROW" "$ROOT/$_where"
+done
+
+# The terminal sprite is the one place that does not, and deliberately: it has
+# to animate, and it has to survive a terminal with no Unicode font. It draws
+# the same flame in ASCII, and "( (  ) )" is its lit inner tongue -- the one row
+# of that drawing that could not be anything else.
+check     "the terminal sprite draws its own ASCII flame" \
+          grep -qF -- "( (  ) )" "$ROOT/src/ui/widgets/flame_sprite.cpp"
+check_not "and does not paste the braille one into a sprite that has to animate" \
+          grep -qF -- "$FLAME_ROW" "$ROOT/src/ui/widgets/flame_sprite.cpp"
+
+# Braille is not ASCII, so both faces have to put the console into UTF-8 before
+# they print it. Without this the Windows console renders every byte of every
+# glyph as its own question mark, which is the first thing a Windows user sees.
+check     "the terminal binary sets the console to UTF-8 before printing" \
+          grep -q "use_utf8_console" "$ROOT/src/main.cpp"
+check     "so does the desktop one" \
+          grep -q "use_utf8_console" "$ROOT/src/gui/main.cpp"
+check     "and the Windows installer does the same for itself" \
+          grep -q "OutputEncoding" "$ROOT/install.ps1"
+
+# The window and the launcher icon are the same shape from the same numbers, so
+# a reshape that touches one and not the other is the failure to catch.
+check     "the icon points at the source of the shape" \
+          grep -q "flame_path" "$ROOT/packaging/crucible.svg"
+check     "and the shape says the icon is drawn from it" \
+          grep -q "packaging/crucible.svg" "$ROOT/src/gui/theme.cpp"
+
+echo
 echo "$((PASS + FAIL)) checks, $FAIL failed"
 [ "$FAIL" -eq 0 ]

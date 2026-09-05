@@ -8,20 +8,27 @@
 namespace crucible::app {
 namespace {
 
-// The same vessel the TUI draws, at its liveliest frame. One shape for the
-// program, whether you meet it in `--help` or in the corner of the screen.
+// Crucible's mark, in braille, from packaging/flame.txt -- the one copy the
+// two installers, the README and this are all pasted from. The terminal
+// sprite draws the same flame in plain ASCII instead, because it has to
+// animate and it has a no-Unicode fallback; this is a still, and can afford
+// the resolution braille gives it.
+//
+// Printed as UTF-8. main() puts the console into UTF-8 first, which on
+// Windows is the difference between this and twelve rows of question marks.
 constexpr const char* kBanner = R"(
-         ^
-        (^)
-       (/^\)
-   ,-----------,     Crucible )" CRUCIBLE_VERSION R"(
-   \ ~~~~~~~~~ /     a local forge: experts on demand, projects that cook
-    \         /
-     \_______/
-      /|   |\
-     / |___| \
-    /         \
-   '-----------'
+      ⠀⠀⠀⠀⠀⠀⢱⣆⠀⠀⠀⠀⠀⠀
+      ⠀⠀⠀⠀⠀⠀⠈⣿⣷⡀⠀⠀⠀⠀
+      ⠀⠀⠀⠀⠀⠀⢸⣿⣿⣷⣧⠀⠀⠀
+      ⠀⠀⠀⠀⡀⢠⣿⡟⣿⣿⣿⡇⠀⠀
+      ⠀⠀⠀⠀⣳⣼⣿⡏⢸⣿⣿⣿⢀⠀   Crucible )" CRUCIBLE_VERSION R"(
+      ⠀⠀⠀⣰⣿⣿⡿⠁⢸⣿⣿⡟⣼⡆   a local forge: experts on demand, projects that cook
+      ⢰⢀⣾⣿⣿⠟⠀⠀⣾⢿⣿⣿⣿⣿
+      ⢸⣿⣿⣿⡏⠀⠀⠀⠃⠸⣿⣿⣿⡿
+      ⢳⣿⣿⣿⠀⠀⠀⠀⠀⠀⢹⣿⡿⡁
+      ⠀⠹⣿⣿⡄⠀⠀⠀⠀⠀⢠⣿⡞⠁
+      ⠀⠀⠈⠛⢿⣄⠀⠀⠀⣠⠞⠋⠀⠀
+      ⠀⠀⠀⠀⠀⠀⠉⠀⠀⠀⠀⠀⠀⠀
 )";
 
 void print_usage() {

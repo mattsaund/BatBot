@@ -19,7 +19,7 @@ struct Options {
     int  exit_code   = 0;
 };
 
-/// The ASCII Crucible shown by --help and the trust prompt.
+/// The flame shown by --help and the trust prompt.
 const char* banner();
 
 /// Parse `argv`, printing usage or version as required. Never throws; an

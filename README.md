@@ -1,15 +1,16 @@
 ```
-         ^
-        (^)
-       (/^\)
-   ,-----------,
-   \ ~~~~~~~~~ /     C R U C I B L E
-    \         /      a local forge: experts on demand, projects that cook
-     \_______/
-      /|   |\
-     / |___| \
-    /         \
-   '-----------'
+   ⠀⠀⠀⠀⠀⠀⢱⣆⠀⠀⠀⠀⠀⠀
+   ⠀⠀⠀⠀⠀⠀⠈⣿⣷⡀⠀⠀⠀⠀
+   ⠀⠀⠀⠀⠀⠀⢸⣿⣿⣷⣧⠀⠀⠀
+   ⠀⠀⠀⠀⡀⢠⣿⡟⣿⣿⣿⡇⠀⠀
+   ⠀⠀⠀⠀⣳⣼⣿⡏⢸⣿⣿⣿⢀⠀   C R U C I B L E
+   ⠀⠀⠀⣰⣿⣿⡿⠁⢸⣿⣿⡟⣼⡆   a local forge: experts on demand, projects that cook
+   ⢰⢀⣾⣿⣿⠟⠀⠀⣾⢿⣿⣿⣿⣿
+   ⢸⣿⣿⣿⡏⠀⠀⠀⠃⠸⣿⣿⣿⡿
+   ⢳⣿⣿⣿⠀⠀⠀⠀⠀⠀⢹⣿⡿⡁
+   ⠀⠹⣿⣿⡄⠀⠀⠀⠀⠀⢠⣿⡞⠁
+   ⠀⠀⠈⠛⢿⣄⠀⠀⠀⣠⠞⠋⠀⠀
+   ⠀⠀⠀⠀⠀⠀⠉⠀⠀⠀⠀⠀⠀⠀
 ```
 
 **A local AI engine that delegates, and then keeps working.**
@@ -54,23 +55,24 @@ you made — with `/newexpert`, the desktop app's Experts page, or by writing an
 entry in the config file. A filled-in roster looks like this:
 
 ```
-                     ^                    ◇ Mathematics
-               ,-----------,              ◇ Programming
-               \ ≈≈≈≈≈≈≈≈≈ /   Crucible   ◆ Physics ────────┐
-                \         /         ◆     ◇ Chemistry       │
-                 \_______/                ◇ Biology         │
-                  /|   |\                 ◇ Engineering ────┘
-                 / |___| \                ◇ Philosophy
-                /         \               ◇ Sociology
-               '-----------'              ◇ Language
+                    /\                    ◇ Mathematics
+                   /  \                   ◇ Programming
+                  (    )       Crucible   ◆ Physics ────────┐
+                 (  /\  )           ◆     ◇ Chemistry       │
+                 ( (  ) )                 ◇ Biology         │
+                  \ \/ /                  ◇ Engineering ────┘
+                   \__/                   ◇ Philosophy
+                                          ◇ Sociology
+                                          ◇ Language
 ```
 
 Until you add one the panel simply says so, and the delegator has nobody to
 route to.
 
-The fire says what the machine is doing — banked when idle, a steady column
-while a model is loading, a full plume with the melt bubbling while tokens are
-coming out. The line joins Crucible to whichever expert the delegation chose.
+The flame says what the machine is doing — an ember when idle, burning steadily
+while a model is loading, and the full mark with its inner tongue lit while
+tokens are coming out. The line joins Crucible to whichever expert the
+delegation chose.
 
 ### Making your own
 
@@ -241,34 +243,36 @@ one self-contained binary that links the core library directly.
 
 ```
 ┌──────────────┬────────────────────────────────────────────┐
-│  ▲ CRUCIBLE  │  you                                       │
-│    idle      │  why does the JIT swap cost so little?     │
+│  /\ CRUCIBLE │  you                                       │
+│     idle     │  why does the JIT swap cost so little?     │
 │              │                                            │
 │  PROJECT     │  Programming · 1.00 · router model         │
 │  crucible    │                                            │
 │  ~/code/cru… │  ## The short answer                       │
-│  Open project│  Weights are mapped, not copied — so:      │
+│ Change folder│  Weights are mapped, not copied — so:      │
 │              │   • the page cache holds them already      │
-│  RECENT      │   • only the KV cache is really allocated  │
-│  notes       │                                            │
-│              │  ┌────────────────────────────────────┐    │
-│  EXPERTS     │  │ llama_model_load_from_file(path);  │    │
-│  ◇ Mathema…  │  └────────────────────────────────────┘    │
-│  ◆ Programm… ├────────────────────────────────────────────┤
-│              │  ask anything                     [ Send ] │
-│  VIEW        │  or give it a goal to cook on  30m [ Cook ]│
-│  Chat  Cook  │                                            │
+│  EXPERTS     │   • only the KV cache is really allocated  │
+│  ◇ Mathema…  │                                            │
+│  ◆ Programm… │  ┌────────────────────────────────────┐    │
+│              │  │ llama_model_load_from_file(path);  │    │
+│  VIEW        │  └────────────────────────────────────┘    │
+│  Chat  Cook  ├────────────────────────────────────────────┤
+│  History     │  ask anything                     [ Send ] │
+│  Settings    │  or give it a goal to cook on     [ Cook ] │
+│              │                                            │
 └──────────────┴────────────────────────────────────────────┘
 ```
 
-The sidebar is draggable and collapses to a rail. It carries the project, the
-recent ones, and the expert list with live status.
+Both panels are draggable. The sidebar closes when you drag its edge to the left
+of the window and comes back when you pull that edge out again; the box you type
+in has a handle above it and grows to whatever height you drag it to. The sidebar
+carries the folder being worked in and the expert list with live status.
 
-**It has a project picker, and the terminal program does not.** `crucible` is
-told where it is by being run there — you `cd`, then you type it. A window has
-no `cd`, so it offers the list instead: open a folder, create one, or pick a
-recent. Opening a folder goes through the same trust prompt, so a directory
-trusted in one face is trusted in the other.
+**It says where it is working, and the terminal program does not have to.**
+`crucible` is told where it is by being run there — you `cd`, then you type it. A
+window has no `cd`, so it shows the folder instead, with one button that opens a
+browser to change it. Choosing a folder goes through the same trust prompt, so a
+directory trusted in one face is trusted in the other.
 
 **Replies are rendered, not printed.** Headings, bold, lists, tables and fenced
 code all draw as themselves, using the same parser the terminal uses — so both
@@ -693,7 +697,7 @@ src/
 │   ├── commands.cpp    slash commands
 │   ├── transcript.cpp  drawing the conversation, markdown and all
 │   ├── session_picker.cpp  the /resume list
-│   ├── widgets/        crucible sprite, expert panel, new-expert form
+│   ├── widgets/        flame sprite, expert panel, new-expert form
 │   └── settings/       view, runtimes panel, GPU priority panel,
 │                       model manager, directory browser, model picker,
 │                       line editor
@@ -702,6 +706,18 @@ src/
     ├── app.cpp         the window: sidebar, panes, composer, dialogs
     ├── markdown_view.cpp  drawing the markdown a model wrote
     └── theme.cpp       the palette, the flame, the fonts
+
+packaging/          the mark, and the application-menu entry
+├── flame.txt       the flame, in braille -- the one copy the banner at the
+│                   top of this file, `crucible --help` and both installers
+│                   are pasted from
+├── crucible.svg    the same flame as a vector, for the launcher icon,
+│                   generated from theme.cpp's own control points
+└── crucible.desktop.in   the XDG entry, with the installed path filled in
+
+The terminal program draws the flame a third way: `src/ui/widgets/flame_sprite.cpp`
+redraws it in plain ASCII, at four heights, because that one has to animate and
+has to survive a terminal with no Unicode font.
 
 ## Roadmap
 

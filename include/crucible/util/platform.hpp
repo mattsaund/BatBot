@@ -45,6 +45,15 @@ std::tm local_time(std::time_t when);
 /// ever opening a window -- which is exactly what clicking the icon used to do.
 bool stdin_is_a_terminal();
 
+/// Put this program's console output into UTF-8, where that is a thing.
+///
+/// A no-op everywhere but Windows, whose console starts on a legacy code page
+/// and renders every byte of a multi-byte character as its own question mark.
+/// Crucible's banner is drawn in braille and its terminal face in box-drawing
+/// characters, so without this the first thing a Windows user sees is mojibake.
+/// Called once, at the top of main, before anything is printed.
+void use_utf8_console();
+
 /// The argv that runs `command` through the platform's shell.
 ///
 /// A shell rather than an argv split, because pipes, redirections and `&&` are

@@ -8,14 +8,14 @@
 #include <ftxui/dom/elements.hpp>
 
 #include "crucible/engine/state.hpp"
-#include "crucible/ui/widgets/crucible_sprite.hpp"
+#include "crucible/ui/widgets/flame_sprite.hpp"
 
 namespace crucible::ui {
 
-/// Draw the panel: the crucible on the left, the experts in a column beside it
+/// Draw the panel: the flame on the left, the experts in a column beside it
 /// with a status diamond each, and a connector to whichever one the delegation
 /// chose.
-ftxui::Element expert_panel(const Snapshot& snapshot, const CrucibleSprite& sprite,
+ftxui::Element expert_panel(const Snapshot& snapshot, const FlameSprite& sprite,
                             std::size_t tick, bool compact);
 
 /// A single-line version for terminals with no room for the panel: the experts
