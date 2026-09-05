@@ -3,13 +3,14 @@
 // Routing: the roster, both routers, the policy that picks between them,
 // and the naming rules a new expert has to satisfy.
 #include "test_helpers.hpp"
+#include "roster_fixture.hpp"
 
 // ---------------------------------------------------------------------------
 // The roster
 // ---------------------------------------------------------------------------
 
-TEST(the_shipped_roster_is_complete_and_unique) {
-    const Roster roster = Roster::defaults();
+TEST(the_fixture_roster_is_complete_and_unique) {
+    const Roster roster = testing::sample_roster();
     CHECK_EQ(roster.size(), std::size_t{9});
 
     std::set<std::string> ids;
@@ -20,7 +21,6 @@ TEST(the_shipped_roster_is_complete_and_unique) {
         CHECK(!expert.blurb.empty());
         CHECK(!expert.tag.empty());
         CHECK(expert.tag.size() <= std::size_t{4});
-        CHECK(expert.builtin);
 
         // Two seats sharing an id would make one of them unreachable by slash
         // command and would collide in the config map; two sharing a tag would
@@ -31,7 +31,7 @@ TEST(the_shipped_roster_is_complete_and_unique) {
 }
 
 TEST(every_shipped_expert_is_worked_and_none_is_a_catch_all) {
-    const Roster roster = Roster::defaults();
+    const Roster roster = testing::sample_roster();
     for (const Expert& expert : roster.experts()) {
         // Two examples each and a keyword set each: both are what the two
         // routers actually read, and a seat missing either is a seat that
@@ -48,7 +48,7 @@ TEST(every_shipped_expert_is_worked_and_none_is_a_catch_all) {
 }
 
 TEST(roster_lookup_accepts_ids_tags_names_and_case) {
-    const Roster roster = Roster::defaults();
+    const Roster roster = testing::sample_roster();
     const auto is = [&](const char* key, const char* id) {
         const std::optional<std::size_t> found = roster.find(key);
         return found.has_value() && roster.at(*found).id == id;
@@ -72,7 +72,7 @@ TEST(roster_lookup_accepts_ids_tags_names_and_case) {
 }
 
 TEST(every_shipped_expert_round_trips_through_its_own_strings) {
-    const Roster roster = Roster::defaults();
+    const Roster roster = testing::sample_roster();
     for (const Expert& expert : roster.experts()) {
         const std::optional<std::size_t> by_id   = roster.find(expert.id);
         const std::optional<std::size_t> by_tag  = roster.find(expert.tag);
@@ -104,7 +104,6 @@ TEST(an_expert_needs_only_a_name_and_a_description) {
     CHECK_EQ(added.id, std::string("rust-async"));
     CHECK_EQ(added.tag, std::string("RA"));   // initials, not the first four letters
     CHECK(!added.keywords.empty());
-    CHECK(!added.builtin);
 
     // And the derived keywords are content words, not the whole description.
     CHECK(std::find(added.keywords.begin(), added.keywords.end(), "tokio")
@@ -128,7 +127,7 @@ TEST(an_expert_without_a_description_is_refused) {
 }
 
 TEST(a_name_that_is_already_taken_is_refused) {
-    Roster roster = Roster::defaults();
+    Roster roster = testing::sample_roster();
     Expert expert;
     expert.name  = "Physics";
     expert.blurb = "a second physics seat";
@@ -151,7 +150,7 @@ TEST(a_name_with_nothing_to_slugify_is_refused) {
 }
 
 TEST(a_colliding_tag_is_broken_rather_than_duplicated) {
-    Roster roster = Roster::defaults();
+    Roster roster = testing::sample_roster();
     Expert expert;
     // "Mathematical Analysis" gives initials "MA", which is free -- so force
     // the collision with a single-word name whose first four letters are MATH.
@@ -170,7 +169,7 @@ TEST(a_colliding_tag_is_broken_rather_than_duplicated) {
 }
 
 TEST(a_built_in_expert_can_be_ejected_like_any_other) {
-    Roster roster = Roster::defaults();
+    Roster roster = testing::sample_roster();
     std::string error;
 
     // The roster is the user's list. Nothing on it is protected.
@@ -185,7 +184,7 @@ TEST(a_built_in_expert_can_be_ejected_like_any_other) {
 }
 
 TEST(a_new_seat_goes_on_the_end_and_the_order_is_the_drawing_order) {
-    Roster roster = Roster::defaults();
+    Roster roster = testing::sample_roster();
     Expert expert;
     expert.name  = "Tax Law";
     expert.blurb = "deductions, filing, corporate structure, capital gains";
@@ -200,7 +199,7 @@ TEST(a_new_seat_goes_on_the_end_and_the_order_is_the_drawing_order) {
 }
 
 TEST(an_out_of_range_seat_reads_as_nobody) {
-    const Roster roster = Roster::defaults();
+    const Roster roster = testing::sample_roster();
     // A handle can go stale between a seat being ejected and a turn in flight
     // noticing. Reading "nobody in particular" is true; reading whoever is at
     // index zero would attribute the work to Mathematics.
@@ -209,7 +208,7 @@ TEST(an_out_of_range_seat_reads_as_nobody) {
 }
 
 TEST(every_seat_can_be_ejected_including_the_last_one) {
-    Roster roster = Roster::defaults();
+    Roster roster = testing::sample_roster();
     std::string error;
     // Someone who ejects every expert meant to. An empty list is a state
     // the UI explains; quietly putting a seat back would be worse.
@@ -222,7 +221,7 @@ TEST(every_seat_can_be_ejected_including_the_last_one) {
 }
 
 TEST(expert_label_falls_back_to_the_id_it_was_given) {
-    const Roster roster = Roster::defaults();
+    const Roster roster = testing::sample_roster();
     CHECK_EQ(expert_label(roster, "physics"), std::string("Physics"));
     // A session recorded against a seat that has since been ejected still has
     // to render. The id is the honest answer.
@@ -306,7 +305,7 @@ TEST(a_reasoning_format_is_asked_where_its_answer_actually_goes) {
 }
 
 TEST(router_labels_name_every_seat_in_roster_order) {
-    const Roster roster = Roster::defaults();
+    const Roster roster = testing::sample_roster();
     const std::vector<std::string> labels = roster.router_labels();
 
     // The two are read in lockstep by ModelRouter: labels[i] is what it scores
@@ -321,7 +320,7 @@ TEST(router_labels_name_every_seat_in_roster_order) {
 TEST(router_labels_carry_no_padding) {
     // A leading or trailing space changes how a label tokenises, which would
     // score it at a position the model was never shown.
-    for (const std::string& label : Roster::defaults().router_labels()) {
+    for (const std::string& label : testing::sample_roster().router_labels()) {
         CHECK(!label.empty());
         CHECK(label.front() != ' ');
         CHECK(label.back() != ' ');
@@ -329,7 +328,7 @@ TEST(router_labels_carry_no_padding) {
 }
 
 TEST(the_delegator_can_only_answer_with_a_seat_that_exists) {
-    const Roster roster = Roster::defaults();
+    const Roster roster = testing::sample_roster();
     const std::vector<std::string> labels = roster.router_labels();
 
     // Unrepresentable, not merely unlikely: the scorer compares exactly these
@@ -345,7 +344,7 @@ TEST(the_delegator_can_only_answer_with_a_seat_that_exists) {
 }
 
 TEST(router_system_prompt_describes_every_expert) {
-    const Roster roster = Roster::defaults();
+    const Roster roster = testing::sample_roster();
     const std::string prompt = roster.router_system_prompt();
     for (const Expert& expert : roster.experts()) {
         CHECK(prompt.find(expert.name) != std::string::npos);
@@ -362,7 +361,7 @@ TEST(router_system_prompt_describes_every_expert) {
 }
 
 TEST(an_added_expert_reaches_the_delegator_without_anything_else_being_edited) {
-    Roster roster = Roster::defaults();
+    Roster roster = testing::sample_roster();
     Expert expert;
     expert.name     = "Tax Law";
     expert.blurb    = "deductions, filing, corporate structure, capital gains";
@@ -386,7 +385,7 @@ TEST(an_added_expert_reaches_the_delegator_without_anything_else_being_edited) {
 }
 
 TEST(an_ejected_expert_leaves_the_delegator_prompt_entirely) {
-    Roster roster = Roster::defaults();
+    Roster roster = testing::sample_roster();
     std::string error;
     CHECK(roster.remove("chemistry", error));
 
@@ -403,6 +402,7 @@ TEST(an_ejected_expert_leaves_the_delegator_prompt_entirely) {
 
 TEST(a_nominated_default_expert_catches_what_does_not_fit) {
     Config config;
+    config.roster = testing::sample_roster();
     config.experts["physics"].model  = "p.gguf";
     config.experts["language"].model = "l.gguf";
 
@@ -426,6 +426,7 @@ TEST(a_nominated_default_expert_catches_what_does_not_fit) {
 
 TEST(a_default_expert_with_no_model_is_not_used) {
     Config config;
+    config.roster = testing::sample_roster();
     config.experts["physics"].model = "p.gguf";
     // Nominated but never filled. Routing to it would turn a working prompt
     // into a "no model configured" failure one layer further down.
@@ -442,7 +443,7 @@ TEST(a_default_expert_with_no_model_is_not_used) {
 }
 
 TEST(every_expert_gets_the_same_number_of_worked_examples) {
-    const Roster roster = Roster::defaults();
+    const Roster roster = testing::sample_roster();
     const std::vector<std::pair<std::string, std::string>> examples = roster.router_examples();
 
     // The same number each, because a seat with more examples than its
@@ -499,7 +500,7 @@ TEST(no_worked_example_is_a_benchmark_prompt) {
         }
     }
 
-    for (const auto& [question, answer] : Roster::defaults().router_examples()) {
+    for (const auto& [question, answer] : testing::sample_roster().router_examples()) {
         const std::set<std::string> example = words(question);
         for (const RouteCase& test : benchmark_cases()) {
             std::vector<std::string> rare;
@@ -551,7 +552,7 @@ TEST(a_seat_with_no_keywords_never_wins_on_score) {
 
     // A seat that gave the keyword scorer nothing to match on scores zero and
     // is never chosen by it -- which is the honest outcome, not a special case.
-    Roster roster = Roster::defaults();
+    Roster roster = testing::sample_roster();
     Expert quiet;
     quiet.name     = "Quiet";
     quiet.blurb    = "a seat with no keywords at all";
@@ -611,6 +612,9 @@ namespace {
 /// that is the seat that plays the part the built-in Fallback used to.
 Config config_with(std::initializer_list<ExpertId> filled) {
     Config config;
+    // A fresh Config carries no experts at all now, so the roster these route
+    // to is the test fixture rather than anything Crucible ships.
+    config.roster = testing::sample_roster();
     for (const ExpertId& seat : filled) {
         config.experts[seat].model = "some-model.gguf";
     }
@@ -709,6 +713,49 @@ TEST(with_nothing_configured_the_route_reports_it) {
     const RouteDecision out =
         apply_route_policy(proposal("chemistry", 0.95F, RouteSource::Model), config);
     CHECK(out.detail.find("no experts have a model") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// The blank slate
+//
+// A fresh install has no experts at all now, so "nothing on the roster" is the
+// state every new user is in for their first few minutes rather than a corner
+// nobody reaches. Everything that reads the roster has to survive it.
+// ---------------------------------------------------------------------------
+
+TEST(a_fresh_config_has_no_experts_at_all) {
+    const Config fresh;
+    CHECK(fresh.roster.empty());
+    CHECK_EQ(fresh.roster.size(), std::size_t{0});
+    CHECK(fresh.configured_experts().empty());
+    // And nothing generated from it pretends otherwise.
+    CHECK(fresh.roster.router_labels().empty());
+    CHECK(fresh.roster.router_examples().empty());
+}
+
+TEST(the_keyword_router_names_nobody_on_an_empty_roster) {
+    KeywordRouter router(std::make_shared<const Roster>(Roster::bare()));
+    const RouteDecision out = router.route("why is the sky blue", {});
+    CHECK(out.expert.empty());
+}
+
+TEST(an_empty_roster_routes_to_nobody_rather_than_failing) {
+    const Config fresh;
+    const RouteDecision out =
+        apply_route_policy(proposal("physics", 0.95F, RouteSource::Model), fresh);
+    // Whatever it says, it must say something and it must not name a seat that
+    // does not exist.
+    CHECK(!out.detail.empty());
+    CHECK(fresh.roster.find(out.expert) == std::nullopt);
+}
+
+TEST(the_delegator_prompt_survives_having_no_experts_to_describe) {
+    const Roster bare = Roster::bare();
+    // Generated rather than stored, so an empty roster must produce an empty or
+    // harmless prompt rather than one describing experts that are not there.
+    const std::string prompt = bare.router_system_prompt();
+    CHECK(prompt.find("Mathematics") == std::string::npos);
+    CHECK(prompt.find("Physics") == std::string::npos);
 }
 
 TEST(an_uncertain_route_with_no_default_is_taken_at_face_value) {

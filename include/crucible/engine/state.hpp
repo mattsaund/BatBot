@@ -208,7 +208,7 @@ private:
     Mood                                 mood_ = Mood::Idle;
     std::string                          status_;
     std::shared_ptr<const Roster>        roster_ =
-        std::make_shared<const Roster>(Roster::defaults());
+        std::make_shared<const Roster>(Roster::bare());
     std::vector<SeatState>               seats_ =
         std::vector<SeatState>(roster_->size());
     std::optional<ExpertId>              resident_;

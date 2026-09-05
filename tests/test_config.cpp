@@ -28,8 +28,10 @@ TEST(experts_inherit_unset_fields_from_defaults) {
         out << R"({
           "defaults": { "n_ctx": 4096, "temperature": 0.25, "n_gpu_layers": 7 },
           "experts": {
-            "physics": { "model": "/tmp/physics.gguf" },
-            "biology": { "model": "/tmp/biology.gguf", "n_ctx": 999 }
+            "physics": { "blurb": "mechanics, relativity, quantum",
+                         "model": "/tmp/physics.gguf" },
+            "biology": { "blurb": "cells, genetics, physiology",
+                         "model": "/tmp/biology.gguf", "n_ctx": 999 }
           }
         })";
     }
@@ -173,6 +175,7 @@ TEST(a_seat_whose_file_is_gone_is_not_shown_as_ready) {
     { std::ofstream out(present); out << "GGUF"; }
 
     Config config;
+    config.roster     = testing::sample_roster();
     config.models_dir = dir.path().string();
     config.experts["physics"].model = "here.gguf";
     config.experts["biology"].model = "gone.gguf";
@@ -201,6 +204,7 @@ TEST(saving_then_loading_round_trips_every_setting) {
     const auto file = dir.path() / "config.json";
 
     Config original;
+    original.roster               = testing::sample_roster();
     original.models_dir           = "/srv/gguf";
     original.system_prompt        = "Be exceptionally terse.";
     original.router.model         = "router-1b.gguf";
@@ -244,7 +248,16 @@ TEST(saving_does_not_write_expert_fields_that_match_defaults) {
     TempDir dir;
     const auto file = dir.path() / "config.json";
 
+    // The roster is empty on a fresh Config -- Crucible ships no experts -- so
+    // the seat this test is about has to be put there first.
     Config config;
+    std::string add_error;
+    Expert physics_seat;
+    physics_seat.id    = "physics";
+    physics_seat.name  = "Physics";
+    physics_seat.blurb = "physics, mechanics, thermodynamics, relativity";
+    CHECK(config.roster.add(std::move(physics_seat), add_error));
+
     config.defaults.n_ctx = 4096;
     config.experts["physics"].model = "p.gguf";
     config.experts["physics"].n_ctx = 4096;  // same as default
@@ -279,12 +292,12 @@ TEST(saving_does_not_write_expert_fields_that_match_defaults) {
     CHECK(!physics->contains("n_ctx"));
     CHECK(!physics->contains("temperature"));
 
-    // A built-in seat that has not been retuned carries no identity either:
-    // nine seats with twenty-four keywords each would be two hundred lines
-    // nobody wrote and nobody wants to read.
-    CHECK(!physics->contains("keywords"));
-    CHECK(!physics->contains("blurb"));
-    CHECK(physics->value("builtin", false));
+    // Identity, on the other hand, is always written. There is no built-in
+    // table to reconstruct a seat from any more, so a config that did not carry
+    // the blurb would load an expert the delegator cannot route to.
+    CHECK(physics->contains("keywords"));
+    CHECK(physics->contains("blurb"));
+    CHECK(physics->contains("name"));
 
     // The defaults block still carries the real values.
     CHECK_EQ(doc.at("defaults").at("n_ctx").get<int>(), 4096);
@@ -322,7 +335,6 @@ TEST(a_user_made_expert_survives_a_round_trip_through_disk) {
     CHECK_EQ(back.examples.size(), std::size_t{2});
     CHECK_EQ(back.examples[0], std::string("why does my future never wake"));
     CHECK(!back.keywords.empty());
-    CHECK(!back.builtin);
     CHECK_EQ(reloaded.expert("rust-async").model, std::string("rust.gguf"));
 
     // And it is a seat like any other by the time the delegator sees it.
@@ -343,9 +355,14 @@ TEST(the_config_shape_the_readme_documents_actually_loads) {
   "router":   { "model": "LFM2-1.2B-Q8_0.gguf" },
   "defaults": { "n_ctx": 8192, "n_gpu_layers": -1, "temperature": 0.7 },
   "experts": [
-    { "id": "mathematics", "builtin": true, "model": "math-expert-q4_k_m.gguf" },
-    { "id": "physics",     "builtin": true, "model": "physics-expert-q4_k_m.gguf" },
-    { "id": "programming", "builtin": true, "model": "/mnt/big/code-expert-q4_k_m.gguf" },
+    { "id": "mathematics",
+      "name": "Mathematics",
+      "blurb": "algebra, calculus, proofs, geometry, statistics, probability",
+      "model": "math-expert-q4_k_m.gguf" },
+    { "id": "physics",
+      "name": "Physics",
+      "blurb": "mechanics, thermodynamics, relativity, quantum, electromagnetism",
+      "model": "physics-expert-q4_k_m.gguf" },
     { "id": "rust-async",
       "name": "Rust Async",
       "tag": "RA",
@@ -368,15 +385,18 @@ TEST(the_config_shape_the_readme_documents_actually_loads) {
     std::vector<std::string> warnings;
     const Config config = load_config(file, warnings);
 
-    CHECK_EQ(config.roster.size(), std::size_t{5});
+    CHECK_EQ(config.roster.size(), std::size_t{4});
     CHECK_EQ(config.routing.default_expert, ExpertId("general"));
     CHECK(config.has_expert("general"));
 
-    // A built-in written as just its id gets its identity back from the table.
+    // A seat that gave only a name and a blurb still gets a tag and keywords:
+    // they are derived on the way in, which is what makes the short form above
+    // a real config rather than a half-written one.
     const std::optional<std::size_t> maths = config.roster.find("mathematics");
     CHECK(maths.has_value());
     if (maths) {
         CHECK_EQ(config.roster.at(*maths).name, std::string("Mathematics"));
+        CHECK(!config.roster.at(*maths).tag.empty());
         CHECK(!config.roster.at(*maths).keywords.empty());
     }
 
@@ -405,6 +425,7 @@ TEST(an_ejected_expert_does_not_come_back_on_the_next_load) {
     const auto file = dir.path() / "config.json";
 
     Config config;
+    config.roster = testing::sample_roster();
     std::string error;
     CHECK(config.roster.remove("chemistry", error));
     config.experts.erase("chemistry");
@@ -413,8 +434,8 @@ TEST(an_ejected_expert_does_not_come_back_on_the_next_load) {
     std::vector<std::string> warnings;
     const Config reloaded = load_config(file, warnings);
 
-    // The built-in table is a set of defaults, not a floor. Quietly restoring a
-    // seat the user ejected would make /ejectexpert a no-op across restarts.
+    // An ejected seat stays ejected. Nothing is ever put back: quietly
+    // restoring one would make /ejectexpert a no-op across restarts.
     CHECK(!reloaded.roster.find("chemistry").has_value());
     CHECK_EQ(reloaded.roster.size(), std::size_t{8});
     CHECK(reloaded.roster.find("physics").has_value());

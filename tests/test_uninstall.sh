@@ -170,6 +170,53 @@ run_uninstall "$ROOT" 'n\nn\nn\n'
 check "binary kept"           "$(exists "$ROOT/bin/crucible")"            "yes"
 check "models kept"           "$(count_models "$ROOT")"                  "2"
 
+echo "  a prompt that cannot be read is not an answer of no"
+# The documented one-liner is `curl ... | bash -s -- --uninstall`, and install.sh
+# delegates to this binary. stdin there is the installer script still being
+# read, so the questions were answered with lines of shell -- every one taken as
+# "no" -- and the command printed "Done." having removed nothing. The exit code
+# was 0, so nothing downstream could tell.
+ROOT="$(setup unreadable_stdin)"
+# Stand in for the curl pipe: text that is not an answer, then end of input.
+head -c 400 "$HERE/../install.sh" | XDG_CONFIG_HOME="$ROOT/cfg" \
+    XDG_DATA_HOME="$ROOT/dat" XDG_CACHE_HOME="$ROOT/cache" \
+    "$ROOT/bin/crucible" --uninstall >/dev/null 2>&1
+check "an unreadable prompt fails rather than reporting success" "$?" "1"
+
+# And with a terminal -- which is what install.sh now hands it -- the same
+# install comes apart completely. This is the one-liner's real path.
+ROOT="$(setup delegated)"
+run_uninstall "$ROOT" 'y\ny\ny\n'
+check "binary removed"        "$(exists "$ROOT/bin/crucible")"            "no"
+check "desktop app removed"   "$(exists "$ROOT/bin/crucible-gui")"        "no"
+check "config removed"        "$(exists "$ROOT/cfg/crucible")"            "no"
+check "data removed"          "$(exists "$ROOT/dat/crucible")"            "no"
+
+echo "  install.sh --uninstall gives the binary a terminal to ask on"
+# The fix is in the delegation, not in the binary: install.sh reads its own
+# questions from /dev/tty for exactly this reason and has to hand the same
+# terminal on.
+# Fixed strings: these are literal lines of shell, and `$?` in a basic regex
+# does not mean what it looks like.
+greps() { grep -qF -- "$1" "$HERE/../install.sh" && echo yes || echo no; }
+check "the delegation redirects stdin from the terminal" \
+      "$(greps '--uninstall < /dev/tty')" "yes"
+check "with no terminal at all it answers yes rather than silently nothing" \
+      "$(greps '"$exe" --uninstall --yes || status=$?')" "yes"
+# A machine with both a system and a user install had the second one left
+# behind, on PATH, pointing at libraries the first pass had just deleted.
+check "every prefix is uninstalled, not just the first" \
+      "$(greps 'handled+=("$p")')" "yes"
+# `[ -r /dev/tty ]` is true on a process with no controlling terminal -- the
+# node is there, and it is the open that fails with ENXIO. Testing readability
+# instead of opening it sent the one-liner down the terminal path with no
+# terminal, and the uninstall removed nothing.
+check "the terminal test opens /dev/tty rather than stat-ing it" \
+      "$(greps '( exec </dev/tty ) 2>/dev/null')" "yes"
+# A delegation that could not finish has settled nothing, so the shell sweep
+# must not read the binary still being there as the user declining.
+check "a failed delegation falls back to the sweep" \
+      "$(greps 'if [ "$status" -eq 0 ]; then')" "yes"
 echo "  a bare install with nothing to remove does not fail"
 ROOT="$SANDBOX/bare"
 mkdir -p "$ROOT/bin" "$ROOT/cfg" "$ROOT/dat"

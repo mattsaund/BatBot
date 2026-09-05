@@ -60,8 +60,9 @@ void App::draw_cook(const Snapshot& snapshot) {
     if (!snapshot.cook) {
         ImGui::Dummy(ImVec2(0, em(1.5F)));
         wrapped(theme::kTextDim,
-                "Nothing is cooking. Give Crucible a goal below and a time to work on "
-                "it, and it will read the project, change it, run it, and keep going.");
+                "Nothing is cooking. Give Crucible a goal below and it will read the "
+                "project, change it, run it, and keep going until the work is done or "
+                "you stop it.");
         return;
     }
     const Cook& cook = *snapshot.cook;
@@ -197,7 +198,8 @@ void App::draw_cook_composer(const Snapshot& snapshot) {
                                           - ImGui::GetStyle().ItemSpacing.x,
                                       em(6.0F));
         const bool entered = grow_input("##cook-answer", "answer the question above",
-                                        prompt_, width, kComposerLines);
+                                        prompt_, width, kComposerLines,
+                                        composer_input_height());
         ImGui::SameLine();
         const bool pressed = ImGui::Button("Answer", ImVec2(-FLT_MIN, 0));
         if (entered || pressed) {
@@ -221,17 +223,20 @@ void App::draw_cook_composer(const Snapshot& snapshot) {
         }
         ImGui::SetItemTooltip("Stops immediately, without the finishing pass.");
     } else {
+        // The goal, and the button that starts it. Nothing else.
+        //
+        // There was a minutes slider and a "No limit" checkbox here, and between
+        // them they asked the user to commit to a number before they knew what
+        // the work was -- while the checkbox that made the number meaningless sat
+        // next to it. A cook now runs until it is finished or stopped, which is
+        // what both of the buttons above are for.
+        const float button = em(4.4F);
+        const float width  = std::max(ImGui::GetContentRegionAvail().x - button
+                                          - ImGui::GetStyle().ItemSpacing.x,
+                                      em(6.0F));
         const bool entered = grow_input("##goal", "what should it work on?",
-                                        cook_goal_, ImGui::GetContentRegionAvail().x,
-                                        kComposerLines);
-
-        ImGui::BeginDisabled(cook_untimed_);
-        ImGui::SetNextItemWidth(em(10.0F));
-        ImGui::SliderInt("##minutes", &cook_minutes_, 1, 180, "%d min");
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        ImGui::Checkbox("No limit", &cook_untimed_);
-        ImGui::SetItemTooltip("Work until you stop it.");
+                                        cook_goal_, width, kComposerLines,
+                                        composer_input_height());
         ImGui::SameLine();
         const bool pressed = ImGui::Button("Cook", ImVec2(-FLT_MIN, 0));
         if (entered || pressed) {

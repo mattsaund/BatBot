@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Crucible
+GenericName=Local AI Workshop
+Comment=Route work to local language models and let them cook on your project
+Exec=@CRUCIBLE_GUI_EXEC@
+Icon=crucible
+Terminal=false
+Categories=Development;IDE;
+Keywords=AI;LLM;GGUF;llama;assistant;chat;offline;
+StartupNotify=true
+# Must match the class the window sets in App::run(), or the desktop treats the
+# running window as a different application from the icon that started it: two
+# entries in the dock, and the launcher stays in its "starting" state.
+StartupWMClass=crucible-gui

@@ -62,119 +62,23 @@ const std::set<std::string>& stop_words() {
     return kStop;
 }
 
-/// The nine that ship.
-///
-/// Their blurbs, examples and keyword sets are measured rather than guessed:
-/// this exact table is what scores 96% on the 54-prompt routing benchmark with
-/// LFM2.5-1.2B. Two examples each, and the same number for every seat so none
-/// is favoured by having more.
-///
-/// Neither example may resemble anything in tools/routebench.cpp, or the
-/// benchmark is measuring how well the prompt was copied into it.
-Expert builtin(const char* id, const char* name, const char* tag, const char* blurb,
-               std::vector<std::string> examples, std::vector<std::string> keywords) {
-    Expert expert;
-    expert.id       = id;
-    expert.name     = name;
-    expert.tag      = tag;
-    expert.blurb    = blurb;
-    expert.examples = std::move(examples);
-    expert.keywords = std::move(keywords);
-    expert.builtin  = true;
-    return expert;
-}
-
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// Defaults
+// Construction
 // ---------------------------------------------------------------------------
-
-Roster Roster::defaults() {
-    Roster roster;
-    roster.experts_ = {
-        builtin("mathematics", "Mathematics", "MATH",
-            "mathematics, algebra, calculus, proofs, geometry, statistics, probability, number theory",
-            {"what is the integral of x squared",
-             "what is the probability of rolling two sixes in a row"},
-            {"integral","derivative","theorem","proof","matrix","algebra","calculus",
-             "equation","polynomial","topology","geometry","probability","modulo",
-             "eigenvalue","factorial","logarithm","prime","vector space","summation",
-             "limit","differential","combinatorics","cardinality","isomorphism"}),
-
-        builtin("programming", "Programming", "PROG",
-            "programming, code, software, algorithms, data structures, debugging, systems, a codebase",
-            {"my python script throws a KeyError",
-             "my docker container exits the moment it starts"},
-            {"code","function","compile","debug","refactor","python","c++","rust",
-             "javascript","algorithm","segfault","repository","git","api","pointer",
-             "recursion","runtime","syntax","framework","typescript","kernel","binary",
-             "linked list","stack trace"}),
-
-        builtin("physics", "Physics", "PHYS",
-            "physics, forces, energy, light, thermodynamics, relativity, quantum, astronomy",
-            {"why do heavy and light objects fall together",
-             "why does a helium balloon rise"},
-            {"quantum","relativity","momentum","thermodynamics","entropy","electromagnetic",
-             "photon","lagrangian","hamiltonian","velocity","acceleration","gravity",
-             "particle","wavelength","voltage","kinetic","newton","tensor field",
-             "spacetime","fermion","boson","optics","friction","orbital mechanics"}),
-
-        builtin("chemistry", "Chemistry", "CHEM",
-            "chemistry, reactions, molecules, bonding, acids, pH, materials, the laboratory",
-            {"what happens when sodium touches water", "why does salt melt ice"},
-            {"molecule","reaction","atom","bond","stoichiometry","titration","catalyst",
-             "organic","ion","ph","enthalpy","reagent","solvent","isotope",
-             "periodic table","valence","oxidation","polymer","acid","alkane","molarity",
-             "chromatography","electrolysis","compound"}),
-
-        builtin("biology", "Biology", "BIO",
-            "biology, cells, DNA, genetics, physiology, medicine, ecology, evolution",
-            {"how do vaccines train the immune system",
-             "how do muscles get oxygen during exercise"},
-            {"cell","dna","protein","enzyme","gene","evolution","organism","mitochondria",
-             "neuron","bacteria","virus","photosynthesis","chromosome","ecosystem",
-             "species","metabolism","antibody","tissue","rna","physiology","genome",
-             "receptor","hormone","allele"}),
-
-        builtin("engineering", "Engineering", "ENG",
-            "engineering, designing or building a physical thing, mechanical electrical and civil design, bolts, beams, loads, circuits, wiring, tolerances, materials, hardware, CAD",
-            {"what preload should this bolted joint have",
-             "how do I stop this bracket from vibrating"},
-            {"circuit","torque","stress","beam","cad","tolerance","bearing","hydraulic",
-             "actuator","load bearing","weld","gear","pcb","transistor","chassis",
-             "structural","machining","alloy","fastener","turbine","thermal design","cnc",
-             "schematic","manufacturing"}),
-
-        builtin("philosophy", "Philosophy", "PHIL",
-            "philosophy, ethics, right and wrong, logic, metaphysics, epistemology, free will, consciousness, knowledge, existence, meaning",
-            {"can someone be blamed for an unavoidable act",
-             "can a machine ever be said to understand anything"},
-            {"ethics","epistemology","metaphysics","ontology","kant","stoic","morality",
-             "consciousness","free will","utilitarian","existential","dialectic",
-             "nietzsche","aristotle","virtue","phenomenology","determinism","socratic",
-             "meaning of life","normative","a priori","solipsism","teleology","nihilism"}),
-
-        builtin("sociology", "Sociology", "SOC",
-            "society, economics, politics, history, psychology, culture, institutions, law, education, inequality, cities, populations, why people or groups behave as they do",
-            {"why did rents rise faster than wages",
-             "what makes a protest movement succeed"},
-            {"society","culture","class","institution","survey","demographic","inequality",
-             "norms","capitalism","policy","election","market","psychology","behaviour",
-             "behavior","community","migration","ethnography","bureaucracy",
-             "socialization","urbanization","gdp","labor","kinship"}),
-
-        builtin("language", "Language", "LANG",
-            "writing, grammar, spelling, punctuation, a sentence, a paragraph, an essay, proofreading, editing, rewriting, tone, style, summarising, translation, a word or its meaning, literature",
-            {"what is the difference between affect and effect",
-             "what is the plural of octopus"},
-            {"grammar","translate","essay","sentence","rhetoric","poem","metaphor",
-             "etymology","syntax rules","proofread","paragraph","literature","novel",
-             "tone","phonetic","vocabulary","idiom","narrative","rewrite","spelling",
-             "linguistic","prose","dialogue","summarize"}),
-    };
-    return roster;
-}
+//
+// Crucible ships no experts.
+//
+// There used to be nine built-in seats here -- Mathematics, Programming,
+// Physics and the rest -- seeded into every fresh config. They are gone, and a
+// new install now starts with an empty roster that the user fills.
+//
+// The reason is that they were never really defaults; they were a guess at what
+// somebody else's machine is for, complete with model assignments nobody had
+// made. A roster the user owns from the first seat is simpler to explain, has
+// no "is this one mine or theirs" state to carry, and cannot present eight
+// unconfigured experts as though they were ready to answer.
 
 Roster Roster::bare() {
     return Roster{};

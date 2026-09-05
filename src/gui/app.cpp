@@ -31,10 +31,12 @@ namespace crucible::gui {
 // Lifetime
 // ---------------------------------------------------------------------------
 
-App::App(Config config, std::vector<std::string> warnings)
+App::App(Config config, std::vector<std::string> warnings,
+         std::filesystem::path start, bool ask_trust)
     : config_(std::move(config)),
-      store_(std::make_unique<SessionStore>(Project::current())),
-      trust_(paths::trust_file()) {
+      store_(std::make_unique<SessionStore>(Project::at(start))),
+      trust_(paths::trust_file()),
+      ask_trust_on_open_(ask_trust) {
     for (std::string& warning : warnings) {
         notices_.push_back(std::move(warning));
     }
@@ -50,7 +52,12 @@ App::App(Config config, std::vector<std::string> warnings)
     });
     engine_->set_journal_dir(store_->project().dir);
 
-    remember_project(store_->project().root);
+    // Not remembered until it is trusted. A directory the launcher happened to
+    // hand over, and that the user is about to decline, has no business in the
+    // recent list -- it would be offered back to them on every later start.
+    if (!ask_trust_on_open_) {
+        remember_project(store_->project().root);
+    }
     browse_      = store_->project().root;
     browse_text_ = browse_.string();
     refresh_models();
@@ -206,8 +213,9 @@ void App::begin_cook() {
     follow_ = true;
     view_   = View::Cook;
     expanded_.clear();
-    engine_->start_cook(goal, cook_untimed_ ? 0 : cook_minutes_ * 60,
-                        store_->project().root);
+    // No budget. A cook runs until it finishes or until one of the two Stop
+    // buttons is pressed; the minutes slider that used to set this is gone.
+    engine_->start_cook(goal, 0, store_->project().root);
 }
 
 // ---------------------------------------------------------------------------
@@ -231,32 +239,83 @@ float App::composer_wanted_height(const Snapshot& snapshot) {
     const std::shared_ptr<const Cook> cook = snapshot.cook;
     const bool asking = cook && cook->state == CookState::Asking;
 
-    if (view_ == View::Chat) {
-        return pad + grow_input_height(prompt_, beside, kComposerLines);
-    }
-    if (asking) {
+    if (view_ == View::Chat || asking) {
         return pad + grow_input_height(prompt_, beside, kComposerLines);
     }
     if (engine_->cooking()) {
-        return pad + frame;
+        return pad + frame;   // just the two stop buttons
     }
-    // The goal box, then the row with the budget and the Cook button.
-    return pad + grow_input_height(cook_goal_, inner, kComposerLines)
-         + style.ItemSpacing.y + frame;
+    // The goal box with the Cook button beside it -- one row, the same shape as
+    // the chat bar. It used to be two, with a minutes slider and a checkbox on
+    // the second; reserving room for that row after it was removed left an
+    // empty strip under the box.
+    return pad + grow_input_height(cook_goal_, beside, kComposerLines);
 }
 
 /// The composer's height, kept to something the window can actually spare.
 ///
-/// A box grown to its full height in a short window would leave the pane above
-/// it nothing, so the transcript you are typing into would disappear as you
-/// typed. Half the window is the most the composer may take.
+/// Two sources, in order. A height the user has dragged the splitter to wins,
+/// because they said so. Otherwise it is measured from what has been typed, as
+/// it always was.
+///
+/// Either way it is capped: a box grown to its full height in a short window
+/// would leave the pane above it nothing, so the transcript you are typing into
+/// would disappear as you typed. A measured box may take half the window; one
+/// dragged by hand may take four fifths, since at that point it is a deliberate
+/// choice rather than a side effect of a long paste.
 float App::composer_height(const Snapshot& snapshot) {
     const float wanted = composer_wanted_height(snapshot);
     if (wanted <= 0.0F) {
-        return 0.0F;
+        return 0.0F;   // this view has no composer
     }
     const float room = ImGui::GetContentRegionAvail().y;
-    return room > 0.0F ? std::min(wanted, room * 0.5F) : wanted;
+    if (room <= 0.0F) {
+        return wanted;
+    }
+    if (composer_height_ > 0.0F) {
+        const float floor_at = ImGui::GetFrameHeight()
+                             + ImGui::GetStyle().WindowPadding.y * 2.0F;
+        return std::clamp(composer_height_, floor_at, room * 0.8F);
+    }
+    return std::min(wanted, room * 0.5F);
+}
+
+float App::composer_input_height() const {
+    return composer_input_height_;
+}
+
+/// The grab bar between the transcript and the composer.
+///
+/// The sidebar's splitter turned sideways, and deliberately the same thing to
+/// use: hover it, hold it, move the mouse. Dragging up makes the box taller,
+/// which is the direction that matches the edge being moved.
+void App::draw_composer_splitter() {
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, theme::to_vec(theme::kFlame));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, theme::to_vec(theme::kFlameBright));
+    ImGui::Button("##composer-splitter", ImVec2(-FLT_MIN, em(0.35F)));
+    ImGui::PopStyleColor(3);
+
+    if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+    }
+    ImGui::SetItemTooltip("Drag to resize the box you type in");
+
+    if (ImGui::IsItemActive()) {
+        // Seeded from whatever the box is right now, so the first pixel of drag
+        // moves the edge that is on screen rather than jumping to some
+        // remembered height from earlier in the session.
+        if (composer_height_ <= 0.0F) {
+            composer_height_ = composer_drawn_height_;
+        }
+        composer_height_ -= ImGui::GetIO().MouseDelta.y;
+        // Kept explicit and at least one row tall. Letting it fall through zero
+        // would hand the composer back to its measured height mid-drag, which
+        // reads as the box snapping away from the mouse.
+        composer_height_ = std::max(composer_height_,
+                                    ImGui::GetFrameHeight()
+                                        + ImGui::GetStyle().WindowPadding.y * 2.0F);
+    }
 }
 
 void App::open_browse(BrowseFor what, const std::filesystem::path& start) {
@@ -280,7 +339,18 @@ void App::open_browse(BrowseFor what, const std::filesystem::path& start) {
 void App::draw() {
     const Snapshot snapshot = state_.snapshot();
 
-    if (sidebar_width_ <= 0.0F) {
+    // The folder-trust question, when there was no terminal to ask it on before
+    // the window opened. Raised here rather than in the constructor because it
+    // is drawn as a modal, and there is no frame to draw into until now.
+    if (ask_trust_on_open_) {
+        ask_trust_on_open_ = false;
+        pending_trust_     = store_->project().root;
+    }
+
+    // Negative means "never sized", not "closed". Zero is a width the user can
+    // now reach by dragging the splitter to the edge, and testing for <= 0 here
+    // would spring the sidebar back open on the very next frame.
+    if (sidebar_width_ < 0.0F) {
         sidebar_width_ = em(17.0F);
     }
 
@@ -301,7 +371,15 @@ void App::draw() {
     ImGui::BeginChild("main", ImVec2(0, 0));
     {
         const float composer = composer_height(snapshot);
-        ImGui::BeginChild("pane", ImVec2(0, -composer), ImGuiChildFlags_Borders);
+        const bool  has_composer = composer > 0.0F;
+        // The splitter sits between the two, so the pane has to give up its
+        // height as well as the composer's.
+        const float bar = has_composer ? em(0.35F) + ImGui::GetStyle().ItemSpacing.y
+                                       : 0.0F;
+        composer_drawn_height_ = composer;
+
+        ImGui::BeginChild("pane", ImVec2(0, -(composer + bar)),
+                          ImGuiChildFlags_Borders);
         switch (view_) {
             case View::Chat:     draw_chat(snapshot); break;
             case View::Cook:     draw_cook(snapshot); break;
@@ -317,6 +395,20 @@ void App::draw() {
             ImGui::SetScrollHereY(1.0F);
         }
         ImGui::EndChild();
+
+        if (has_composer) {
+            draw_composer_splitter();
+        }
+
+        // The box fills a height the user chose, and sizes itself to the text
+        // otherwise. Worked out here, where the composer's final height is
+        // known, rather than inside each composer where it is not.
+        composer_input_height_ = 0.0F;
+        if (has_composer && composer_height_ > 0.0F) {
+            const ImGuiStyle& style = ImGui::GetStyle();
+            composer_input_height_ =
+                std::max(composer - style.WindowPadding.y * 2.0F, 0.0F);
+        }
 
         if (view_ == View::Chat) {
             draw_chat_composer(snapshot);
@@ -353,6 +445,22 @@ int App::run() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+
+    // The name the desktop identifies this window by, and it has to match
+    // StartupWMClass in packaging/crucible.desktop.in. Without it the running
+    // window is a different application from the icon that launched it: the
+    // dock shows two entries, one of them generic, and the launcher never
+    // stops looking like it is still starting up.
+    //
+    // Guarded because the hints arrived in different GLFW releases and the
+    // system's GLFW is preferred over the vendored one where there is one.
+#ifdef GLFW_X11_CLASS_NAME
+    glfwWindowHintString(GLFW_X11_CLASS_NAME, "crucible-gui");
+    glfwWindowHintString(GLFW_X11_INSTANCE_NAME, "crucible-gui");
+#endif
+#ifdef GLFW_WAYLAND_APP_ID
+    glfwWindowHintString(GLFW_WAYLAND_APP_ID, "crucible-gui");
+#endif
 
     // Sized against the monitor rather than in fixed pixels: 1280x820 is a
     // reasonable window on a 1080p panel and a postage stamp on a 4K one.
@@ -405,6 +513,7 @@ int App::run() {
 
         persist_session();
         absorb_written_examples();
+        take_runtime_activation();
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();

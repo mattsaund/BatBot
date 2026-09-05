@@ -52,17 +52,53 @@ std::uintmax_t directory_size(const std::filesystem::path& dir) {
     return total;
 }
 
-bool ask(const std::string& question, bool default_yes) {
-    std::cout << "  " << question << (default_yes ? " [Y/n] " : " [y/N] ") << std::flush;
-    std::string answer;
-    if (!std::getline(std::cin, answer)) {
+/// The three questions.
+///
+/// A question that cannot be read is not an answer of "no". Treating it as one
+/// is how `curl ... | bash -s -- --uninstall` came to print "Done." having
+/// removed nothing: stdin there is the installer script still being read, so
+/// the first question swallowed a line of shell and every one after it hit end
+/// of input -- and each was recorded as the user declining. install.sh now
+/// hands the binary the terminal, and an input that gives out anyway is
+/// reported rather than quietly deciding to keep everything.
+struct Prompter {
+    bool assume_yes   = false;
+    bool unanswerable = false;
+
+    bool ask(const std::string& question, bool default_yes) {
+        if (assume_yes) {
+            return true;
+        }
+        if (unanswerable) {
+            return false;
+        }
+        // Anything that is not yes, no, or the default is not an answer, and it
+        // is asked again rather than filed as "no". A typed mistake costs a
+        // re-prompt; a stdin that is not answers at all -- the installer script
+        // arriving down the curl pipe -- runs out of tries and is reported.
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            std::cout << "  " << question << (default_yes ? " [Y/n] " : " [y/N] ")
+                      << std::flush;
+            std::string answer;
+            if (!std::getline(std::cin, answer)) {
+                break;
+            }
+            if (answer.empty()) {
+                return default_yes;
+            }
+            if (answer == "y" || answer == "Y" || answer == "yes" || answer == "Yes") {
+                return true;
+            }
+            if (answer == "n" || answer == "N" || answer == "no" || answer == "No") {
+                return false;
+            }
+            std::cout << "  please answer y or n.\n";
+        }
+        unanswerable = true;
+        std::cout << "\n";
         return false;
     }
-    if (answer.empty()) {
-        return default_yes;
-    }
-    return answer == "y" || answer == "Y" || answer == "yes" || answer == "Yes";
-}
+};
 
 bool remove_path(const std::filesystem::path& target) {
     std::error_code ec;
@@ -146,6 +182,29 @@ std::vector<std::filesystem::path> companion_libraries(const std::filesystem::pa
     return found;
 }
 
+/// The desktop entry and its icon.
+///
+/// Installed beside the binaries on Linux so crucible-gui appears in the
+/// application menu, which means uninstall has to take them too. A .desktop
+/// file left behind is worse than ordinary litter: the menu keeps offering
+/// Crucible, and clicking it does nothing.
+std::vector<std::filesystem::path> desktop_files(const std::filesystem::path& binary) {
+    std::vector<std::filesystem::path> found;
+    if (binary.empty()) {
+        return found;
+    }
+    const std::filesystem::path share = binary.parent_path().parent_path() / "share";
+    for (const std::filesystem::path& candidate :
+         {share / "applications" / "crucible.desktop",
+          share / "icons" / "hicolor" / "scalable" / "apps" / "crucible.svg"}) {
+        std::error_code ec;
+        if (std::filesystem::exists(candidate, ec)) {
+            found.push_back(candidate);
+        }
+    }
+    return found;
+}
+
 /// <prefix>/lib/crucible -- llama.cpp's shared libraries and the runtimes that
 /// shipped with the install. The binary alone is not the whole program any
 /// more, so removing it without these would leave most of the bytes behind.
@@ -160,6 +219,7 @@ std::filesystem::path library_dir(const std::filesystem::path& binary) {
 }  // namespace
 
 int run_uninstall(bool assume_yes) {
+    Prompter prompt{assume_yes, false};
     const std::filesystem::path binary  = own_path();
     const std::filesystem::path config  = paths::config_dir();
     const std::filesystem::path data    = paths::data_dir();
@@ -168,6 +228,7 @@ int run_uninstall(bool assume_yes) {
     const std::filesystem::path cache   = cache_dir();
     const std::vector<std::filesystem::path> programs  = companion_programs(binary);
     const std::vector<std::filesystem::path> beside    = companion_libraries(binary);
+    const std::vector<std::filesystem::path> desktop   = desktop_files(binary);
 
     std::cout << "\n  Uninstalling Crucible\n\n";
 
@@ -182,6 +243,9 @@ int run_uninstall(bool assume_yes) {
     }
     for (const std::filesystem::path& lib : beside) {
         std::cout << "  library  " << lib.string() << "\n";
+    }
+    for (const std::filesystem::path& entry : desktop) {
+        std::cout << "  desktop  " << entry.string() << "\n";
     }
     if (!libs.empty()) {
         std::cout << "  runtime  " << libs.string() << "  ("
@@ -207,7 +271,7 @@ int run_uninstall(bool assume_yes) {
     bool removed_binary = false;
     bool dropped_programs = false;
     if (!binary.empty() && std::filesystem::exists(binary)) {
-        if (assume_yes || ask("Remove crucible, crucible-gui and their libraries?", true)) {
+        if (prompt.ask("Remove crucible, crucible-gui and their libraries?", true)) {
             dropped_programs = true;
             // Unlinking a running executable is fine on Linux: the kernel keeps
             // the inode alive until this process exits.
@@ -228,6 +292,11 @@ int run_uninstall(bool assume_yes) {
                     std::cout << "  removed " << lib.string() << "\n";
                 }
             }
+            for (const std::filesystem::path& entry : desktop) {
+                if (remove_path(entry)) {
+                    std::cout << "  removed " << entry.string() << "\n";
+                }
+            }
             if (!libs.empty() && remove_path(libs)) {
                 std::cout << "  removed " << libs.string() << "\n";
             }
@@ -240,7 +309,7 @@ int run_uninstall(bool assume_yes) {
     // --- configuration -----------------------------------------------------
     bool dropped_config = false;
     if (std::filesystem::exists(config)) {
-        if (assume_yes || ask("Remove your configuration and folder-trust list?", true)) {
+        if (prompt.ask("Remove your configuration and folder-trust list?", true)) {
             dropped_config = true;
             if (remove_path(config)) {
                 std::cout << "  removed " << config.string() << "\n";
@@ -264,7 +333,7 @@ int run_uninstall(bool assume_yes) {
         }
         // This is also where the GPU runtimes the user built live, along with
         // the llama.cpp source they were built from and the project history.
-        if (assume_yes || ask("Remove the models, runtimes, history and logs too?", true)) {
+        if (prompt.ask("Remove the models, runtimes, history and logs too?", true)) {
             dropped_data = true;
             if (remove_path(data)) {
                 std::cout << "  removed " << data.string() << "\n";
@@ -296,6 +365,9 @@ int run_uninstall(bool assume_yes) {
         for (const std::filesystem::path& lib : beside) {
             survived(lib);
         }
+        for (const std::filesystem::path& entry : desktop) {
+            survived(entry);
+        }
         survived(libs);
         survived(cache);
     }
@@ -304,6 +376,16 @@ int run_uninstall(bool assume_yes) {
     }
     if (dropped_data) {
         survived(data);
+    }
+
+    // A prompt that gave out is not a clean run, whatever is or is not left on
+    // disk. Saying so -- and failing -- is the only way the caller can tell this
+    // apart from a user who genuinely answered no to everything.
+    if (prompt.unanswerable) {
+        std::cout << "\n  There was no answer to read, so nothing further was removed.\n"
+                     "  Run this from a terminal, or pass -y to answer yes to"
+                     " everything.\n\n";
+        return 1;
     }
 
     if (!left.empty()) {

@@ -41,7 +41,11 @@ namespace crucible::gui {
 
 class App {
 public:
-    App(Config config, std::vector<std::string> warnings);
+    /// `start` is the project to open, and `ask_trust` says the window has to
+    /// put the folder-trust question up itself because there was no terminal to
+    /// ask it on.
+    App(Config config, std::vector<std::string> warnings,
+        std::filesystem::path start, bool ask_trust);
     ~App();
     App(const App&)            = delete;
     App& operator=(const App&) = delete;
@@ -68,6 +72,19 @@ private:
     void draw();
     void draw_sidebar(const Snapshot& snapshot);
     void draw_splitter();
+
+    /// The horizontal grab bar between the transcript and the composer, so the
+    /// box you type in can be sized like the sidebar rather than only ever
+    /// being as tall as what is already in it.
+    void draw_composer_splitter();
+
+    /// The sidebar's widths. Collapsed is a width below `sidebar_collapse_at`,
+    /// not a separate mode; between there and `sidebar_min_width` it is drawn
+    /// at the minimum, which is the gap that stops it flickering shut.
+    bool  sidebar_collapsed() const;
+    float sidebar_drawn_width() const;
+    float sidebar_min_width() const;
+    float sidebar_collapse_at() const;
     void draw_chat(const Snapshot& snapshot);
     void draw_cook(const Snapshot& snapshot);
     void draw_expert_list();
@@ -81,6 +98,18 @@ private:
     void draw_settings_hardware();
     void draw_settings_runtimes();
 
+    /// Notice a runtime that has just finished building, once.
+    ///
+    /// The builder registers what it made with ggml before it reports Done, so
+    /// the backend is live -- but every model already loaded picked its devices
+    /// when it loaded and is still on them. Reloading is what makes a GPU
+    /// installed from this screen take effect without restarting the window.
+    ///
+    /// Polled from the frame loop rather than from the Runtimes page, because a
+    /// build takes minutes and the user is expected to go and watch something
+    /// else while it runs.
+    void take_runtime_activation();
+
     /// The bar under each of the two working views. Chat has a prompt box and
     /// nothing else; Cook has the goal, the budget and the buttons that start
     /// and stop it. They are separate because the two are separate actions and
@@ -93,6 +122,21 @@ private:
     /// typed into them.
     float composer_wanted_height(const Snapshot& snapshot);
     float composer_height(const Snapshot& snapshot);
+
+    /// The height to give the text box inside the composer, or 0 to let it size
+    /// itself to what is typed. Non-zero exactly when the user has dragged the
+    /// composer to a height of their own, which the box then has to fill --
+    /// otherwise dragging it taller would just add empty space under a box that
+    /// stayed one line high.
+    float composer_input_height() const;
+
+    /// Set while the composer splitter is being dragged, so the height it is
+    /// being dragged to survives the frame that computes it.
+    float composer_input_height_ = 0.0F;
+
+    /// What the composer was actually drawn at last frame, which is where a
+    /// drag starts from.
+    float composer_drawn_height_ = 0.0F;
 
     void draw_new_expert_modal();
     void draw_browse_modal();
@@ -148,14 +192,17 @@ private:
 
     std::string prompt_;
     std::string cook_goal_;
-    int         cook_minutes_ = 30;
-    bool        cook_untimed_ = false;
 
-    /// Width of the left column in pixels, dragged by the splitter, and whether
-    /// it is showing at all. Both are per-session: they are how the window is
-    /// arranged right now, not a preference worth writing to the config file.
-    float sidebar_width_ = 0.0F;   ///< 0 until the first frame sizes it
-    bool  sidebar_open_  = true;
+    /// Width of the left column in pixels, dragged by the splitter. Per-session:
+    /// it is how the window is arranged right now, not a preference worth
+    /// writing to the config file. Below `sidebar_collapse_at()` the sidebar is
+    /// closed, which is why there is no separate "is it open" flag.
+    float sidebar_width_ = -1.0F;  ///< negative until the first frame sizes it
+
+    /// Height the user has dragged the composer to, or 0 for "as tall as what
+    /// is typed in it". Same idea as the sidebar width and kept for the same
+    /// reason: an arrangement of this window, not a setting.
+    float composer_height_ = 0.0F;
 
     /// Set when the transcript should jump to the bottom on the next frame.
     ///
@@ -186,6 +233,11 @@ private:
     /// A directory waiting on the trust question, and the answer to it.
     std::optional<std::filesystem::path> pending_trust_;
 
+    /// Set when the startup directory has not been trusted yet, so the question
+    /// goes up on the first frame -- there was no terminal to ask it on before
+    /// the window existed. Cleared once asked.
+    bool ask_trust_on_open_ = false;
+
     /// The runtime manager's state. Scanned on first sight of the page rather
     /// than at startup: it touches the filesystem, and most sessions never open
     /// it. The builder outlives a page switch on purpose -- a CUDA build takes
@@ -194,6 +246,10 @@ private:
     std::vector<RuntimeStatus> runtimes_;
     std::string                runtime_error_;
     bool                       runtimes_scanned_ = false;
+
+    /// One-shot latch for the above: Done stays Done until it is dismissed, and
+    /// reloading every model on each of those frames would be a loop.
+    bool                       runtime_activated_ = false;
 
     std::vector<ModelFile>   models_;   ///< the models directory, rescanned on demand
     std::vector<std::string> notices_;

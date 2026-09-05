@@ -102,7 +102,8 @@ void App::draw_chat_composer(const Snapshot& snapshot) {
     const float width  = std::max(ImGui::GetContentRegionAvail().x - button
                                       - ImGui::GetStyle().ItemSpacing.x,
                                   em(6.0F));
-    const bool entered = grow_input("##prompt", hint, prompt_, width, kComposerLines);
+    const bool entered = grow_input("##prompt", hint, prompt_, width, kComposerLines,
+                                    composer_input_height());
     ImGui::SameLine();
     const bool send = ImGui::Button(asking ? "Answer" : "Send", ImVec2(-FLT_MIN, 0));
     if (entered || send) {

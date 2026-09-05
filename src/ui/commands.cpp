@@ -299,10 +299,7 @@ bool App::handle_command(const std::string& text) {
         settings_.set_config(std::move(edited));
         save_settings(/*announce=*/false);
 
-        say(seat.name + " has left the experts"
-            + (seat.builtin ? " -- it was one of the built-in nine; re-add it with "
-                              "/newexpert"
-                            : ""));
+        say(seat.name + " has left the experts");
         return true;
     }
 

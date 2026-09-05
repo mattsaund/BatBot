@@ -65,13 +65,18 @@ float grow_input_height(const std::string& text, float width, int max_lines) {
 }
 
 bool grow_input(const char* id, const char* hint, std::string& text,
-                float width, int max_lines) {
+                float width, int max_lines, float height) {
     const ImGuiStyle& style  = ImGui::GetStyle();
     const ImVec2      origin = ImGui::GetCursorScreenPos();
-    const float       height = grow_input_height(text, width, max_lines);
+    // A height the caller asked for wins over the measured one. One line is the
+    // floor either way: a box shorter than its own caret cannot be typed in.
+    const float tall = height > 0.0F
+                           ? std::max(height, ImGui::GetTextLineHeight()
+                                                  + style.FramePadding.y * 2.0F)
+                           : grow_input_height(text, width, max_lines);
 
     const bool submitted = ImGui::InputTextMultiline(
-        id, &text, ImVec2(width, height),
+        id, &text, ImVec2(width, tall),
         ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CtrlEnterForNewLine);
 
     // InputTextMultiline has no WithHint form, so the placeholder is painted

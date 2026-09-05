@@ -127,6 +127,105 @@ PKG=apt RUNTIME=cpu resolve_packages
 check_eq  "resolve_packages succeeds for a CPU install" "$?" "0"
 
 # --------------------------------------------------------------------------
+# The application-menu entry
+#
+# A GUI that is only on PATH is not installed as far as a desktop is concerned.
+# --------------------------------------------------------------------------
+echo
+echo "  the desktop entry"
+
+check     "a .desktop file is installed with the GUI" \
+          grep -q 'crucible.desktop' "$HERE/../CMakeLists.txt"
+check     "and an icon for it" \
+          grep -q 'icons/hicolor/scalable/apps' "$HERE/../CMakeLists.txt"
+# Both go in the same component, or `--install --component crucible` skips them
+# and the uninstaller's manifest never mentions them.
+check     "both are in the crucible component" \
+          test "$(grep -c 'COMPONENT ${CRUCIBLE_INSTALL_COMPONENT}' "$HERE/../CMakeLists.txt")" -ge 5
+# ~/.local/bin is on PATH for a login shell and very often not for a launcher,
+# so a bare Exec=crucible-gui is an icon that does nothing when clicked.
+check     "Exec is an absolute path, not a bare name" \
+          grep -q 'CMAKE_INSTALL_FULL_BINDIR' "$HERE/../CMakeLists.txt"
+check     "the entry names the icon" \
+          grep -q '^Icon=crucible$' "$HERE/../packaging/crucible.desktop.in"
+# Must match the class the window actually sets, or the dock shows the running
+# window as a second, generic application.
+check     "StartupWMClass matches the window class the app sets" \
+          grep -q '^StartupWMClass=crucible-gui$' "$HERE/../packaging/crucible.desktop.in"
+check     "and the app really sets that class" \
+          grep -q 'GLFW_X11_CLASS_NAME, "crucible-gui"' "$HERE/../src/gui/app.cpp"
+# Uninstall has to take them, or the menu keeps offering a Crucible that is gone.
+check     "the uninstaller removes the desktop entry" \
+          grep -q 'crucible.desktop' "$HERE/../src/app/uninstall.cpp"
+check     "and install.sh sweeps it too" \
+          grep -q 'share/applications/crucible.desktop' "$HERE/../install.sh"
+
+# --------------------------------------------------------------------------
+# pkg_available
+#
+# This is the check that decides whether the desktop app gets built, so getting
+# it wrong costs the whole GUI silently.
+#
+# It used to be `apt-cache policy "$1" | grep -q ...`. grep -q exits at the
+# first match, apt-cache gets a SIGPIPE, and under the `set -o pipefail` this
+# script runs with, the pipeline reports 141. Every package on every apt system
+# therefore looked unavailable, the desktop app was skipped with "no
+# OpenGL/GLFW development packages here", and the install carried on as if that
+# were a fact about the machine. These run under pipefail on purpose.
+# --------------------------------------------------------------------------
+echo
+echo "  pkg_available"
+
+if command -v apt-cache >/dev/null 2>&1; then
+    set -o pipefail
+    # A package that certainly exists wherever apt does. Not a GUI package:
+    # this is about the mechanism, not about any one distribution's naming.
+    PKG=apt
+    check     "an installable package is reported available under pipefail" \
+              pkg_available bash
+    check_not "a package that does not exist is reported unavailable" \
+              pkg_available crucible-no-such-package-exists
+    # The failure mode was that *every* name came back false, so a check that
+    # only ever asked about one name would have passed throughout.
+    real_available=1
+    for _p in bash coreutils grep sed; do
+        pkg_available "$_p" || real_available=0
+    done
+    check_eq  "several installable packages in a row all report available" \
+              "$real_available" "1"
+    set +o pipefail
+else
+    echo "    (skipped: no apt-cache on this machine)"
+fi
+
+# --------------------------------------------------------------------------
+# verify_gui_prerequisites
+#
+# The desktop app is decided by looking for the headers the build actually
+# needs, not by trusting a package manager's exit code.
+# --------------------------------------------------------------------------
+echo
+echo "  verify_gui_prerequisites"
+
+WITH_GUI=0
+verify_gui_prerequisites
+check_eq  "--no-gui is never overridden into a GUI build" "$WITH_GUI" "0"
+
+if [ "$(uname -s)" != "Darwin" ]; then
+    if have_header GL/gl.h && { have_header GLFW/glfw3.h || have_header X11/Xlib.h; }; then
+        WITH_GUI=1
+        verify_gui_prerequisites
+        check_eq  "a machine with the headers keeps the desktop app" "$WITH_GUI" "1"
+    else
+        WITH_GUI=1
+        verify_gui_prerequisites
+        check_eq  "a machine without the headers steps down to the terminal app" \
+                  "$WITH_GUI" "0"
+    fi
+fi
+WITH_GUI=1
+
+# --------------------------------------------------------------------------
 # Build directory
 #
 # Loadable runtimes are shared libraries, which need symlinks. A checkout on
@@ -445,9 +544,29 @@ check     "the GUI's packages are behind the flag" \
 # This is what makes the new default safe: a machine with no window library
 # gets the terminal program and a warning, not a failed install.
 check     "a missing window library falls back to the terminal app" \
-          grep -q 'building the terminal app only' "$HERE/../install.sh"
+          grep -q 'building the terminal program only' "$HERE/../install.sh"
 check     "the fallback leaves WITH_GUI off, so the summary tells the truth" \
           grep -q 'WITH_GUI=0$' "$HERE/../install.sh"
+
+# The desktop app was being dropped whenever any one of its seven package names
+# was not installable, so a single renamed or retired package cost the whole
+# GUI. The set is filtered to what the release carries and the decision is made
+# from the headers instead.
+check     "one unavailable package no longer cancels the desktop app" \
+          grep -q 'gui_have+=(' "$HERE/../install.sh"
+check     "the decision is made by looking for the headers" \
+          grep -q 'have_header GL/gl.h' "$HERE/../install.sh"
+# find_package(OpenGL REQUIRED) and a GLFW that is compiled from source when the
+# system has none: those are the two things the build genuinely needs.
+check     "GLFW's own headers count, so a system GLFW is enough" \
+          grep -q 'have_header GLFW/glfw3.h' "$HERE/../install.sh"
+check     "the header check runs even under --no-deps" \
+          grep -q '^    verify_gui_prerequisites$' "$HERE/../install.sh"
+# The summary used to print a path to crucible-gui whether or not it was there.
+check     "the install verifies the desktop binary actually landed" \
+          grep -qF '[ ! -x "$PREFIX/bin/crucible-gui" ]' "$HERE/../install.sh"
+check     "and says so when the desktop app was not installed" \
+          grep -q "desktop  : %snot installed" "$HERE/../install.sh"
 
 # Windows: switches default to false, so the opt-out is the switch and the
 # build flag has to be derived from it rather than read directly.

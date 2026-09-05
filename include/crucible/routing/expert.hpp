@@ -59,12 +59,6 @@ struct Expert {
     /// Whole words that mark this expert's territory, for the model-free
     /// router. Derived from the name and the blurb for a user-made expert.
     std::vector<std::string> keywords;
-
-    /// Shipped with Crucible rather than made by the user.
-    ///
-    /// Only affects what `/ejectexpert` warns about and what a reset restores;
-    /// a built-in expert is otherwise an ordinary row and can be removed.
-    bool builtin = false;
 };
 
 /// The live roster, in the order the seats are drawn.
@@ -74,23 +68,12 @@ struct Expert {
 /// describing eight experts while the label set offers nine.
 class Roster {
 public:
-    /// The nine that ship.
+    /// A roster with nothing on it.
     ///
-    /// Their blurbs, examples and keyword sets are measured rather than
-    /// guessed: this exact table is what scores 96% on the routing benchmark,
-    /// and it is the reference a user-made expert is trying to look like.
-    ///
-    /// There is no catch-all among them. There used to be a tenth seat called
-    /// Fallback that the delegator was never allowed to choose and the engine
-    /// sent work to when nothing else fit. It is gone: with a roster the user
-    /// owns, a general-purpose expert is something they can add and name
-    /// themselves, and `RoutingConfig::default_expert` says which seat plays
-    /// that part. One less special case in the type, one more thing the user
-    /// decides.
-    static Roster defaults();
-
-    /// A roster with nothing on it. What a config with an explicit empty expert
-    /// list loads as, and a state the UI explains rather than crashing on.
+    /// What every fresh install starts as, and what a config with an explicit
+    /// empty expert list loads as. Crucible ships no experts: the seats are the
+    /// user's from the first one, so there is no built-in set to restore and no
+    /// "is this mine or theirs" state to carry around.
     static Roster bare();
 
     std::size_t size() const { return experts_.size(); }

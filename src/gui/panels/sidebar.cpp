@@ -17,26 +17,19 @@
 namespace crucible::gui {
 
 void App::draw_sidebar(const Snapshot& snapshot) {
-    if (!sidebar_open_) {
-        // Collapsed: a strip wide enough for the mark and the button that
-        // brings it back. Hiding it entirely would leave nothing to click.
-        // Wide enough for the button's own label plus its frame padding. At
-        // em(2.8) the arrow was clipped to an empty box, which is a button
-        // nobody would think to press.
-        ImGui::BeginChild("rail", ImVec2(em(3.6F), 0), ImGuiChildFlags_Borders);
-        const ImVec2 origin = ImGui::GetCursorScreenPos();
-        theme::draw_flame(ImGui::GetWindowDrawList(),
-                          ImVec2(origin.x + em(1.0F), origin.y + em(0.9F)), em(0.8F));
-        ImGui::Dummy(ImVec2(0, em(2.2F)));
-        if (ImGui::Button(">", ImVec2(-FLT_MIN, 0))) {
-            sidebar_open_ = true;
-        }
-        ImGui::SetItemTooltip("Show the sidebar");
-        ImGui::EndChild();
+    // Collapsed is a width, not a mode.
+    //
+    // There used to be a Hide button in the footer and a narrow rail with an
+    // arrow to bring it back -- two controls, in two different places, for one
+    // property the splitter already owns. Now dragging the splitter to the left
+    // edge closes it and dragging that edge back out opens it, which is the
+    // gesture every editor uses and needs no button at all.
+    if (sidebar_collapsed()) {
         return;
     }
 
-    ImGui::BeginChild("sidebar", ImVec2(sidebar_width_, 0), ImGuiChildFlags_Borders);
+    ImGui::BeginChild("sidebar", ImVec2(sidebar_drawn_width(), 0),
+                      ImGuiChildFlags_Borders);
 
     // --- the mark ---------------------------------------------------------
     {
@@ -168,38 +161,97 @@ void App::draw_sidebar(const Snapshot& snapshot) {
     text_coloured(theme::kTextFaint, "%s in / %s out",
                   format_tokens(usage.input_tokens).c_str(),
                   format_tokens(usage.output_tokens).c_str());
-    if (ImGui::Button("<< Hide", ImVec2(-FLT_MIN, 0))) {
-        sidebar_open_ = false;
-    }
 
     ImGui::EndChild();
 }
 
+// ---------------------------------------------------------------------------
+// The splitter, and the collapse it owns
+// ---------------------------------------------------------------------------
+//
+// `sidebar_width_` is what the user has dragged to, which is not always what
+// gets drawn. Below sidebar_collapse_at() the sidebar is closed; between there
+// and sidebar_min_width() it is drawn at the minimum. The gap between the two
+// is deliberate: it takes a deliberate overshoot to close the panel, so it
+// cannot slam shut on one pixel of movement while you are trimming its width,
+// and there is a narrowest width you can rest at.
+
+namespace {
+constexpr float kCollapsedGrip = 0.55F;  ///< ems of edge left to grab when closed
+}
+
+float App::sidebar_min_width() const   { return em(12.0F); }
+float App::sidebar_collapse_at() const { return em(8.0F); }
+
+bool App::sidebar_collapsed() const {
+    return sidebar_width_ < sidebar_collapse_at();
+}
+
+float App::sidebar_drawn_width() const {
+    return std::max(sidebar_width_, sidebar_min_width());
+}
+
 void App::draw_splitter() {
-    ImGui::SameLine(0.0F, 0.0F);
-    if (!sidebar_open_) {
-        return;
+    const bool collapsed = sidebar_collapsed();
+    if (!collapsed) {
+        ImGui::SameLine(0.0F, 0.0F);
     }
 
     // An invisible button dragged sideways. ImGui has no splitter widget, and
     // this is what one is: a thing that is hovered, held, and reports how far
     // the mouse moved while it was held.
+    //
+    // Wider when the sidebar is closed, because then it is the only way back:
+    // a third of an em of screen edge is a target nobody finds by accident.
+    const float grab = collapsed ? em(kCollapsedGrip) : em(0.35F);
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, theme::to_vec(theme::kFlame));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, theme::to_vec(theme::kFlameBright));
-    ImGui::Button("##splitter", ImVec2(em(0.35F), -FLT_MIN));
+    ImGui::Button("##splitter", ImVec2(grab, -FLT_MIN));
     ImGui::PopStyleColor(3);
 
-    if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
+    const bool hot = ImGui::IsItemHovered() || ImGui::IsItemActive();
+    if (hot) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
     }
-    if (ImGui::IsItemActive()) {
-        sidebar_width_ += ImGui::GetIO().MouseDelta.x;
+
+    // Closed, the splitter is a bare edge with nothing beside it, so it needs
+    // to say it is there. A short grip at eye level, brighter when the pointer
+    // is on it -- enough to be found, not enough to be furniture.
+    if (collapsed && !hot) {
+        const ImVec2 size = ImGui::GetItemRectSize();
+        const float  mid  = origin.y + size.y * 0.5F;
+        const float  half = std::min(em(1.6F), size.y * 0.25F);
+        ImGui::GetWindowDrawList()->AddRectFilled(
+            ImVec2(origin.x + grab * 0.25F, mid - half),
+            ImVec2(origin.x + grab * 0.6F, mid + half), theme::kTextFaint,
+            grab * 0.2F);
     }
-    // Clamped so it can be neither squeezed into nothing nor dragged over the
-    // whole window -- either of which leaves no way back without a mouse hunt.
+
+    ImGui::SetItemTooltip(collapsed ? "Drag right to bring the sidebar back"
+                                    : "Drag to resize -- drag to the edge to close");
+
+    if (ImGui::IsItemActive()) {
+        const float dx = ImGui::GetIO().MouseDelta.x;
+        if (collapsed && dx > 0.0F) {
+            // Opening. Closing it leaves the remembered width wherever the
+            // mouse was let go -- usually hard against the edge -- so following
+            // the pointer from there would mean dragging most of a sidebar's
+            // width through nothing before anything appeared. The first
+            // rightward movement opens it at its narrowest instead, and the
+            // drag carries on from there.
+            sidebar_width_ = std::max(sidebar_width_ + dx, sidebar_min_width());
+        } else {
+            sidebar_width_ += dx;
+        }
+    }
+    // Clamped so it can be neither dragged past the left edge into negative
+    // width nor pulled over the whole window. Zero is a real, reachable value
+    // now: it is what closed means.
     const float most = std::max(em(14.0F), ImGui::GetWindowWidth() * 0.45F);
-    sidebar_width_ = std::clamp(sidebar_width_, em(12.0F), most);
+    sidebar_width_ = std::clamp(sidebar_width_, 0.0F, most);
 
     ImGui::SameLine(0.0F, 0.0F);
 }

@@ -231,8 +231,17 @@ void App::draw_trust_modal() {
     }
     ImGui::SameLine();
     if (ImGui::Button("Cancel", ImVec2(em(5.6F), 0))) {
+        // Declining the folder the window opened in is different from declining
+        // one picked from the sidebar: there is no trusted project underneath to
+        // fall back to, so cancelling would leave the user sitting in a
+        // directory they just refused. Offer the picker instead of nothing.
+        const bool was_the_open_project = *pending_trust_ == store_->project().root;
         pending_trust_.reset();
         ImGui::CloseCurrentPopup();
+        if (was_the_open_project) {
+            say("not trusted -- choose a folder to work in");
+            open_browse(BrowseFor::Project);
+        }
     }
     ImGui::EndPopup();
 }

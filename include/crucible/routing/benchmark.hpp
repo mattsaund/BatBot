@@ -34,4 +34,11 @@ struct RouteCase {
 /// route to it.
 const std::vector<RouteCase>& benchmark_cases();
 
+/// The roster those cases are written against.
+///
+/// Crucible ships no experts, so this is not a default anybody gets -- it is
+/// the other half of the answer sheet, kept beside the questions. The tool and
+/// the routing tests score against it; nothing builds a user's config from it.
+const Roster& benchmark_roster();
+
 }  // namespace crucible

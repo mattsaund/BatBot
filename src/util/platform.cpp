@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "crucible/util/platform.hpp"
 
+#include <cstdio>
 #include <cstring>
 #include <system_error>
 #include <vector>
@@ -8,11 +9,23 @@
 #if defined(_WIN32)
 #  define WIN32_LEAN_AND_MEAN
 #  include <windows.h>
-#elif defined(__APPLE__)
-#  include <mach-o/dyld.h>
+#  include <io.h>
+#else
+#  include <unistd.h>
+#  if defined(__APPLE__)
+#    include <mach-o/dyld.h>
+#  endif
 #endif
 
 namespace crucible::util {
+
+bool stdin_is_a_terminal() {
+#if defined(_WIN32)
+    return ::_isatty(::_fileno(stdin)) != 0;
+#else
+    return ::isatty(STDIN_FILENO) != 0;
+#endif
+}
 
 std::filesystem::path executable_path() {
 #if defined(_WIN32)

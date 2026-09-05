@@ -533,10 +533,21 @@ esac
 # and `read` would consume it. Questions go to the terminal directly, and when
 # there is no terminal we take the safe default rather than hanging.
 # --------------------------------------------------------------------------
+# Is there a terminal to ask a question on?
+#
+# `[ -r /dev/tty ]` is not the test. The device node is there and readable by
+# permission on a process with no controlling terminal, and it is the open that
+# then fails with ENXIO -- which is exactly the case this has to detect, since
+# it is what a detached shell, a CI runner and a pipeline all look like. So the
+# open is what gets tried, in a subshell, where failing costs nothing.
+have_tty() {
+    ( exec </dev/tty ) 2>/dev/null
+}
+
 confirm() {
     local prompt="$1" default="${2:-y}" reply
     if [ "$ASSUME_YES" = 1 ]; then return 0; fi
-    if [ ! -r /dev/tty ]; then
+    if ! have_tty; then
         muted "no terminal to ask on; assuming '$default'"
         [ "$default" = "y" ]
         return
@@ -687,13 +698,31 @@ pkg_install() {
 
 # Is a package available to install at all? Keeps us from failing the whole run
 # on a package that this distro release simply does not carry.
+#
+# The output is captured and then matched, rather than piped into `grep -q`.
+# grep -q exits at the first match, which hands the package tool a SIGPIPE, and
+# under `set -o pipefail` the pipeline then reports 141 -- so every package
+# looked unavailable however installable it really was. That is how the desktop
+# app came to be skipped on every apt system: nothing was missing, the question
+# was just being asked in a way that could only ever answer "no".
 pkg_available() {
+    local out
     case "$PKG" in
-        apt)    apt-cache policy "$1" 2>/dev/null | grep -q 'Candidate: [^(]' ;;
+        apt)    out="$(apt-cache policy "$1" 2>/dev/null)" || return 1
+                case "$out" in
+                    *'Candidate: (none)'*) return 1 ;;
+                    *'Candidate: '*)       return 0 ;;
+                    *)                     return 1 ;;
+                esac ;;
         brew)   brew info --formula "$1" >/dev/null 2>&1 ;;
         dnf)    dnf list --available "$1" >/dev/null 2>&1 || dnf list --installed "$1" >/dev/null 2>&1 ;;
         pacman) pacman -Si "$1" >/dev/null 2>&1 ;;
-        zypper) zypper --non-interactive info "$1" 2>/dev/null | grep -q '^Version' ;;
+        zypper) out="$(zypper --non-interactive info "$1" 2>/dev/null)" || return 1
+                case "$out" in
+                    Version*|*"
+"Version*) return 0 ;;
+                    *)         return 1 ;;
+                esac ;;
         *)      return 1 ;;
     esac
 }
@@ -1008,21 +1037,36 @@ install_dependencies() {
     # The desktop app's dependencies. Small -- a few megabytes of headers --
     # but they are the one thing Crucible needs from the system beyond a
     # compiler, so this is the one step that can fail on a machine that is
-    # otherwise fine. It degrades instead: the warning says the terminal
-    # program is being built, and the install carries on.
+    # otherwise fine.
+    #
+    # The set is filtered to what this release actually carries rather than
+    # installed all-or-nothing. Package names drift between releases -- they get
+    # renamed, split, or turned into transitional stubs and dropped -- and one
+    # name going missing is no reason to withhold the desktop app when every
+    # header it needs is present under some other name. Whether it can really be
+    # built is settled afterwards by verify_gui_prerequisites, which looks for
+    # the headers themselves.
     #
     # Skipped entirely on macOS, where PKGS_GUI is empty because OpenGL comes
     # with the system.
     if [ "$WITH_GUI" = "1" ] && [ "${#PKGS_GUI[@]}" -gt 0 ]; then
         phase 20 "installing the desktop app's dependencies"
-        if packages_available ${PKGS_GUI[@]+"${PKGS_GUI[@]}"}; then
-            pkg_install ${PKGS_GUI[@]+"${PKGS_GUI[@]}"} || {
-                warn "could not install them; building the terminal app only"
-                WITH_GUI=0
-            }
+        local gui_have=() gui_missing=() gui_pkg
+        for gui_pkg in ${PKGS_GUI[@]+"${PKGS_GUI[@]}"}; do
+            if pkg_available "$gui_pkg"; then
+                gui_have+=("$gui_pkg")
+            else
+                gui_missing+=("$gui_pkg")
+            fi
+        done
+        if [ "${#gui_missing[@]}" -gt 0 ]; then
+            muted "not packaged on this release: ${gui_missing[*]-}"
+        fi
+        if [ "${#gui_have[@]}" -gt 0 ]; then
+            pkg_install ${gui_have[@]+"${gui_have[@]}"} ||
+                warn "some desktop packages did not install; checking for the headers anyway"
         else
-            warn "no OpenGL/GLFW development packages here; building the terminal app only"
-            WITH_GUI=0
+            warn "none of the desktop packages are on this distribution"
         fi
         phase_end
     fi
@@ -1052,6 +1096,51 @@ install_dependencies() {
             info "skipping CUDA -- install it later and the runtime becomes available in settings"
             RUNTIME="vulkan"
         fi
+    fi
+    return 0
+}
+
+# Is a header on the include path?
+#
+# The multiarch directory is where Debian and Ubuntu put most of these, and it
+# is named after the machine, so it has to be built rather than listed.
+have_header() {
+    local header="$1" dir
+    for dir in /usr/include \
+               "/usr/include/$(uname -m)-linux-gnu" \
+               /usr/local/include \
+               /opt/homebrew/include; do
+        [ -f "$dir/$header" ] && return 0
+    done
+    return 1
+}
+
+# Can the desktop app actually be built here?
+#
+# Asked of the filesystem rather than of the package manager, and asked whether
+# or not the dependency step ran -- so --no-deps gets an honest answer too, and
+# a machine that already had the headers is not refused the desktop app because
+# a package name it never needed is missing.
+#
+# What the build genuinely requires is GL/gl.h (find_package(OpenGL REQUIRED)),
+# plus either a system GLFW or the X11 headers, since CrucibleDependencies.cmake
+# compiles GLFW from source when the system has none.
+verify_gui_prerequisites() {
+    [ "$WITH_GUI" = "1" ] || return 0
+    # macOS: OpenGL is part of the system and there is no X11 in it.
+    [ "$(uname -s)" = "Darwin" ] && return 0
+
+    if ! have_header GL/gl.h; then
+        warn "the OpenGL headers (GL/gl.h) are not installed"
+        warn "building the terminal program only; install them and re-run for the desktop app"
+        WITH_GUI=0
+        return 0
+    fi
+    if ! have_header GLFW/glfw3.h && ! have_header X11/Xlib.h; then
+        warn "neither GLFW nor the X11 headers are installed, and GLFW needs them to build"
+        warn "building the terminal program only; install them and re-run for the desktop app"
+        WITH_GUI=0
+        return 0
     fi
     return 0
 }
@@ -1315,6 +1404,31 @@ build_and_install() {
     fi
     phase_end "installed"
 
+    # The summary at the end reports what was installed, so it has to be told
+    # the truth rather than repeating what was asked for. A desktop app that was
+    # configured, compiled and then not installed is a bug worth naming here
+    # instead of printing a path to a file that is not there.
+    if [ "$WITH_GUI" = "1" ] && [ ! -x "$PREFIX/bin/crucible-gui" ]; then
+        warn "crucible-gui was built but is not at $PREFIX/bin/crucible-gui"
+        warn "details are in $BUILD_LOG"
+        KEEP_BUILD_LOG=1
+        WITH_GUI=0
+    fi
+
+    # Tell the desktop about the new application-menu entry.
+    #
+    # Both tools are caches, both are optional, and neither failing is worth a
+    # word: the entry is on disk either way and every desktop picks it up on the
+    # next login. Running them just means the icon appears now rather than then.
+    if [ "$WITH_GUI" = "1" ] && [ "$(uname -s)" != "Darwin" ] \
+       && [ -f "$PREFIX/share/applications/crucible.desktop" ]; then
+        command -v update-desktop-database >/dev/null 2>&1 \
+            && update-desktop-database "$PREFIX/share/applications" >/dev/null 2>&1
+        command -v gtk-update-icon-cache >/dev/null 2>&1 \
+            && gtk-update-icon-cache -qtf "$PREFIX/share/icons/hicolor" >/dev/null 2>&1
+        ok "added Crucible to the application menu"
+    fi
+
     seed_runtime_source "$build_dir"
 
     if [ -z "${KEEP_BUILD_LOG:-}" ]; then
@@ -1371,63 +1485,120 @@ rm_path() {
 
 uninstall() {
     banner
+    printf '\n%s==>%s %sRemoving Crucible%s\n' "$C_CYN" "$C_RESET" "$C_BOLD" "$C_RESET"
 
-    # The binary's own uninstaller is the real one: it knows every path this
-    # install put down, and it asks the three questions. This script only has
-    # to do the work when the binary is already gone -- which is the case this
-    # path exists for.
-    local p exe
+    # Every prefix an install could have used, each named once. PREFIX is
+    # normally one of the other two, and asking the same directory twice would
+    # report its own leftovers as a second install.
+    local prefixes=() p seen
     for p in "$PREFIX" /usr/local "$HOME/.local"; do
         [ -n "$p" ] || continue
+        for seen in ${prefixes[@]+"${prefixes[@]}"}; do
+            [ "$seen" = "$p" ] && continue 2
+        done
+        prefixes+=("$p")
+    done
+
+    # The binary's own uninstaller is the real one: it knows every path this
+    # install put down, and it asks the three questions.
+    #
+    # It is run for every prefix that has one, not just the first. A machine
+    # with a system install and a user install had the second one left behind,
+    # still on PATH, pointing at libraries the first pass had deleted.
+    local exe rc=0 status
+    local handled=()
+    for p in "${prefixes[@]}"; do
         exe="$p/bin/crucible"
-        if [ -x "$exe" ]; then
-            printf '\n%s==>%s %sRemoving Crucible%s\n' \
-                "$C_CYN" "$C_RESET" "$C_BOLD" "$C_RESET"
-            if [ "$ASSUME_YES" = 1 ]; then "$exe" --uninstall --yes; else "$exe" --uninstall; fi
-            exit $?
+        [ -x "$exe" ] || continue
+        status=0
+        if [ "$ASSUME_YES" = 1 ]; then
+            "$exe" --uninstall --yes || status=$?
+        elif have_tty; then
+            # stdin has to be the terminal. Under the documented one-liner --
+            # `curl ... | install.sh | bash -s -- --uninstall` -- stdin is the
+            # installer script still being read, so the binary's questions were
+            # answered with lines of shell, every one of them taken as "no",
+            # and it reported "Done." having removed nothing at all.
+            "$exe" --uninstall < /dev/tty || status=$?
+        else
+            # Nothing to ask on. Uninstalling was the explicit request and the
+            # answer to each question defaults to yes, which is what confirm()
+            # does in the same situation.
+            muted "no terminal to ask on; removing everything"
+            "$exe" --uninstall --yes || status=$?
+        fi
+        # Only a run that succeeded speaks for its prefix. One that could not
+        # ask its questions has settled nothing, and the sweep below has to
+        # finish the job rather than treat the binary's presence as consent.
+        if [ "$status" -eq 0 ]; then
+            handled+=("$p")
+        else
+            rc="$status"
         fi
     done
 
-    # No binary to ask. Remove what an install puts down, and ask the same
-    # questions it would have -- answering yes here has to leave as little
-    # behind as answering yes there.
-    printf '\n%s==>%s %sRemoving Crucible%s\n' "$C_CYN" "$C_RESET" "$C_BOLD" "$C_RESET"
-    local found=0 name
-    for p in "$PREFIX" /usr/local "$HOME/.local"; do
-        [ -n "$p" ] || continue
+    # Whatever the binary could not speak for: a prefix with no binary in it, and
+    # a prefix whose binary was there but could not finish. Where its own
+    # uninstaller did run, its answers stand and this leaves the prefix alone.
+    local found=0 name settled entry
+    for p in "${prefixes[@]}"; do
+        settled=0
+        for seen in ${handled[@]+"${handled[@]}"}; do
+            [ "$seen" = "$p" ] && { settled=1; break; }
+        done
+        [ "$settled" = 1 ] && continue
         for name in crucible crucible-gui crucible-routebench; do
             if [ -e "$p/bin/$name" ]; then rm_path "$p/bin/$name"; found=1; fi
         done
         # llama.cpp's shared libraries, and any runtime that shipped beside them.
         if [ -d "$p/lib/crucible" ]; then rm_path "$p/lib/crucible"; found=1; fi
+        # The application-menu entry and its icon. Left behind, the menu goes on
+        # offering a Crucible that is no longer installed.
+        for entry in "$p/share/applications/crucible.desktop" \
+                     "$p/share/icons/hicolor/scalable/apps/crucible.svg"; do
+            if [ -e "$entry" ]; then rm_path "$entry"; found=1; fi
+        done
     done
-    [ "$found" = 1 ] || info "no installed crucible found"
 
     local cfg="${XDG_CONFIG_HOME:-$HOME/.config}/crucible"
     local dat="${XDG_DATA_HOME:-$HOME/.local/share}/crucible"
     local cache="${XDG_CACHE_HOME:-$HOME/.cache}/crucible"
 
-    if [ -d "$cache" ]; then rm_path "$cache"; fi
-    if [ -d "$cfg" ] && confirm "Remove your configuration and folder-trust list?" y; then
-        rm_path "$cfg"
-    fi
-    if [ -d "$dat" ] && confirm "Remove the models, runtimes, history and logs too?" y; then
-        rm_path "$dat"
+    # Nothing has asked the three questions yet -- there was no binary anywhere,
+    # or the one that was there could not finish. Ask them here: answering yes
+    # has to leave as little behind as answering yes there.
+    if [ "${#handled[@]}" -eq 0 ]; then
+        [ "$found" = 1 ] || info "no installed crucible found"
+        if [ -d "$cache" ]; then rm_path "$cache"; fi
+        if [ -d "$cfg" ] && confirm "Remove your configuration and folder-trust list?" y; then
+            rm_path "$cfg"
+        fi
+        if [ -d "$dat" ] && confirm "Remove the models, runtimes, history and logs too?" y; then
+            rm_path "$dat"
+        fi
     fi
 
-    # Say what survived rather than claiming success over the top of it.
-    local left=0 leftover
-    for leftover in "$cfg" "$dat" "$cache"; do
-        [ -e "$leftover" ] && { warn "still present: $leftover"; left=1; }
-    done
-    for p in "$PREFIX" /usr/local "$HOME/.local"; do
-        [ -n "$p" ] || continue
+    # Say what survived rather than claiming success over the top of it. The
+    # config and the data are only reported when nothing was asked about them,
+    # since a directory kept on purpose is not litter.
+    local left=0 leftover entry
+    if [ "${#handled[@]}" -eq 0 ]; then
+        for leftover in "$cfg" "$dat" "$cache"; do
+            [ -e "$leftover" ] && { warn "still present: $leftover"; left=1; }
+        done
+    fi
+    for p in "${prefixes[@]}"; do
         for name in crucible crucible-gui crucible-routebench; do
             [ -e "$p/bin/$name" ] && { warn "still present: $p/bin/$name"; left=1; }
         done
         [ -e "$p/lib/crucible" ] && { warn "still present: $p/lib/crucible"; left=1; }
+        for entry in "$p/share/applications/crucible.desktop" \
+                     "$p/share/icons/hicolor/scalable/apps/crucible.svg"; do
+            [ -e "$entry" ] && { warn "still present: $entry"; left=1; }
+        done
     done
     [ "$left" = 1 ] && exit 1
+    [ "$rc" -eq 0 ] || exit "$rc"
     ok "done"
     exit 0
 }
@@ -1499,11 +1670,20 @@ run_check() {
 
     printf '\n%swould build and install:%s\n' "$C_BOLD" "$C_RESET"
     info "binary     : $PREFIX/bin/crucible"
+    # The same question the real install asks, so a dry run cannot promise a
+    # desktop app the install would then step down from. It is only the whole
+    # answer when the headers are already here: --check installs nothing, so
+    # packages the install would have added first are not counted.
+    local gui_before="$WITH_GUI"
+    verify_gui_prerequisites
     if [ "$WITH_GUI" = "1" ]; then
         info "desktop app: $PREFIX/bin/crucible-gui"
-    else
+    elif [ "$gui_before" = "0" ]; then
         muted "desktop app: skipped (--no-gui)"
+    else
+        muted "desktop app: only if the packages above supply the headers"
     fi
+    WITH_GUI="$gui_before"
     info "libraries  : $PREFIX/lib/crucible"
     info "config     : ${XDG_CONFIG_HOME:-$HOME/.config}/crucible/config.json"
     info "runtime dir: ${XDG_DATA_HOME:-$HOME/.local/share}/crucible/runtimes"
@@ -1555,6 +1735,11 @@ main() {
     phase_end
 
     step "Building Crucible"
+    # Last word on the desktop app, and it belongs here rather than in the
+    # dependency step: this runs whether or not packages were installed, so
+    # --no-deps and a machine that already had the headers both get a straight
+    # answer instead of an inherited guess.
+    verify_gui_prerequisites
     build_and_install
 
     # Create the models directory now, so the first run has somewhere obvious to
@@ -1570,6 +1755,11 @@ main() {
     # was actually built rather than what was asked for.
     if [ "$WITH_GUI" = "1" ]; then
         printf '    desktop  : %s\n' "$PREFIX/bin/crucible-gui"
+        if [ -f "$PREFIX/share/applications/crucible.desktop" ]; then
+            printf '    menu     : %s\n' "Crucible (in your applications menu)"
+        fi
+    else
+        printf '    desktop  : %snot installed%s\n' "$C_YEL" "$C_RESET"
     fi
     printf '    models   : %s\n' "$models_dir"
     printf '    config   : %s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/crucible/config.json"

@@ -36,6 +36,15 @@ std::filesystem::path executable_path();
 /// shared buffer and is a data race waiting for a second thread.
 std::tm local_time(std::time_t when);
 
+/// Is there a terminal on standard input to ask a question on?
+///
+/// The difference between `crucible-gui` started from a shell and the same
+/// binary started from the application menu. Launched from a menu there is no
+/// terminal at all: a prompt written to stdout goes nowhere, the read of the
+/// answer fails at once, and a program that treats that as "no" exits without
+/// ever opening a window -- which is exactly what clicking the icon used to do.
+bool stdin_is_a_terminal();
+
 /// The argv that runs `command` through the platform's shell.
 ///
 /// A shell rather than an argv split, because pipes, redirections and `&&` are

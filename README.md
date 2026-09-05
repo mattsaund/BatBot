@@ -49,7 +49,9 @@ changes to something that already exists. That is what a cook is.
 
 ## The experts
 
-Nine experts ship as defaults. They are not fixed: the roster is yours.
+No experts ship. A new install has an empty roster, and every seat on it is one
+you made — with `/newexpert`, the desktop app's Experts page, or by writing an
+entry in the config file. A filled-in roster looks like this:
 
 ```
                      ^                    ◇ Mathematics
@@ -62,6 +64,9 @@ Nine experts ship as defaults. They are not fixed: the roster is yours.
                 /         \               ◇ Sociology
                '-----------'              ◇ Language
 ```
+
+Until you add one the panel simply says so, and the delegator has nobody to
+route to.
 
 The fire says what the machine is doing — banked when idle, a steady column
 while a model is loading, a full plume with the melt bubbling while tokens are
@@ -84,8 +89,7 @@ questions per seat is worth seven points of routing accuracy on the benchmark
 /ejectexpert chemistry
 ```
 
-removes one, including the built-in nine. The roster is a set of defaults, not a
-floor: eject a seat and it stays ejected.
+removes one. Nothing is ever put back: eject a seat and it stays ejected.
 
 A new expert is routable the moment it exists. Point it at a GGUF from
 `/settings` and it starts answering; leave it empty and prompts routed to it are
@@ -107,13 +111,13 @@ add and then nominate in `/settings`.
 /stop
 ```
 
-A cook is a goal and a budget. Without a time it runs until you `/stop` it.
+A cook is a goal. It runs until the work is done or until you `/stop` it.
 
 The expert works one action at a time, and you watch it happen:
 
 ```
 cook ▸ fix the bug in calc.py so that test_calc.py passes
-     working  ·  round 2  ·  4 minutes  ·  26 minutes left
+     working  ·  round 2  ·  4 minutes
 
      list    listed . (2 entries)
      read    read calc.py
@@ -217,6 +221,12 @@ convention every model can follow beats one only the tool-trained models can.
 ```sh
 crucible-gui                # installed by default; --no-gui skips it
 ```
+
+On Linux the installer also adds it to your application menu, so it can be
+started by clicking an icon like any other desktop program. Launched that way
+there is no terminal to ask the folder-trust question on, so the window asks it
+instead, and it opens in your last project rather than in whatever directory the
+launcher happened to be in.
 
 Building it by hand needs the option turned on, since a bare CMake run cannot
 install OpenGL headers for you the way the installer can:
@@ -483,16 +493,21 @@ each expert seat and for the delegator from whatever is in it, and tune sampling
   "router":   { "model": "LFM2-1.2B-Q8_0.gguf" },
   "defaults": { "n_ctx": 8192, "n_gpu_layers": -1, "temperature": 0.7 },
 
-  // A list, because the order is the order the seats are drawn in. A built-in
-  // expert that has not been retuned writes only its id -- its name, blurb,
-  // keywords and examples come from the table Crucible ships.
+  // A list, because the order is the order the seats are drawn in. Crucible
+  // ships no experts, so every entry here is one you made -- `/newexpert`
+  // writes them; by hand, an id and a blurb are the only required fields.
   "experts": [
-    { "id": "mathematics", "builtin": true, "model": "math-expert-q4_k_m.gguf" },
-    { "id": "physics",     "builtin": true, "model": "physics-expert-q4_k_m.gguf" },
-    { "id": "programming", "builtin": true, "model": "/mnt/big/code-expert-q4_k_m.gguf" },
+    { "id": "mathematics",
+      "name": "Mathematics",
+      "blurb": "algebra, calculus, proofs, geometry, statistics, probability",
+      "model": "math-expert-q4_k_m.gguf" },
 
-    // One you made. `/newexpert` writes this; by hand, an id and a blurb are
-    // the only fields that have to be there.
+    { "id": "physics",
+      "name": "Physics",
+      "blurb": "mechanics, thermodynamics, relativity, quantum, electromagnetism",
+      "model": "physics-expert-q4_k_m.gguf" },
+
+    // Everything except id and blurb is worked out for you if you leave it out.
     { "id": "rust-async",
       "name": "Rust Async",
       "tag": "RA",
@@ -514,8 +529,10 @@ each expert seat and for the delegator from whatever is in it, and tune sampling
 }
 ```
 
-An `"experts"` key that is present but empty is taken at its word: an empty
-expert list. The built-in nine are defaults, not a floor.
+A fresh install has an empty expert list, and an `"experts"` key that is present
+but empty is taken at its word. Crucible ships no experts and never adds one
+behind your back: every seat is one you made, with `/newexpert`, the GUI's
+Experts page, or by writing an entry here.
 
 ```jsonc
 "routing": {

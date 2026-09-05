@@ -58,6 +58,34 @@ const char* backend_blurb(BackendKind kind) {
 
 }  // namespace
 
+void App::take_runtime_activation() {
+    const BuildProgress build = runtime_builder_.progress();
+    const bool activated =
+        build.phase == BuildProgress::Phase::Done && build.error.empty();
+
+    if (!activated) {
+        // Reset on anything else, so the next build reports itself too.
+        runtime_activated_ = false;
+        return;
+    }
+    if (runtime_activated_) {
+        return;
+    }
+    runtime_activated_ = true;
+
+    // What is installed changed, and so did the devices under it. Both lists
+    // are read straight from ggml, so re-reading them is the whole refresh.
+    runtimes_ = RuntimeRegistry::scan();
+
+    // The models, though, are not: one picks its devices when it loads and
+    // keeps them. Dropping them is what puts the next prompt on the new GPU.
+    if (engine_) {
+        engine_->reload_models();
+    }
+    say(std::string(backend_name(build.kind))
+        + " is ready -- models will use it from the next prompt");
+}
+
 void App::draw_settings_runtimes() {
     title("Runtimes");
     wrapped(theme::kTextDim,

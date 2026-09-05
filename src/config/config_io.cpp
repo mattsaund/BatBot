@@ -64,59 +64,26 @@ void read_model_params(const json& obj, ModelParams& params,
 }
 
 
-/// The shipped definition for `id`, or nullptr if `id` is not one of them.
+/// Identity fields for one seat.
 ///
-/// A built-in seat whose identity has not been retuned is written to disk as
-/// just its id, so it has to be reconstructible from here on the way back in.
-/// That keeps the common config file short -- nine seats with twenty-four
-/// keywords each would otherwise be two hundred lines nobody wrote.
-const Expert* shipped_expert(const ExpertId& id) {
-    static const Roster kDefaults = Roster::defaults();
-    for (const Expert& expert : kDefaults.experts()) {
-        if (expert.id == id) {
-            return &expert;
-        }
-    }
-    return nullptr;
-}
-
-/// True when this seat is exactly as it shipped, and therefore needs no
-/// identity written out.
-bool matches_shipped(const Expert& expert) {
-    const Expert* shipped = shipped_expert(expert.id);
-    return shipped != nullptr && expert.builtin &&
-           shipped->name == expert.name && shipped->tag == expert.tag &&
-           shipped->blurb == expert.blurb && shipped->examples == expert.examples &&
-           shipped->keywords == expert.keywords;
-}
-
-/// Identity fields for one seat. Omitted entirely for an untouched built-in.
+/// Always written in full. This used to omit them for a seat that matched one
+/// of the nine Crucible shipped, reconstructing it from the built-in table on
+/// the way back in. There is no built-in table any more -- every expert is one
+/// the user made -- so there is nothing to reconstruct from and the file has to
+/// carry the whole seat.
 void write_expert_identity(json& entry, const Expert& expert) {
-    if (matches_shipped(expert)) {
-        entry["builtin"] = true;
-        return;
-    }
     entry["name"]     = expert.name;
     entry["tag"]      = expert.tag;
     entry["blurb"]    = expert.blurb;
     entry["examples"] = expert.examples;
     entry["keywords"] = expert.keywords;
-    if (expert.builtin) {
-        entry["builtin"] = true;
-    }
 }
 
 /// Rebuild one seat from its entry. Returns false when there is not enough to
 /// work with, which is reported as a warning and skips that seat only.
 bool read_expert_identity(const json& entry, const ExpertId& id, Expert& expert,
                           std::vector<std::string>& warnings) {
-    const Expert* shipped = shipped_expert(id);
-    if (shipped != nullptr) {
-        expert = *shipped;  // a starting point every field below may override
-    } else {
-        expert.id      = id;
-        expert.builtin = false;
-    }
+    expert    = Expert{};
     expert.id = id;
 
     read_field(entry, "name",     expert.name,     id, warnings);
@@ -124,7 +91,6 @@ bool read_expert_identity(const json& entry, const ExpertId& id, Expert& expert,
     read_field(entry, "blurb",    expert.blurb,    id, warnings);
     read_field(entry, "examples", expert.examples, id, warnings);
     read_field(entry, "keywords", expert.keywords, id, warnings);
-    read_field(entry, "builtin",  expert.builtin,  id, warnings);
 
     if (expert.name.empty()) {
         expert.name = id;
@@ -211,8 +177,9 @@ bool save_config(const Config& config, const std::filesystem::path& file) {
          "Crucible config. Models live in \"models_dir\"; each expert names a file "
          "inside it. An absolute or ~-path is also accepted. Anything an expert "
          "leaves out is inherited from \"defaults\". Experts are listed in the order "
-         "they are drawn; add one with /newexpert or by writing an entry with an "
-         "\"id\", a \"name\" and a \"blurb\". Editable in the app with /settings."},
+         "they are drawn. Crucible ships none: add one with /newexpert, or write an "
+         "entry with an \"id\", a \"name\" and a \"blurb\". Editable in the app "
+         "with /settings."},
         {"models_dir",    config.models_dir},
         {"system_prompt", config.system_prompt},
         {"reasoning_effort", config.reasoning_effort},
@@ -290,16 +257,16 @@ bool save_config(const Config& config) {
 void write_default_config(const std::filesystem::path& file) {
     Config defaults;
 
-    // Only the id and an empty model per shipped expert: their identity is
-    // reconstructed from the built-in table, and everything about how they load
-    // inherits from "defaults", so filling a seat is a one-line edit.
+    // An empty list, written explicitly rather than left out.
+    //
+    // Crucible ships no experts, and the key being present and empty is what
+    // says so: the reader takes an "experts" key at its word, so this is a
+    // blank roster the user fills rather than an omission it might one day be
+    // tempted to fill for them.
     json experts = json::array();
     for (const Expert& seat : defaults.roster.experts()) {
         json entry = json::object();
         entry["id"] = seat.id;
-        if (seat.builtin) {
-            entry["builtin"] = true;
-        }
         entry["model"] = "";
         experts.push_back(std::move(entry));
     }
@@ -314,8 +281,9 @@ void write_default_config(const std::filesystem::path& file) {
          "Crucible config. Drop your GGUF files in \"models_dir\" and name one per "
          "expert below. An absolute or ~-path also works. Anything an expert "
          "leaves out is inherited from \"defaults\". Experts are listed in the order "
-         "they are drawn; add one with /newexpert or by writing an entry with an "
-         "\"id\", a \"name\" and a \"blurb\". Editable in the app with /settings."},
+         "they are drawn. Crucible ships none: add one with /newexpert, or write an "
+         "entry with an \"id\", a \"name\" and a \"blurb\". Editable in the app "
+         "with /settings."},
         {"models_dir", paths::models_dir().string()},
         {"system_prompt", defaults.system_prompt},
         {"reasoning_effort", defaults.reasoning_effort},
@@ -444,7 +412,7 @@ Config load_config(const std::filesystem::path& file, std::vector<std::string>& 
         } else {
             warnings.emplace_back("experts: expected a list of experts -- using the "
                                   "built-in ones");
-            config.roster = Roster::defaults();
+            config.roster = Roster::bare();
         }
 
         for (const auto& [id, entry] : entries) {

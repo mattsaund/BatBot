@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Crucible's mark, for the application menu.
+
+  The two paths are the same control points as flame_path() in
+  src/gui/theme.cpp, at the same proportions and in the same two colours, so the
+  icon in the launcher is the mark the window draws rather than a lookalike. The
+  body leans one way and the core, a little under half the size, leans the
+  other, so the two edges cross rather than nest.
+
+  The shape is measured and then fitted, rather than placed by hand: a flame is
+  not symmetric and its control points overshoot the outline, so centring on the
+  construction point leaves it visibly off to one side in a launcher grid.
+
+  Regenerate from the same numbers if the flame is ever reshaped in theme.cpp.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Crucible</title>
+  <rect width="256" height="256" rx="56" ry="56" fill="#0B0B0C"/>
+  <path d="M 134.95 188.24 C 119.18 211.88, 100.79 222.39, 82.40 219.77 C 53.49 175.10, 66.63 140.94, 90.28 112.04 C 108.67 72.63, 129.69 54.23, 148.08 35.84 C 171.73 70.00, 179.61 104.16, 179.61 135.69 C 178.30 164.59, 190.12 188.24, 190.12 214.51 C 176.99 222.39, 153.34 209.26, 134.95 188.24 Z" fill="#FF8700"/>
+  <path d="M 134.95 172.94 C 127.70 183.82, 119.23 188.66, 110.77 187.45 C 97.48 166.90, 103.52 151.19, 114.40 137.89 C 122.86 119.76, 132.53 111.30, 129.51 102.84 C 151.87 118.55, 155.49 134.27, 155.49 148.77 C 154.89 162.07, 160.33 172.94, 160.33 185.03 C 154.29 188.66, 143.41 182.61, 134.95 172.94 Z" fill="#FFAF00"/>
+</svg>

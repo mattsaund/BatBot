@@ -97,7 +97,7 @@ std::string answer_prefix(std::string_view rendered) {
 KeywordRouter::KeywordRouter(std::shared_ptr<const Roster> roster)
     : roster_(std::move(roster)) {
     if (!roster_) {
-        roster_ = std::make_shared<const Roster>(Roster::defaults());
+        roster_ = std::make_shared<const Roster>(Roster::bare());
     }
 }
 
@@ -166,7 +166,7 @@ ModelRouter::ModelRouter(LoadedModel& model, ModelParams params,
     : model_(model),
       params_(std::move(params)),
       roster_(roster ? std::move(roster)
-                     : std::make_shared<const Roster>(Roster::defaults())),
+                     : std::make_shared<const Roster>(Roster::bare())),
       fallback_(roster_) {
     system_prompt_ = system_prompt_override.empty() ? roster_->router_system_prompt()
                                                     : std::move(system_prompt_override);

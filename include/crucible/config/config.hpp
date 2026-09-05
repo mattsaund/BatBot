@@ -230,7 +230,7 @@ struct Config {
     /// Config without reading a file -- the tests, the parse-failure fallback,
     /// a first run -- gets a working expert list rather than a program with
     /// nowhere to route to.
-    Roster roster = Roster::defaults();
+    Roster roster = Roster::bare();
 
     /// Which GGUF backs each seat, keyed by `Expert::id`.
     ///

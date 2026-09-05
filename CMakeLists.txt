@@ -318,6 +318,29 @@ if(CRUCIBLE_BUILD_GUI)
             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
             COMPONENT ${CRUCIBLE_INSTALL_COMPONENT})
 endif()
+# --- the desktop entry ------------------------------------------------------
+#
+# What puts crucible-gui in the application menu. Linux only: macOS wants an
+# .app bundle and Windows a Start Menu shortcut, and neither is a .desktop file.
+#
+# The Exec line is the absolute installed path rather than the bare name. The
+# usual prefix is ~/.local, which a login shell puts on PATH and a desktop
+# launcher very often does not -- a bare "crucible-gui" there is an icon that
+# silently does nothing when clicked.
+if(CRUCIBLE_BUILD_GUI AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(CRUCIBLE_GUI_EXEC "${CMAKE_INSTALL_FULL_BINDIR}/crucible-gui")
+    configure_file(packaging/crucible.desktop.in
+                   "${CMAKE_CURRENT_BINARY_DIR}/crucible.desktop" @ONLY)
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/crucible.desktop"
+            DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/applications"
+            COMPONENT ${CRUCIBLE_INSTALL_COMPONENT})
+    # hicolor/scalable is the theme every desktop falls back to, so one SVG
+    # covers every icon size the panel, dock and menu ask for.
+    install(FILES packaging/crucible.svg
+            DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps"
+            COMPONENT ${CRUCIBLE_INSTALL_COMPONENT})
+endif()
+
 if(CRUCIBLE_BUILD_TOOLS)
     install(TARGETS crucible-routebench
             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}

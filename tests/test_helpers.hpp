@@ -50,6 +50,7 @@
 #include "crucible/util/text.hpp"
 #include "crucible/config/trust.hpp"
 #include "harness.hpp"
+#include "roster_fixture.hpp"
 
 using namespace crucible;
 
@@ -110,7 +111,7 @@ private:
 /// immutable, and the routers take it by shared_ptr anyway.
 inline const std::shared_ptr<const Roster>& shipped() {
     static const std::shared_ptr<const Roster> roster =
-        std::make_shared<const Roster>(Roster::defaults());
+        std::make_shared<const Roster>(testing::sample_roster());
     return roster;
 }
 

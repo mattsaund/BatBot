@@ -59,8 +59,12 @@ float grow_input_height(const std::string& text, float width, int max_lines);
 /// Returns true on submit. Grows to `max_lines` and then scrolls, because a box
 /// that can grow without limit eventually leaves no room for the conversation
 /// it belongs to.
+///
+/// `height` overrides that: pass a positive value to make the box exactly that
+/// tall whatever is typed in it, which is what a composer the user has dragged
+/// to a size of their own needs. Zero keeps the measured behaviour.
 bool grow_input(const char* id, const char* hint, std::string& text,
-                float width, int max_lines);
+                float width, int max_lines, float height = 0.0F);
 
 /// A model reference as it should be read.
 ///

@@ -77,11 +77,11 @@ int main(int argc, char** argv) {
 
     // Every seat on the roster is scored, and the scorer can only answer with
     // one of them. This measures the delegator's job and nothing else.
-    // Measured against the shipped roster, which is what the benchmark cases
-    // are written for. A user's own config may have added seats or taken some
+    // Measured against the benchmark roster, which is what the cases are
+    // written for. A user's own config may have added seats or taken some
     // away; scoring against that would be measuring their roster, not the
     // delegator.
-    const auto roster = std::make_shared<const Roster>(Roster::defaults());
+    const auto roster = std::make_shared<const Roster>(benchmark_roster());
 
     ModelRouter router(*model, params, roster);
     router.set_calibration(calibration);
