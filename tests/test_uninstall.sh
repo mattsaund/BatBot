@@ -90,8 +90,12 @@ setup() {
     echo '{"vulkan":{"llama_tag":"b10678"}}' > "$root/dat/crucible/runtimes/manifest.json"
     echo '{"turns":[]}' > "$root/dat/crucible/projects/demo-abc12345/usage.json"
     cp "$CRUCIBLE" "$root/bin/crucible"
-    # The installer puts this beside the binary, so uninstall has to take it.
+    # The installer puts these beside the binary, so uninstall has to take them.
+    # crucible-gui is the one that was missed: the desktop app is installed by
+    # the same component and was being left on PATH, pointing at libraries the
+    # uninstaller had just deleted.
     printf '#!/bin/sh\n' > "$root/bin/crucible-routebench"; chmod +x "$root/bin/crucible-routebench"
+    printf '#!/bin/sh\n' > "$root/bin/crucible-gui";        chmod +x "$root/bin/crucible-gui"
     echo '{"models_dir":""}' > "$root/cfg/crucible/config.json"
     echo '{"trusted":[]}'    > "$root/cfg/crucible/trust.json"
     head -c 1048576 /dev/zero > "$root/dat/crucible/models/expensive-expert.gguf"
@@ -116,6 +120,7 @@ echo "  declining leaves everything in place"
 ROOT="$(setup declining)"
 run_uninstall "$ROOT" 'n\nn\nn\n'
 check "binary kept"           "$(exists "$ROOT/bin/crucible")"            "yes"
+check "desktop app kept"      "$(exists "$ROOT/bin/crucible-gui")"         "yes"
 check "config kept"           "$(exists "$ROOT/cfg/crucible/config.json")" "yes"
 check "models kept"           "$(count_models "$ROOT")"                  "2"
 
@@ -130,6 +135,7 @@ check "data removed"          "$(exists "$ROOT/dat/crucible")"            "no"
 # would make "yes to everything" a lie.
 check "libraries removed"     "$(exists "$ROOT/lib/crucible")"            "no"
 check "routebench removed"    "$(exists "$ROOT/bin/crucible-routebench")"  "no"
+check "desktop app removed"  "$(exists "$ROOT/bin/crucible-gui")"         "no"
 check "user runtimes removed" "$(exists "$ROOT/dat/crucible/runtimes")"   "no"
 check "runtime source removed" "$(exists "$ROOT/dat/crucible/runtime-src")" "no"
 check "project history removed" "$(exists "$ROOT/dat/crucible/projects")" "no"
@@ -145,6 +151,7 @@ check "data removed"          "$(exists "$ROOT/dat/crucible")"            "no"
 # would make "yes to everything" a lie.
 check "libraries removed"     "$(exists "$ROOT/lib/crucible")"            "no"
 check "routebench removed"    "$(exists "$ROOT/bin/crucible-routebench")"  "no"
+check "desktop app removed"  "$(exists "$ROOT/bin/crucible-gui")"         "no"
 check "user runtimes removed" "$(exists "$ROOT/dat/crucible/runtimes")"   "no"
 check "runtime source removed" "$(exists "$ROOT/dat/crucible/runtime-src")" "no"
 check "project history removed" "$(exists "$ROOT/dat/crucible/projects")" "no"

@@ -1361,28 +1361,74 @@ seed_runtime_source() {
     return 0
 }
 
+# Remove one path, with sudo only where it is actually needed.
+rm_path() {
+    local target="$1"
+    [ -e "$target" ] || return 0
+    if [ -w "$(dirname "$target")" ]; then rm -rf "$target"; else $SUDO rm -rf "$target"; fi
+    muted "removed $target"
+}
+
 uninstall() {
     banner
-    local found=0 p
+
+    # The binary's own uninstaller is the real one: it knows every path this
+    # install put down, and it asks the three questions. This script only has
+    # to do the work when the binary is already gone -- which is the case this
+    # path exists for.
+    local p exe
     for p in "$PREFIX" /usr/local "$HOME/.local"; do
         [ -n "$p" ] || continue
-        if [ -f "$p/bin/crucible" ]; then
-            # Not step(): uninstall is a single action, not one of the five
-            # phases of an install, so a "[1/5]" counter would be nonsense.
-            printf '\n%s==>%s %sRemoving %s/bin/crucible%s\n' \
-                "$C_CYN" "$C_RESET" "$C_BOLD" "$p" "$C_RESET"
-            if [ -w "$p/bin" ]; then rm -f "$p/bin/crucible"; else $SUDO rm -f "$p/bin/crucible"; fi
-            found=1
+        exe="$p/bin/crucible"
+        if [ -x "$exe" ]; then
+            printf '\n%s==>%s %sRemoving Crucible%s\n' \
+                "$C_CYN" "$C_RESET" "$C_BOLD" "$C_RESET"
+            if [ "$ASSUME_YES" = 1 ]; then "$exe" --uninstall --yes; else "$exe" --uninstall; fi
+            exit $?
         fi
+    done
+
+    # No binary to ask. Remove what an install puts down, and ask the same
+    # questions it would have -- answering yes here has to leave as little
+    # behind as answering yes there.
+    printf '\n%s==>%s %sRemoving Crucible%s\n' "$C_CYN" "$C_RESET" "$C_BOLD" "$C_RESET"
+    local found=0 name
+    for p in "$PREFIX" /usr/local "$HOME/.local"; do
+        [ -n "$p" ] || continue
+        for name in crucible crucible-gui crucible-routebench; do
+            if [ -e "$p/bin/$name" ]; then rm_path "$p/bin/$name"; found=1; fi
+        done
+        # llama.cpp's shared libraries, and any runtime that shipped beside them.
+        if [ -d "$p/lib/crucible" ]; then rm_path "$p/lib/crucible"; found=1; fi
     done
     [ "$found" = 1 ] || info "no installed crucible found"
 
-    local src="${XDG_DATA_HOME:-$HOME/.local/share}/crucible/src"
-    if [ -d "$src" ] && confirm "Also remove the build checkout at $src?" n; then
-        rm -rf "$src"
+    local cfg="${XDG_CONFIG_HOME:-$HOME/.config}/crucible"
+    local dat="${XDG_DATA_HOME:-$HOME/.local/share}/crucible"
+    local cache="${XDG_CACHE_HOME:-$HOME/.cache}/crucible"
+
+    if [ -d "$cache" ]; then rm_path "$cache"; fi
+    if [ -d "$cfg" ] && confirm "Remove your configuration and folder-trust list?" y; then
+        rm_path "$cfg"
     fi
-    info "your config and models were left alone:"
-    muted "${XDG_CONFIG_HOME:-$HOME/.config}/crucible"
+    if [ -d "$dat" ] && confirm "Remove the models, runtimes, history and logs too?" y; then
+        rm_path "$dat"
+    fi
+
+    # Say what survived rather than claiming success over the top of it.
+    local left=0 leftover
+    for leftover in "$cfg" "$dat" "$cache"; do
+        [ -e "$leftover" ] && { warn "still present: $leftover"; left=1; }
+    done
+    for p in "$PREFIX" /usr/local "$HOME/.local"; do
+        [ -n "$p" ] || continue
+        for name in crucible crucible-gui crucible-routebench; do
+            [ -e "$p/bin/$name" ] && { warn "still present: $p/bin/$name"; left=1; }
+        done
+        [ -e "$p/lib/crucible" ] && { warn "still present: $p/lib/crucible"; left=1; }
+    done
+    [ "$left" = 1 ] && exit 1
+    ok "done"
     exit 0
 }
 

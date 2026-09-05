@@ -184,6 +184,24 @@ function Remove-Crucible {
             Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
         }
     }
+
+    # The install put bin\ on the user PATH, so the uninstall takes it off
+    # again. A PATH entry pointing at a directory that no longer exists is not
+    # harmful, but it is litter, and it is litter this script created.
+    $binDir   = Join-Path $Prefix 'bin'
+    $userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
+    if ($userPath -and $userPath -like "*$binDir*") {
+        $kept = @($userPath -split ';' | Where-Object { $_ -and $_ -ne $binDir })
+        [Environment]::SetEnvironmentVariable('PATH', ($kept -join ';'), 'User')
+        Write-Note "removed $binDir from PATH"
+    }
+
+    # Say what survived rather than claiming success over the top of it.
+    $left = @($Prefix, $SrcDir) | Where-Object { Test-Path $_ }
+    if ($left) {
+        foreach ($path in $left) { Write-Warn "still present: $path" }
+        exit 1
+    }
     Write-Ok 'done'
     exit 0
 }

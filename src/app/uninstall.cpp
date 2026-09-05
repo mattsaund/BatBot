@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <vector>
 
@@ -91,16 +92,58 @@ std::filesystem::path cache_dir() {
     return {};
 }
 
-/// The developer tool installed beside the binary. It is part of the same
-/// install, so it goes with it -- leaving a stray crucible-routebench on PATH
-/// after an uninstall is exactly the kind of litter that makes a clean
-/// reinstall test lie.
-std::filesystem::path tool_path(const std::filesystem::path& binary) {
+#if defined(_WIN32)
+constexpr std::string_view kExeSuffix = ".exe";
+#else
+constexpr std::string_view kExeSuffix = "";
+#endif
+
+/// The other programs this install put beside the binary.
+///
+/// `crucible` is not the whole install. `crucible-gui` is the desktop face of
+/// the same engine and `crucible-routebench` is the developer tool; both are
+/// placed in the same bin/ by the same install component, and both are useless
+/// once the libraries under them are gone. Leaving either behind puts a
+/// program on PATH that can only fail, and makes a clean reinstall test lie.
+std::vector<std::filesystem::path> companion_programs(const std::filesystem::path& binary) {
+    std::vector<std::filesystem::path> found;
     if (binary.empty()) {
-        return {};
+        return found;
     }
-    const std::filesystem::path candidate = binary.parent_path() / "crucible-routebench";
-    return std::filesystem::exists(candidate) ? candidate : std::filesystem::path{};
+    const std::filesystem::path dir = binary.parent_path();
+    for (const std::string_view name : {"crucible-gui", "crucible-routebench"}) {
+        std::filesystem::path candidate =
+            dir / (std::string(name) + std::string(kExeSuffix));
+        std::error_code ec;
+        if (std::filesystem::exists(candidate, ec) && candidate != binary) {
+            found.push_back(std::move(candidate));
+        }
+    }
+    return found;
+}
+
+/// The shared libraries that sit beside the executable rather than under
+/// lib/crucible.
+///
+/// That is the Windows layout, and it is not a quirk of the installer: the
+/// loader there looks next to the executable and not at an RPATH, so the
+/// install rule puts them in bin/. Same files, different place, and an
+/// uninstaller that only knows lib/crucible would leave every byte of
+/// llama.cpp behind on Windows.
+std::vector<std::filesystem::path> companion_libraries(const std::filesystem::path& binary) {
+    std::vector<std::filesystem::path> found;
+    if (binary.empty() || kExeSuffix.empty()) {
+        return found;  // elsewhere they live in lib/crucible, handled below
+    }
+    const std::filesystem::path dir = binary.parent_path();
+    for (const char* name : {"llama.dll", "ggml.dll", "ggml-base.dll"}) {
+        std::filesystem::path candidate = dir / name;
+        std::error_code ec;
+        if (std::filesystem::exists(candidate, ec)) {
+            found.push_back(std::move(candidate));
+        }
+    }
+    return found;
 }
 
 /// <prefix>/lib/crucible -- llama.cpp's shared libraries and the runtimes that
@@ -123,7 +166,8 @@ int run_uninstall(bool assume_yes) {
     const std::filesystem::path models  = paths::models_dir();
     const std::filesystem::path libs    = library_dir(binary);
     const std::filesystem::path cache   = cache_dir();
-    const std::filesystem::path tool    = tool_path(binary);
+    const std::vector<std::filesystem::path> programs  = companion_programs(binary);
+    const std::vector<std::filesystem::path> beside    = companion_libraries(binary);
 
     std::cout << "\n  Uninstalling Crucible\n\n";
 
@@ -133,8 +177,11 @@ int run_uninstall(bool assume_yes) {
     if (std::filesystem::exists(config)) {
         std::cout << "  config   " << config.string() << "\n";
     }
-    if (!tool.empty()) {
-        std::cout << "  tool     " << tool.string() << "\n";
+    for (const std::filesystem::path& program : programs) {
+        std::cout << "  program  " << program.string() << "\n";
+    }
+    for (const std::filesystem::path& lib : beside) {
+        std::cout << "  library  " << lib.string() << "\n";
     }
     if (!libs.empty()) {
         std::cout << "  runtime  " << libs.string() << "  ("
@@ -158,19 +205,28 @@ int run_uninstall(bool assume_yes) {
 
     // --- the binary --------------------------------------------------------
     bool removed_binary = false;
+    bool dropped_programs = false;
     if (!binary.empty() && std::filesystem::exists(binary)) {
-        if (assume_yes || ask("Remove the crucible binary?", true)) {
+        if (assume_yes || ask("Remove crucible, crucible-gui and their libraries?", true)) {
+            dropped_programs = true;
             // Unlinking a running executable is fine on Linux: the kernel keeps
             // the inode alive until this process exits.
             removed_binary = remove_path(binary);
             if (removed_binary) {
                 std::cout << "  removed " << binary.string() << "\n";
             }
-            // Everything else the install put down goes with it: the
-            // routebench tool and the shared libraries beside it are both
-            // useless without the binary.
-            if (!tool.empty() && remove_path(tool)) {
-                std::cout << "  removed " << tool.string() << "\n";
+            // Everything else the install put down goes with it. The desktop
+            // app and the developer tool are the same install, and the shared
+            // libraries under them are useless once any of it is gone.
+            for (const std::filesystem::path& program : programs) {
+                if (remove_path(program)) {
+                    std::cout << "  removed " << program.string() << "\n";
+                }
+            }
+            for (const std::filesystem::path& lib : beside) {
+                if (remove_path(lib)) {
+                    std::cout << "  removed " << lib.string() << "\n";
+                }
             }
             if (!libs.empty() && remove_path(libs)) {
                 std::cout << "  removed " << libs.string() << "\n";
@@ -182,8 +238,10 @@ int run_uninstall(bool assume_yes) {
     }
 
     // --- configuration -----------------------------------------------------
+    bool dropped_config = false;
     if (std::filesystem::exists(config)) {
         if (assume_yes || ask("Remove your configuration and folder-trust list?", true)) {
+            dropped_config = true;
             if (remove_path(config)) {
                 std::cout << "  removed " << config.string() << "\n";
             }
@@ -193,8 +251,11 @@ int run_uninstall(bool assume_yes) {
     }
 
     // --- models and data ---------------------------------------------------
-    // Crucible ships no models. Everything in this directory was downloaded or
-    // placed by the user, so it is never removed on a default or -y run.
+    // Crucible ships no models, so everything in this directory was put there
+    // by the user -- which is why it is a question of its own and not folded
+    // into the one above. Answering yes does remove it, -y included: a clean
+    // reinstall test depends on yes meaning yes.
+    bool dropped_data = false;
     if (std::filesystem::exists(data)) {
         if (!found.empty()) {
             std::cout << "\n  The models directory holds " << found.size()
@@ -204,12 +265,55 @@ int run_uninstall(bool assume_yes) {
         // This is also where the GPU runtimes the user built live, along with
         // the llama.cpp source they were built from and the project history.
         if (assume_yes || ask("Remove the models, runtimes, history and logs too?", true)) {
+            dropped_data = true;
             if (remove_path(data)) {
                 std::cout << "  removed " << data.string() << "\n";
             }
         } else {
             std::cout << "  kept    " << data.string() << "\n";
         }
+    }
+
+    // --- what is actually left ---------------------------------------------
+    //
+    // The promise of this command is that yes to everything leaves nothing
+    // behind, and the only honest way to make that claim is to look. Only the
+    // things the user agreed to remove are checked: something kept on purpose
+    // is not litter, and reporting it as such would train people to ignore
+    // this list.
+    std::vector<std::filesystem::path> left;
+    const auto survived = [&left](const std::filesystem::path& path) {
+        std::error_code ec;
+        if (!path.empty() && std::filesystem::exists(path, ec)) {
+            left.push_back(path);
+        }
+    };
+    if (dropped_programs) {
+        survived(binary);
+        for (const std::filesystem::path& program : programs) {
+            survived(program);
+        }
+        for (const std::filesystem::path& lib : beside) {
+            survived(lib);
+        }
+        survived(libs);
+        survived(cache);
+    }
+    if (dropped_config) {
+        survived(config);
+    }
+    if (dropped_data) {
+        survived(data);
+    }
+
+    if (!left.empty()) {
+        std::cout << "\n  These could not be removed:\n";
+        for (const std::filesystem::path& path : left) {
+            std::cout << "    " << path.string() << "\n";
+        }
+        std::cout << "\n  Remove them by hand, or re-run with sudo if they are"
+                     " somewhere you cannot write.\n\n";
+        return 1;
     }
 
     std::cout << "\n  Done.";
